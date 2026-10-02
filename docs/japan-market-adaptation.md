@@ -58,6 +58,14 @@ python backend/scripts/quantjp_daily_sync.py --seed /path/to/jquants.duckdb --da
 
 本机使用 `docker-compose.local.yml` 覆盖：后端仅监听本机 8000～8003，PG 使用 55432，Redis 使用 56379；禁止训练任务暂停其他项目容器。本机初次无应用镜像，使用 WSL Linux 环境构建 CPU 镜像。`.env` 私有配置已生成，不提交或输出密码，J-Quants Key 暂为空。
 
+本机 API、engine、trade、stream 的健康检查已全部返回 200，唯一 Celery worker 与 beat 已启动。前端开发地址为 `http://127.0.0.1:3000/`。已通过 8000 网关实际登录、创建日股账户、保存委托、推进四个交易日并从 PostgreSQL 恢复账户；示例账户名为“日股本机验证（丰田 2026-09）”，两笔成交、最终现金资产 991,300 JPY、已结算现金 700,850 JPY，卖出款交收日 2026-10-02。
+
+后端重启后，示例账户仍保留两笔成交与 2026-09-30 游标；日股 readiness 实测约 0.78 秒。Redis 检查确认仅有一个 Celery BRPOP 消费连接。后端相关回归 245 项通过、2 项跳过，前端代码格式测试 12 项通过，类型检查通过。
+
+Windows 挂载目录的分区读取使用 `os.scandir`，并按不可变版本缓存日期清单；发布新版本会切换缓存键，避免逐分区 stat 导致网关首查超时。
+
+历史回放可使用当前数据。日常模拟的新行情仍需私有 `.env` 中的 `JQUANTS_API_KEY`；未配置时不进行真实在线同步。源数据截止 2026-09-30，日常账户不能通过补交已过开盘时刻的订单弥补数据延迟。
+
 ```powershell
 wsl -d Ubuntu --cd /mnt/c/Users/KONIMAS/Desktop/project/QuantMind -- docker compose -f docker-compose.yml -f docker-compose.local.yml build quantmind
 wsl -d Ubuntu --cd /mnt/c/Users/KONIMAS/Desktop/project/QuantMind -- docker compose -f docker-compose.yml -f docker-compose.local.yml up -d quantmind celery-worker celery-beat
