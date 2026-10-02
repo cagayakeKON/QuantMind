@@ -1,8 +1,16 @@
-"""Prior-close sizing shared by JP model backtests and simulated accounts."""
+"""Adapt dated JP prices and cash snapshots to the shared strategy calculator."""
 
+from dataclasses import replace
 from datetime import date
-from decimal import Decimal, ROUND_FLOOR
+from decimal import Decimal
 
+from backend.services.simulation.services.rebalance_calculator import (
+    Quote,
+    RebalanceCalculator,
+    SimulationAccount,
+    StrategyConfig,
+)
+from backend.services.simulation.services.signal_loader import SignalScore
 from backend.shared.stock_utils import StockCodeUtil
 from .account import money
 from .rules import RuleDataMissing, lot_size
@@ -19,61 +27,82 @@ def portfolio_orders(
     topk: int,
     exposure: Decimal,
     min_score: float = 0,
+    strategy: StrategyConfig | None = None,
+    day_index: int = 0,
 ) -> list[dict]:
     if not 1 <= topk <= 200 or not Decimal(0) <= exposure <= Decimal(1):
         raise ValueError("JP portfolios require 1..200 stocks and cash exposure <= 1")
-    selected = []
+    if strategy is None:
+        strategy = StrategyConfig(
+            topk=topk,
+            min_score=min_score,
+            max_position_pct=1.0,
+            enable_min_score=True,
+            deterministic_buy_order=True,
+        )
+    elif strategy.topk != topk:
+        raise ValueError("Portfolio topk must match the shared strategy configuration")
+    strategy = replace(
+        strategy,
+        custom_weights={
+            StockCodeUtil.to_suffix(symbol, market="JP"): weight
+            for symbol, weight in strategy.custom_weights.items()
+        },
+    )
+    signals = []
     seen = set()
     for row in sorted(scores, key=lambda item: (-float(item["score"]), item["symbol"])):
-        symbol = StockCodeUtil.to_prefix(row["symbol"], market="JP")
+        symbol = StockCodeUtil.to_suffix(row["symbol"], market="JP")
         if symbol in seen:
             raise ValueError("Duplicate JP model score")
         seen.add(symbol)
-        if float(row["score"]) < min_score:
-            continue
-        bar, info = bars.get(symbol), master.get(symbol)
-        if not bar or info is None or not bar.get("close") or not bar.get("volume"):
-            continue
-        if money(bar["close"]) <= 0 or money(bar["volume"]) <= 0:
-            continue
-        selected.append(symbol)
-        if len(selected) == topk:
-            break
-    held = {
-        symbol: sum(lot["quantity"] for lot in pos["lots"])
-        for symbol, pos in state["positions"].items()
-    }
-    equity = sum((money(fund["amount"]) for fund in state["cash_funds"]), Decimal(0))
-    for symbol, quantity in held.items():
+        signals.append(
+            SignalScore(symbol, float(row["score"]), signal_day, "model", "", "")
+        )
+    quotes = {}
+    for symbol, bar in bars.items():
+        close, volume = money(bar.get("close") or 0), money(bar.get("volume") or 0)
+        code = StockCodeUtil.to_suffix(symbol, market="JP")
+        quotes[code] = Quote(
+            symbol=code,
+            current_price=float(close),
+            is_suspended=close <= 0 or volume <= 0 or master.get(symbol) is None,
+        )
+    cash = sum((money(fund["amount"]) for fund in state["cash_funds"]), Decimal(0))
+    equity = cash
+    positions = {}
+    for symbol, position in state["positions"].items():
+        quantity = sum(lot["quantity"] for lot in position["lots"])
         if symbol not in bars or not bars[symbol].get("close"):
             raise RuleDataMissing(
                 f"Exact prior-close valuation required for held {symbol}"
             )
         equity += money(bars[symbol]["close"]) * quantity
-    target = {}
-    per_stock = equity * exposure / len(selected) if selected else Decimal(0)
-    for symbol in selected:
-        unit = lot_size(signal_day, master[symbol])
-        price = money(bars[symbol]["close"])
-        target[symbol] = (
-            int((per_stock / price / unit).to_integral_value(rounding=ROUND_FLOOR))
-            * unit
+        positions[StockCodeUtil.to_suffix(symbol, market="JP")] = {"volume": quantity}
+    calculator = RebalanceCalculator(
+        trading_unit=lambda code: lot_size(
+            signal_day, master[StockCodeUtil.to_prefix(code, market="JP")]
         )
-    orders = []
-    # Sell first; the execution ledger decides whether those proceeds can fund buys.
-    for side in ("SELL", "BUY"):
-        for symbol in sorted(set(held) | set(target)):
-            delta = target.get(symbol, 0) - held.get(symbol, 0)
-            if (side == "SELL" and delta < 0) or (side == "BUY" and delta > 0):
-                orders.append(
-                    {
-                        "order_id": f"model:{signal_day}:{symbol}:{side}",
-                        "symbol": symbol,
-                        "side": side,
-                        "quantity": abs(delta),
-                        "signal_date": str(signal_day),
-                        "execution_date": str(execution_day),
-                        "order_type": "MARKET",
-                    }
-                )
-    return orders
+    )
+    orders = calculator.calculate(
+        signals,
+        strategy,
+        quotes,
+        SimulationAccount(float(cash), float(equity * exposure), positions),
+        day_index=day_index,
+    )
+    result = []
+    for order in orders:
+        symbol = StockCodeUtil.to_prefix(order.symbol, market="JP")
+        result.append(
+            {
+                "order_id": f"model:{signal_day}:{symbol}:{order.side}",
+                "symbol": symbol,
+                "side": order.side,
+                "quantity": order.quantity,
+                "signal_date": str(signal_day),
+                "execution_date": str(execution_day),
+                "order_type": "MARKET",
+            }
+        )
+    return result

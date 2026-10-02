@@ -6,6 +6,7 @@ Rebalance Calculator - 调仓计算器
 
 import logging
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
@@ -96,6 +97,10 @@ class RebalanceCalculator:
     4. 计算目标持仓金额 → 目标股数
     5. 计算买卖指令（先卖后买）
     """
+
+    def __init__(self, *, trading_unit: Callable[[str], int] | None = None):
+        # A dated market adapter may supply units without changing legacy defaults.
+        self._trading_unit = trading_unit
 
     def calculate(
         self,
@@ -498,9 +503,13 @@ class RebalanceCalculator:
                 out[sym] += share
         return out
 
-    @staticmethod
-    def _lot_for(symbol: str, strategy: StrategyConfig) -> int:
+    def _lot_for(self, symbol: str, strategy: StrategyConfig) -> int:
         """CN 按板块手数（科创板 200），其它市场用策略默认 lot_size。"""
+        if self._trading_unit is not None:
+            unit = self._trading_unit(symbol)
+            if isinstance(unit, bool) or not isinstance(unit, int) or unit <= 0:
+                raise ValueError("Market adapter must supply a positive trading unit")
+            return unit
         return max(1, int(lot_size_for_symbol(symbol) or strategy.lot_size or 100))
 
     def _floor_to_lot(self, quantity: float, lot_size: int = 100) -> int:

@@ -53,7 +53,8 @@ def model_data(snapshot, tmp_path, monkeypatch):
         model_id="jp-test",
         start_date="2026-09-29",
         end_date="2026-09-29",
-        initial_capital=20000,
+        initial_capital=100000,
+        strategy_params={"topk": 5},
         benchmark="TOPIX",
         risk_free_rate=0,
         jp_slippage_bps=0,
@@ -77,6 +78,25 @@ def test_real_raw_fills_dated_settlement_and_topix_report(model_data):
     assert [row["date"] for row in result.equity_curve] == ["2026-09-28", "2026-09-29"]
 
 
+def test_standard_topk_strategy_uses_shared_calculator(model_data):
+    request, model, meta = model_data
+    request.strategy_type = "TopkDropout"
+    result = backtest.run_cash_backtest(request, model, meta)
+    assert result.config["strategy_type"] == "TopkDropout"
+    assert result.total_trades == 1
+    # One available score occupies one of the five slots, rather than all capital.
+    assert result.trades[0]["quantity"] == 100
+
+
+def test_standard_topk_honors_shared_position_cap(model_data):
+    request, model, meta = model_data
+    request.strategy_type = "TopkDropout"
+    request.strategy_params.max_weight = 0.05
+    result = backtest.run_cash_backtest(request, model, meta)
+    assert result.total_trades == 0
+    assert result.equity_curve[-1]["value"] == request.initial_capital
+
+
 @pytest.mark.asyncio
 async def test_research_jp_reads_dated_publication_without_cn_table(model_data):
     from backend.services.api.routers import research_service as research
@@ -93,8 +113,8 @@ async def test_research_jp_reads_dated_publication_without_cn_table(model_data):
 
 def test_no_training_split_signals_or_cn_strategy_fallback(model_data):
     request, model, meta = model_data
-    request.strategy_type = "TopkDropout"
-    with pytest.raises(ValueError, match="jp_cash_topk"):
+    request.strategy_type = "CustomStrategy"
+    with pytest.raises(ValueError, match="supported shared portfolio strategy"):
         backtest.run_cash_backtest(request, model, meta)
     request.strategy_type = "jp_cash_topk"
     with pytest.raises(ValueError, match="availability"):
@@ -123,12 +143,12 @@ def test_prior_close_sizing_sells_first_without_using_future_open():
         master,
         date(2026, 9, 28),
         date(2026, 9, 29),
-        topk=5,
+        topk=2,
         exposure=backtest.money("0.95"),
     )
     assert [(row["side"], row["symbol"], row["quantity"]) for row in orders] == [
         ("SELL", "JP67580", 100),
-        ("BUY", "JP72030", 300),
+        ("BUY", "JP72030", 100),
     ]
     assert all(row["signal_date"] == "2026-09-28" for row in orders)
 

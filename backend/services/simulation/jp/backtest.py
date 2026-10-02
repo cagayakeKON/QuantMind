@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestResult
+from backend.services.simulation.services.rebalance_calculator import StrategyConfig
 from backend.shared.utc_datetime import utc_now
 from .account import JPCashAccount, money
 from .model_portfolio import portfolio_orders
@@ -26,8 +27,10 @@ from .service import execution_data
 
 def run_cash_backtest(request, model_dir: Path, meta: dict) -> QlibBacktestResult:
     started = time.monotonic()
-    if request.strategy_type != "jp_cash_topk":
-        raise ValueError("JP supports the jp_cash_topk cash portfolio strategy")
+    if request.strategy_type not in {"jp_cash_topk", "TopkDropout"}:
+        raise ValueError(
+            "JP cash execution requires a supported shared portfolio strategy"
+        )
     if request.buy_cost is not None or request.sell_cost is not None:
         raise ValueError(
             "Use jp_commission_rate and jp_slippage_bps for JP execution costs"
@@ -133,7 +136,19 @@ def run_cash_backtest(request, model_dir: Path, meta: dict) -> QlibBacktestResul
             "benchmark_value": float(request.initial_capital),
         }
     ]
-    for day in sessions:
+    params = request.strategy_params
+    strategy = StrategyConfig(
+        topk=params.topk,
+        min_score=params.min_score,
+        max_position_pct=params.max_weight,
+        enable_min_score=True,
+        deterministic_buy_order=True,
+        n_drop=params.n_drop if request.strategy_type == "TopkDropout" else 0,
+        rebalance_days=params.rebalance_days
+        if request.strategy_type == "TopkDropout"
+        else 1,
+    )
+    for day_index, day in enumerate(sessions):
         if previous not in scores:
             raise RuleDataMissing(
                 f"Exact JP test-split signals are missing on {previous}"
@@ -154,6 +169,8 @@ def run_cash_backtest(request, model_dir: Path, meta: dict) -> QlibBacktestResul
             topk=request.strategy_params.topk,
             exposure=money(request.strategy_total_position),
             min_score=request.strategy_params.min_score,
+            strategy=strategy,
+            day_index=day_index,
         )
         needed = sorted(
             set(account.state["positions"]) | {order["symbol"] for order in orders}

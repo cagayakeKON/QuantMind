@@ -43,7 +43,7 @@ async def account(db):
         "tenant-a",
         mode="replay",
         name="Model JP",
-        initial_cash=20000,
+        initial_cash=100000,
         start_date=date(2026, 9, 29),
         end_date=date(2026, 9, 30),
         commission_rate=0,
