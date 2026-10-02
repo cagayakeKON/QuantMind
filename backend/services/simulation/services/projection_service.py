@@ -8,17 +8,16 @@ import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.simulation.models.account import SimulationAccount
 from backend.services.simulation.models.position_lot import SimulationPositionLot
+from backend.services.simulation.services.market_rules import infer_market, rules_for
+from backend.shared.markets import market_definition
+from backend.shared.simulation_account_keys import ledger_account_id
 from backend.shared.simulation_position_keys import build_position_key
-
-_SH_TZ = ZoneInfo("Asia/Shanghai")
-
 
 @dataclass
 class ProjectionSnapshot:
@@ -31,8 +30,10 @@ class SimulationProjectionService:
         self.db = db
 
     @staticmethod
-    def build_account_id(tenant_id: str, user_id: str | int) -> str:
-        return f"sim:{str(tenant_id or 'default').strip() or 'default'}:{str(user_id).strip()}"
+    def build_account_id(
+        tenant_id: str, user_id: str | int, market: str = "CN"
+    ) -> str:
+        return ledger_account_id(tenant_id, user_id, market)
 
     @staticmethod
     def merge_preserved(
@@ -171,8 +172,9 @@ class SimulationProjectionService:
         tenant_id: str,
         user_id: str | int,
         latest_price_loader,
+        market: str = "CN",
     ) -> ProjectionSnapshot:
-        account_id = self.build_account_id(tenant_id, user_id)
+        account_id = self.build_account_id(tenant_id, user_id, market)
         account = await self.db.get(SimulationAccount, account_id)
         positions = await self._load_positions_from_lots(
             account_id=account_id,
@@ -222,9 +224,7 @@ class SimulationProjectionService:
             price_map[symbol] = float(value) if isinstance(value, (int, float)) else 0.0
 
         grouped: dict[tuple[str, str], dict[str, float]] = {}
-        # T+1 判定按上海交易日（与 load_available_quantities / 撮合侧一致），
-        # 不能用 date.today()（依赖进程本地时区，容器非上海时凌晨会差一天）。
-        as_of_date = datetime.now(_SH_TZ).date()
+        now = datetime.now(timezone.utc)
         for lot in lots:
             normalized_symbol = str(lot.symbol or "").strip().upper()
             side = str(lot.position_side or "long").strip().lower()
@@ -246,7 +246,9 @@ class SimulationProjectionService:
             )
             bucket["available_quantity"] += self._lot_available_quantity(
                 lot,
-                as_of_date=as_of_date,
+                as_of_date=now.astimezone(
+                    market_definition(infer_market(normalized_symbol)).zone
+                ).date(),
             )
 
         positions: dict[str, dict[str, float]] = {}
@@ -287,8 +289,9 @@ class SimulationProjectionService:
         symbol: str,
         position_side: str = "long",
         as_of_date: date | None = None,
+        market: str = "CN",
     ) -> float:
-        account_id = self.build_account_id(tenant_id, user_id)
+        account_id = self.build_account_id(tenant_id, user_id, market)
         normalized_symbol = str(symbol or "").strip().upper()
         normalized_side = str(position_side or "long").strip().lower()
         stmt = (
@@ -304,7 +307,7 @@ class SimulationProjectionService:
         lots = list((await self.db.execute(stmt)).scalars().all())
         if not lots:
             return 0.0
-        target_date = as_of_date or date.today()
+        target_date = as_of_date or datetime.now(market_definition(market).zone).date()
         return round(
             sum(
                 self._lot_available_quantity(lot, as_of_date=target_date)
@@ -319,16 +322,17 @@ class SimulationProjectionService:
         tenant_id: str,
         user_id: str | int,
         as_of_date: date | None = None,
+        market: str = "CN",
     ) -> dict[tuple[str, str], float]:
         """Return ledger-derived sellable quantities grouped by symbol and side."""
-        account_id = self.build_account_id(tenant_id, user_id)
+        account_id = self.build_account_id(tenant_id, user_id, market)
         stmt = select(SimulationPositionLot).where(
             SimulationPositionLot.account_id == account_id,
             SimulationPositionLot.status == "open",
             SimulationPositionLot.quantity_remaining > 0,
         )
         lots = list((await self.db.execute(stmt)).scalars().all())
-        target_date = as_of_date or datetime.now(_SH_TZ).date()
+        target_date = as_of_date or datetime.now(market_definition(market).zone).date()
         quantities: dict[tuple[str, str], float] = {}
         for lot in lots:
             symbol = str(lot.symbol or "").strip().upper()
@@ -352,7 +356,8 @@ class SimulationProjectionService:
         if qty <= 0:
             return 0.0
         side = str(lot.position_side or "long").strip().lower()
-        if side != "long":
+        market = infer_market(str(getattr(lot, "symbol", "") or ""))
+        if side != "long" or not rules_for(market).t_plus_1:
             return qty
         open_dt = lot.open_date
         if isinstance(open_dt, datetime):
@@ -360,7 +365,7 @@ class SimulationProjectionService:
             # exchange-local trade date, not UTC's calendar date.
             if open_dt.tzinfo is None:
                 open_dt = open_dt.replace(tzinfo=timezone.utc)
-            open_trade_date = open_dt.astimezone(_SH_TZ).date()
+            open_trade_date = open_dt.astimezone(market_definition(market).zone).date()
             if open_trade_date >= as_of_date:
                 return 0.0
         return qty

@@ -23,18 +23,9 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from enum import Enum
 
+from backend.shared.markets import Market, normalize_market
 from backend.shared.stock_utils import StockCodeUtil
-
-
-class Market(str, Enum):
-    CN = "CN"
-    HK = "HK"
-    US = "US"
-    JP = "JP"
-    FUTURES = "FUTURES"
-    CRYPTO = "CRYPTO"
 
 
 _MARKET_CURRENCIES: dict[Market, str] = {
@@ -163,18 +154,6 @@ RULES_BY_MARKET: dict[Market, MarketTradingRules] = {
 def rules_for(market: Market | str | None) -> MarketTradingRules:
     market = normalize_market(market)
     return RULES_BY_MARKET[market]
-
-
-def normalize_market(market: Market | str | None) -> Market:
-    if isinstance(market, Market):
-        return market
-    text = str(market or "").upper().strip()
-    if text in {"", "CN", "A", "A_SHARE", "SSE"}:
-        return Market.CN
-    try:
-        return Market(text)
-    except ValueError:
-        return Market.CN
 
 
 _HK_RE = re.compile(r"^\d{1,5}\.HK$", re.IGNORECASE)

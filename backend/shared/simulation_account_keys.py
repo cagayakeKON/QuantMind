@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from backend.shared.markets import normalize_market as canonical_market
+
 ACCOUNT_KEY_PREFIX = "simulation:account:"
 SETTINGS_KEY_PREFIX = "simulation:settings:"
 
@@ -25,11 +27,17 @@ def normalize_tenant(tenant_id: str | None) -> str:
 
 
 def normalize_market(market: str | None) -> str:
-    """CN（含 A/A_SHARE/空）归一为 CN，其余大写原样返回。"""
-    market_upper = str(market or "CN").upper().strip()
-    if market_upper in {"", "CN", "A", "A_SHARE"}:
-        return "CN"
-    return market_upper
+    """Resolve the shared market contract; explicit unknown values fail closed."""
+    return canonical_market(market).value
+
+
+def ledger_account_id(
+    tenant_id: str | None, user_id: object, market: str | None = "CN"
+) -> str:
+    """Default PG account identity, preserving existing CN account IDs."""
+    base = f"sim:{normalize_tenant(tenant_id)}:{str(user_id).strip()}"
+    market_code = normalize_market(market)
+    return base if market_code == "CN" else f"{base}:{market_code}"
 
 
 def account_key(tenant_id: str | None, user_id: object, market: str | None = "CN") -> str:
@@ -89,8 +97,6 @@ def _user_id_aliases(user_id: object) -> list[str]:
         as_int = str(int(raw))
         _add(as_int)
         _add(as_int.zfill(8))
-    else:
-        _add("0")
     return aliases or ["0"]
 
 
@@ -170,7 +176,10 @@ def parse_account_key(key: str) -> tuple[str, str, str] | None:
     user = parts[3].strip()
     if not tenant or not user:
         return None
-    market = normalize_market(parts[4]) if len(parts) == 5 else "CN"
+    try:
+        market = normalize_market(parts[4]) if len(parts) == 5 else "CN"
+    except ValueError:
+        return None
     return tenant, user, market
 
 
