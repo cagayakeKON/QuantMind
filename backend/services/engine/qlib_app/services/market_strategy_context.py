@@ -15,6 +15,7 @@ class _IntervalSignal(Signal):
     def __init__(self, inner, start_date, end_date):
         self.inner = inner
         self.start, self.end = pd.Timestamp(start_date), pd.Timestamp(end_date)
+        self.analysis_history = {}
 
     def get_signal(self, start_time=None, end_time=None):
         start = (
@@ -23,7 +24,10 @@ class _IntervalSignal(Signal):
         end = self.end if end_time is None else pd.Timestamp(end_time).normalize()
         if end < self.start or start > self.end:
             return None
-        return self.inner.get_signal(max(start, self.start), min(end, self.end))
+        result = self.inner.get_signal(max(start, self.start), min(end, self.end))
+        if isinstance(result, (pd.Series, pd.DataFrame)) and not result.empty:
+            self.analysis_history[max(start, self.start)] = result.copy()
+        return result
 
 
 @dataclass(frozen=True)

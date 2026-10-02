@@ -259,12 +259,17 @@ def test_native_strategy_continues_across_sessions_with_actual_ledger_state(
     ]
     assert result.total_return == 0
     assert all(fill["quantity"] == 900 for fill in result.trades)
+    final_positions = [
+        row for row in result.positions if row["date"] == request.end_date
+    ]
+    assert result.positions[0]["date"] == request.start_date
+    assert result.positions[0]["amount"] == 900
     if fills == 2:
         assert result.trades[1]["side"] == "SELL"
         assert result.trades[1]["settlement_date"] == "2026-10-02"
-        assert result.positions == []
+        assert final_positions == []
     else:
-        assert sum(lot["quantity"] for lot in result.positions[0]["lots"]) == 900
+        assert sum(row["amount"] for row in final_positions) == 900
 
 
 def test_code_factory_is_not_executed_without_isolated_market_provider():

@@ -460,9 +460,14 @@ def run_cash_backtest(
         execution_time=time.monotonic() - started,
     )
     if request.strategy_type != "jp_cash_topk":
-        from .analysis_data import public_report_metrics
+        from .analysis_data import public_factor_metrics, public_report_metrics
 
         report = report.model_copy(update=public_report_metrics(report, request))
+        report = report.model_copy(
+            update=public_factor_metrics(
+                report, request, strategy_runner.analysis_signals(), strategy_context
+            )
+        )
     return report
 
 
@@ -510,25 +515,11 @@ async def execute_backtest(request):
     _validate_pool(pool)
     request.pool_checksum = pool.checksum
     request.pool_warnings = list(pool.warnings)
-    from backend.services.engine.qlib_app.services.strategy_builder import (
-        StrategyFactory,
-        CustomStrategyBuilder,
-        StopLossBuilder,
-        AdaptiveDriftBuilder,
-    )
     from backend.services.engine.qlib_app.services.isolated_strategy_execution import (
         execute_isolated_strategy,
     )
 
-    builder, fallback, _ = StrategyFactory.resolve_builder(request.strategy_type)
-    if request.strategy_type != "jp_cash_topk" and (
-        metric is not None
-        or request.dynamic_position
-        or fallback
-        or isinstance(
-            builder, (CustomStrategyBuilder, StopLossBuilder, AdaptiveDriftBuilder)
-        )
-    ):
+    if request.strategy_type != "jp_cash_topk":
         return await execute_isolated_strategy(request, model_dir, meta, pool)
     result = await asyncio.to_thread(
         run_cash_backtest, request, model_dir, meta, pool_snapshot=pool

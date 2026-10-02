@@ -108,6 +108,47 @@ def public_trades(fills):
     ]
 
 
+def public_factor_metrics(result, request, pred, strategy_context):
+    """Offline labels use the executed provider and the original factor algorithms."""
+    from backend.services.engine.qlib_app.services.factor_analysis_service import (
+        FactorAnalysisService,
+    )
+    from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
+
+    if pred is None or pred.empty:
+        return {"factor_metrics": None, "stratified_returns": None}
+    if strategy_context is None:
+        return {"factor_metrics": None, "stratified_returns": None}
+    if strategy_context.spec.data_version != recorded_version(result):
+        raise ValueError("Factor analysis provider does not match the recorded version")
+    if strategy_context.execution_day != pd.Timestamp(request.end_date):
+        raise ValueError("Factor analysis requires the completed execution interval")
+    instruments = pred.index.get_level_values("instrument").unique().tolist()
+    # This is post-execution evaluation, not a strategy data read. The causal
+    # features() guard stays intact; Ref(close, -1) is the original report label.
+    label = strategy_context._read_provider_features(
+        instruments,
+        [strategy_context.mapper(code) for code in instruments],
+        ["Ref($close, -1)/$close - 1"],
+        request.start_date,
+        request.end_date,
+    )
+    if label is None or label.empty:
+        return {"factor_metrics": None, "stratified_returns": None}
+    label = label.reorder_levels(pred.index.names)
+    metrics = FactorAnalysisService.calculate_ic_metrics(pred, label)
+    groups = FactorAnalysisService.calculate_stratified_returns(pred, label)
+    return {
+        "factor_metrics": {
+            key: RiskAnalyzer._clean_nan(value) for key, value in metrics.items()
+        },
+        "stratified_returns": [
+            {key: RiskAnalyzer._clean_nan(value) for key, value in row.items()}
+            for row in groups
+        ],
+    }
+
+
 def public_report_metrics(result, request):
     """Map cash valuations to the original public report metric algorithms."""
     from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer

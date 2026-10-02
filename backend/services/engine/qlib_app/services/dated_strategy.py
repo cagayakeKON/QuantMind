@@ -153,10 +153,12 @@ class _SnapshotSignal(Signal):
     def __init__(self):
         self.day = None
         self.scores = None
+        self.analysis_history = {}
 
     def get_signal(self, start_time=None, end_time=None):
         if pd.Timestamp(start_time).normalize() != self.day:
             raise ValueError("Strategy requested signals outside the dated snapshot")
+        self.analysis_history[self.day] = self.scores.copy()
         return self.scores.copy()
 
 
@@ -333,6 +335,23 @@ class DatedStrategyRunner:
             self.strategy_context.assert_reads_succeeded()
         self.orders = [order for order in decision.get_decision() if order.amount != 0]
         return self.orders
+
+    def analysis_signals(self):
+        """Only signals actually requested by the strategy enter the report."""
+        from .market_strategy_context import _IntervalSignal
+
+        source = (
+            self.signal
+            if self.uses_snapshot_signal
+            else getattr(self.strategy, "signal", None)
+        )
+        if source is not self.signal and not isinstance(source, _IntervalSignal):
+            return None
+        history = source.analysis_history
+        if not history:
+            return None
+        frame = pd.concat(history, names=["datetime", "instrument"])
+        return frame.to_frame("score") if isinstance(frame, pd.Series) else frame
 
     def record_fills(self, fills, *, post_snapshot=None):
         """Supply actual fills, including actual costs, to the strategy's next step."""

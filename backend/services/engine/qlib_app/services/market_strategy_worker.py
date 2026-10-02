@@ -7,11 +7,28 @@ from pathlib import Path
 import sys
 
 
+def _restore_request(fields):
+    """Restore the parent's request, including its existing optimizer mutations.
+
+    The common API validates initial requests. Public optimizers then assign
+    candidate strategy parameters without revalidating that nested model. This
+    private transport must preserve those candidates rather than impose a second
+    initial-request validation. Top-level fields retain their schema validation.
+    """
+    from ..schemas.backtest import QlibBacktestRequest, QlibStrategyParams
+
+    fields = dict(fields)
+    if isinstance(fields.get("strategy_params"), dict):
+        fields["strategy_params"] = QlibStrategyParams.model_construct(
+            **fields["strategy_params"]
+        )
+    return QlibBacktestRequest.model_validate(fields)
+
+
 def main():
     payload = json.loads(sys.stdin.read())
     try:
         with redirect_stdout(sys.stderr):
-            from ..schemas.backtest import QlibBacktestRequest
             from .backtest_execution import resolve_market_execution
             from .market_strategy_context import (
                 MarketStrategyContext,
@@ -19,7 +36,7 @@ def main():
             )
             from backend.shared.stock_pool.schemas import PoolSnapshot
 
-            request = QlibBacktestRequest.model_validate(payload["request"])
+            request = _restore_request(payload["request"])
             execution = resolve_market_execution(request)
             if execution is None or not execution.synchronous_runner:
                 raise ValueError("No synchronous market adapter is registered")
