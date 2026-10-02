@@ -27,12 +27,6 @@ interface AuthRequestConfig extends AxiosRequestConfig {
  */
 class AuthService {
   private axiosInstance: AxiosInstance;
-  private readonly rawBaseURL = resolveWebSafeServiceBase(
-    (import.meta as any).env?.VITE_USER_API_URL,
-    SERVICE_ENDPOINTS.USER_SERVICE,
-  );
-  private readonly baseURL: string;
-  private readonly apiPrefix: string;
   private readonly disableAuth: boolean;
   private refreshRetryCount = 0;
   private readonly maxRefreshRetries = 2;
@@ -41,9 +35,6 @@ class AuthService {
 
   constructor() {
     this.disableAuth = String((import.meta as any).env?.VITE_DISABLE_AUTH || '').toLowerCase() === 'true';
-    const { baseURL, apiPrefix } = this.normalizeBaseURL(this.rawBaseURL);
-    this.baseURL = baseURL;
-    this.apiPrefix = apiPrefix;
     this.axiosInstance = axios.create({
       timeout: 30000,
       headers: {
@@ -83,6 +74,9 @@ class AuthService {
    * 规范化基础URL，分离域名和路径前缀
    */
   private normalizeBaseURL(url: string): { baseURL: string; apiPrefix: string } {
+    if (url.startsWith('/') && !url.startsWith('//')) {
+      return { baseURL: '', apiPrefix: url.replace(/\/+$/, '') };
+    }
     try {
       const parsed = new URL(url);
       let apiPrefix = parsed.pathname.replace(/\/$/, '');
@@ -92,7 +86,7 @@ class AuthService {
       parsed.hash = '';
       let baseURL = parsed.toString();
       if (baseURL.endsWith('/')) baseURL = baseURL.slice(0, -1);
-      return { baseURL, apiPrefix };
+      return { baseURL, apiPrefix: apiPrefix || '/api/v1' };
     } catch {
       return { baseURL: url.replace(/\/$/, ''), apiPrefix: '' };
     }
@@ -100,7 +94,7 @@ class AuthService {
 
   private getRuntimeBaseURL(): string {
     return this.normalizeBaseURL(resolveWebSafeServiceBase(
-      (import.meta as any).env?.VITE_USER_API_URL,
+      import.meta.env.VITE_USER_API_URL,
       SERVICE_ENDPOINTS.USER_SERVICE,
     )).baseURL;
   }
@@ -199,8 +193,12 @@ class AuthService {
     const normalized = path.startsWith('/') ? path : `/${path}`;
     // 如果是非认证类接口（如 /api/**），不追加认证前缀
     if (normalized.startsWith('/api/')) return normalized;
-    if (!this.apiPrefix) return normalized;
-    return `${this.apiPrefix}${normalized}`.replace(/\/{2,}/g, '/');
+    const { apiPrefix } = this.normalizeBaseURL(resolveWebSafeServiceBase(
+      import.meta.env.VITE_USER_API_URL,
+      SERVICE_ENDPOINTS.USER_SERVICE,
+    ));
+    if (!apiPrefix) return normalized;
+    return `${apiPrefix}${normalized}`.replace(/\/{2,}/g, '/');
   }
 
   /**
@@ -210,7 +208,7 @@ class AuthService {
     // 请求拦截器
     this.axiosInstance.interceptors.request.use(
       (config) => {
-        console.log(`[Auth Request] ${config.method?.toUpperCase()} ${config.url}`, config.data);
+        console.log(`[Auth Request] ${config.method?.toUpperCase()} ${config.url}`);
         return config;
       },
       (error) => {
@@ -222,7 +220,7 @@ class AuthService {
     // 响应拦截器
     this.axiosInstance.interceptors.response.use(
       (response: AxiosResponse) => {
-        console.log(`[Auth Response] ${response.config.url}`, response.data);
+        console.log(`[Auth Response] ${response.config.url}`, response.status);
         return response;
       },
       async (error) => {

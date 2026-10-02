@@ -4,6 +4,7 @@
 const isElectron = typeof window !== 'undefined' && Boolean((window as any).process?.type);
 
 const electronAPI = {
+  __quantmindWebCompat: true,
   // 平台信息
   getPlatform: () => isElectron ? (window as any).electronAPI?.getPlatform?.() : 'web',
   getSystemVersion: () => isElectron ? (window as any).electronAPI?.getSystemVersion?.() : navigator.userAgent,
