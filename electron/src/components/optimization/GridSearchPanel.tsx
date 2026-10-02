@@ -12,6 +12,9 @@ import { OptimizationProgress, OptimizationTask } from './OptimizationProgress';
 import { OptimizationResults } from './OptimizationResults';
 import { ParameterGrid, GridSearchConfig } from './ParameterGrid';
 import { Modal } from 'antd';
+import { useAppSelector } from '../../store';
+import { selectCurrentMarket } from '../../store/slices/uiSlice';
+import { getMarketConfig } from '../../config/marketConfig';
 
 type GridMetrics = {
   annual_return?: number;
@@ -214,6 +217,11 @@ function deriveDisplaySummary(
 }
 
 export const GridSearchPanel: React.FC = () => {
+  const currentMarket = useAppSelector(selectCurrentMarket);
+  const marketConfig = getMarketConfig(currentMarket);
+  const marketContext = marketConfig.backtest;
+  const [coverage, setCoverage] = useState<{ market: string; startDate: string; endDate: string } | null>(null);
+  const [coverageError, setCoverageError] = useState('');
   const [isRunning, setIsRunning] = useState(false);
   const [tasks, setTasks] = useState<OptimizationTask[]>([]);
   const [config, setConfig] = useState<GridSearchConfig | null>(null);
@@ -240,9 +248,33 @@ export const GridSearchPanel: React.FC = () => {
   const isAbortedRef = useRef(false);
   const selectedOptimizationIdRef = useRef<string | null>(null);
   const logMessagesRef = useRef<string[]>([]);
+  const submittedMarketRef = useRef<string | undefined>(undefined);
   const updateBacktestConfig = useBacktestCenterStore((state) => state.updateBacktestConfig);
   const setActiveModule = useBacktestCenterStore((state) => state.setActiveModule);
   const setQuickBacktestPrefill = useBacktestCenterStore((state) => state.setQuickBacktestPrefill);
+
+  useEffect(() => {
+    if (!marketContext) return;
+    let cancelled = false;
+    setCoverage(null);
+    setCoverageError('');
+    const loadCoverage = async () => {
+      try {
+        const { backtestService } = await import('../../services/backtestService');
+        const result = await backtestService.getQlibDataRange(marketContext.market);
+        if (cancelled) return;
+        if (!result.exists || !result.min_date || !result.max_date) {
+          setCoverageError('当前市场没有可用的日线数据覆盖范围');
+          return;
+        }
+        setCoverage({ market: marketContext.market, startDate: result.min_date, endDate: result.max_date });
+      } catch (error) {
+        if (!cancelled) setCoverageError(error instanceof Error ? error.message : '读取市场数据范围失败');
+      }
+    };
+    void loadCoverage();
+    return () => { cancelled = true; };
+  }, [marketContext]);
 
   const getCurrentUserId = () => {
     const storedUser = authService.getStoredUser() as any;
@@ -412,6 +444,7 @@ export const GridSearchPanel: React.FC = () => {
   );
 
   const runOptimization = async (gridConfig: GridSearchConfig) => {
+    submittedMarketRef.current = marketContext?.market;
     setGlobalError('');
     setConfig(gridConfig);
     setIsRunning(true);
@@ -464,10 +497,10 @@ export const GridSearchPanel: React.FC = () => {
           ],
           optimization_target: gridConfig.metric,
           max_parallel: 3,
-          commission: 0.00025,
-          min_commission: 5,
-          stamp_duty: 0.0005,
-          transfer_fee: 0.00001,
+          ...(marketContext ? { market: marketContext.market } : {
+            commission: 0.00025, min_commission: 5,
+            stamp_duty: 0.0005, transfer_fee: 0.00001,
+          }),
         },
         {
           signal: abortControllerRef.current.signal,
@@ -559,6 +592,11 @@ export const GridSearchPanel: React.FC = () => {
 
   const handleApplyBestParams = (params: { topk: number; n_drop: number }) => {
     if (!config) return;
+    const sourceMarket = selectedDetail ? selectedDetail.base_request?.market : submittedMarketRef.current;
+    if ((marketContext || (sourceMarket && getMarketConfig(sourceMarket).backtest)) && sourceMarket !== currentMarket) {
+      setGlobalError('请先切换到该优化记录所属市场，再应用参数');
+      return;
+    }
     updateBacktestConfig({
       start_date: config.dateRange.startDate,
       end_date: config.dateRange.endDate,
@@ -691,10 +729,13 @@ export const GridSearchPanel: React.FC = () => {
         )}
 
         <ParameterGrid
+          key={marketContext?.market || 'legacy'}
           onStartOptimization={runOptimization}
           isRunning={isRunning}
           workerReady={workerReady === true}
           workerMessage={workerHint}
+          dataCoverage={marketContext && coverage?.market === marketContext.market ? coverage : undefined}
+          dataMessage={marketContext && coverage?.market !== marketContext.market ? (coverageError || '正在读取当前市场的数据覆盖范围') : ''}
         />
 
         {isRunning && (

@@ -33,9 +33,11 @@ interface Props {
   isRunning: boolean;
   workerReady?: boolean;
   workerMessage?: string;
+  dataCoverage?: { startDate: string; endDate: string };
+  dataMessage?: string;
 }
 
-export const ParameterGrid: React.FC<Props> = ({ onStartOptimization, isRunning, workerReady = true, workerMessage = '' }) => {
+export const ParameterGrid: React.FC<Props> = ({ onStartOptimization, isRunning, workerReady = true, workerMessage = '', dataCoverage, dataMessage = '' }) => {
   const [topkMin, setTopkMin] = useState(20);
   const [topkMax, setTopkMax] = useState(60);
   const [topkStep, setTopkStep] = useState(10);
@@ -52,11 +54,13 @@ export const ParameterGrid: React.FC<Props> = ({ onStartOptimization, isRunning,
   ]);
 
   const [error, setError] = useState<string>('');
+  const dataStart = dataCoverage?.startDate ?? BACKTEST_CONFIG.QLIB.DATA_START;
+  const dataEnd = dataCoverage?.endDate ?? BACKTEST_CONFIG.QLIB.DATA_END;
 
   const disabledDate = (current: dayjs.Dayjs) => {
     // 限制在 2023-01-01 到 2025-12-30
-    const start = dayjs(BACKTEST_CONFIG.QLIB.DATA_START);
-    const end = dayjs(BACKTEST_CONFIG.QLIB.DATA_END);
+    const start = dayjs(dataStart);
+    const end = dayjs(dataEnd);
     return current && (current < start.startOf('day') || current > end.endOf('day'));
   };
 
@@ -93,8 +97,9 @@ export const ParameterGrid: React.FC<Props> = ({ onStartOptimization, isRunning,
     // 显式校验边界
     const selectedStart = dateRange[0].format('YYYY-MM-DD');
     const selectedEnd = dateRange[1].format('YYYY-MM-DD');
-    if (selectedStart < BACKTEST_CONFIG.QLIB.DATA_START || selectedEnd > BACKTEST_CONFIG.QLIB.DATA_END) {
-      return `日期范围超出数据覆盖范围 (${BACKTEST_CONFIG.QLIB.DATA_START} 至 ${BACKTEST_CONFIG.QLIB.DATA_END})`;
+    if (dataMessage) return dataMessage;
+    if (selectedStart < dataStart || selectedEnd > dataEnd) {
+      return `日期范围超出数据覆盖范围 (${dataStart} 至 ${dataEnd})`;
     }
 
     if (!workerReady) return workerMessage || '引擎队列不可用，暂时无法启动参数优化';
@@ -312,7 +317,7 @@ export const ParameterGrid: React.FC<Props> = ({ onStartOptimization, isRunning,
             style={{ padding: '8px 12px' }}
           />
           <p className="text-xs text-amber-700 mt-1">
-            * 系统完整数据覆盖范围: {BACKTEST_CONFIG.QLIB.DATA_START} 至 {BACKTEST_CONFIG.QLIB.DATA_END}
+            {dataMessage || `* 系统完整数据覆盖范围: ${dataStart} 至 ${dataEnd}`}
           </p>
         </div>
       </div>

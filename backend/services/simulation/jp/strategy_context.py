@@ -19,6 +19,11 @@ def to_provider_instrument(code):
     return StockCodeUtil.to_qlib(code, market="JP")
 
 
+def prepare_batch_request(request):
+    """All trials use the same immutable daily publication, including retries."""
+    request.jp_data_version = execution_data(request.jp_data_version).hub.data_dir.name
+
+
 def prepare_context(request):
     data = execution_data(request.jp_data_version)
     root = _resolve_quantjp_data_dir()

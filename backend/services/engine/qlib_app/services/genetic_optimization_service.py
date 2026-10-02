@@ -14,6 +14,9 @@ from backend.services.engine.qlib_app.schemas.backtest import (
 from backend.services.engine.qlib_app.services.backtest_service import (
     QlibBacktestService,
 )
+from backend.services.engine.qlib_app.services.backtest_execution import (
+    prepare_market_batch_request,
+)
 from backend.services.engine.qlib_app.services.optimization_service import (
     OptimizationCancelledError,
 )
@@ -54,6 +57,8 @@ class GeneticOptimizationService:
         start_time = time.time()
         # 使用前端传入的 optimization_id
         optimization_id = request.optimization_id
+
+        await prepare_market_batch_request(request.base_request)
 
         task_log = StructuredTaskLogger(
             logger,

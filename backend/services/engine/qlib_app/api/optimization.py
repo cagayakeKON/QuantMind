@@ -20,6 +20,10 @@ from backend.services.engine.qlib_app.schemas.backtest import (
 from backend.services.engine.qlib_app.services.genetic_optimization_service import GeneticOptimizationService
 from backend.services.engine.qlib_app.services.optimization_persistence import OptimizationPersistence
 from backend.services.engine.qlib_app.services.optimization_service import OptimizationService
+from backend.services.engine.qlib_app.services.backtest_execution import (
+    prepare_market_batch_request,
+    serialize_market_batch_request,
+)
 from backend.shared.utils import normalize_user_id
 
 router = APIRouter(tags=["qlib"])
@@ -110,11 +114,16 @@ async def run_optimization(
         request.base_request.user_id = normalize_user_id(auth_user_id)
         request.base_request.tenant_id = auth_tenant_id
 
+        await prepare_market_batch_request(request.base_request)
+
         if async_mode:
             from backend.services.engine.qlib_app.tasks import run_optimization_async
 
             optimization_id = uuid4().hex
             request_dict = request.dict()
+            request_dict["base_request"] = serialize_market_batch_request(
+                request.base_request
+            )
             request_dict["optimization_id"] = optimization_id
             task = run_optimization_async.apply_async(args=[request_dict])
             await optimization_persistence.create_run(
@@ -124,9 +133,9 @@ async def run_optimization(
                 user_id=request.base_request.user_id,
                 tenant_id=request.base_request.tenant_id,
                 status="pending",
-                base_request=request.base_request.model_dump(mode="json"),
+                base_request=request_dict["base_request"],
                 config_snapshot={
-                    "base_request": request.base_request.model_dump(mode="json"),
+                    "base_request": request_dict["base_request"],
                     "param_ranges": [item.model_dump(mode="json") for item in request.param_ranges],
                     "optimization_target": request.optimization_target,
                     "max_parallel": request.max_parallel,
@@ -170,11 +179,16 @@ async def run_genetic_optimization(
         request.base_request.user_id = normalize_user_id(auth_user_id)
         request.base_request.tenant_id = auth_tenant_id
 
+        await prepare_market_batch_request(request.base_request)
+
         if async_mode:
             from backend.services.engine.qlib_app.tasks import run_genetic_optimization_async
 
             optimization_id = request.optimization_id
             request_dict = request.dict()
+            request_dict["base_request"] = serialize_market_batch_request(
+                request.base_request
+            )
             task = run_genetic_optimization_async.apply_async(args=[request_dict])
 
             return OptimizationTaskResponse(

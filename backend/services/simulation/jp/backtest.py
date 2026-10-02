@@ -367,6 +367,13 @@ def run_cash_backtest(
             else None,
         }
     )
+    # Public strategy results use the common signed drawdown contract. Keep the
+    # old cash entry's report unchanged until its sessions are migrated.
+    common_drawdowns = None
+    if request.strategy_type != "jp_cash_topk":
+        from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
+
+        common_drawdowns = RiskAnalyzer._build_drawdown_curve(equity_curve)
     return QlibBacktestResult(
         backtest_id=request.backtest_id or uuid4().hex,
         user_id=request.user_id,
@@ -385,7 +392,9 @@ def run_cash_backtest(
         if volatility
         else None,
         volatility=volatility * math.sqrt(252),
-        max_drawdown=float(max(drawdowns)),
+        max_drawdown=min(row["drawdown"] for row in common_drawdowns)
+        if common_drawdowns is not None
+        else float(max(drawdowns)),
         benchmark_symbol="TOPIX",
         benchmark_return=equity_curve[-1]["benchmark_value"]
         / float(request.initial_capital)
@@ -395,7 +404,9 @@ def run_cash_backtest(
         long_short_is_theoretical=False,
         total_trades=len(account.state["fills"]),
         equity_curve=equity_curve,
-        drawdown_curve=[
+        drawdown_curve=common_drawdowns
+        if common_drawdowns is not None
+        else [
             {"date": row["date"], "value": float(value)}
             for row, value in zip(equity_curve, drawdowns, strict=True)
         ],

@@ -20,6 +20,9 @@ from backend.services.engine.qlib_app.schemas.backtest import (
 from backend.services.engine.qlib_app.services.backtest_service import (
     QlibBacktestService,
 )
+from backend.services.engine.qlib_app.services.backtest_execution import (
+    prepare_market_batch_request,
+)
 from backend.services.engine.qlib_app.utils.structured_logger import (
     StructuredTaskLogger,
 )
@@ -60,6 +63,8 @@ class OptimizationService:
         """运行参数优化（网格搜索）"""
         start_time = time.time()
         optimization_id = optimization_id or uuid4().hex
+
+        await prepare_market_batch_request(request.base_request)
 
         # 1. 生成所有参数组合
         param_names = [p.name for p in request.param_ranges]

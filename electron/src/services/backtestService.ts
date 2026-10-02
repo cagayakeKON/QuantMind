@@ -251,6 +251,15 @@ export interface OptimizationConfig {
 
 /** Qlib 参数优化配置 */
 export interface QlibOptimizationConfig {
+  market?: AppMarket;
+  model_id?: string;
+  strategy_id?: string;
+  pool_id?: string;
+  qlib_provider_uri?: string;
+  qlib_region?: string;
+  deal_price?: 'open' | 'close';
+  signal_lag_days?: number;
+  jp_data_version?: string;
   symbol?: string;
   start_date: string;
   end_date: string;
@@ -1089,7 +1098,9 @@ class BacktestService {
   ): Promise<any> {
     console.log('🔧 启动 Qlib 参数优化:', config);
 
-    const baseRequest = {
+    const marketConfig = config.market ? getMarketConfig(config.market) : undefined;
+    const marketContext = marketConfig?.backtest;
+    const baseRequest: Record<string, any> = {
       strategy_type: config.qlib_strategy_type,
       strategy_params: {
         ...config.qlib_strategy_params,
@@ -1098,18 +1109,30 @@ class BacktestService {
       start_date: config.start_date,
       end_date: config.end_date,
       initial_capital: config.initial_capital,
-      benchmark: config.benchmark_symbol || 'SH000300',
-      universe: this.buildUniverse(config.symbol || ''),
+      benchmark: config.benchmark_symbol || (marketContext ? marketConfig!.benchmark : 'SH000300'),
+      universe: this.buildUniverse(config.symbol || '', config.market),
 
-      // 使用标准 A 股费率字段
-      commission: config.commission ?? 0.00025,
-      min_commission: config.min_commission ?? 5.0,
-      stamp_duty: config.stamp_duty ?? 0.0005,
-      transfer_fee: config.transfer_fee ?? 0.00001,
+      // Registered market defaults; existing calls retain their original fees.
+      commission: config.commission ?? marketContext?.commission ?? 0.00025,
+      min_commission: config.min_commission ?? (marketContext ? 0 : 5.0),
+      stamp_duty: config.stamp_duty ?? (marketContext ? 0 : 0.0005),
+      transfer_fee: config.transfer_fee ?? (marketContext ? 0 : 0.00001),
       min_transfer_fee: 0.0, // 目前前端暂未配置该项，后端默认为 0.01 或可显式传递 0
 
       user_id: config.user_id,
     };
+
+    if (marketContext) {
+      baseRequest.market = marketContext.market;
+      baseRequest.qlib_provider_uri = config.qlib_provider_uri ?? marketConfig!.qlibProviderUri;
+      baseRequest.qlib_region = config.qlib_region ?? marketConfig!.qlibRegion;
+      baseRequest.deal_price = config.deal_price ?? marketContext.dealPrice;
+      baseRequest.tenant_id = authService.getTenantId() || 'default';
+    }
+    for (const key of ['model_id', 'strategy_id', 'pool_id', 'jp_data_version'] as const) {
+      if (config[key]?.trim()) baseRequest[key] = config[key]!.trim();
+    }
+    if (config.signal_lag_days != null) baseRequest.signal_lag_days = config.signal_lag_days;
 
     if (config.generations || config.population_size) {
       const response = await this.client.post<OptimizationTaskResponse>(
