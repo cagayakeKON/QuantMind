@@ -28,13 +28,19 @@ async def resolve_model(tenant_id, user_id, model_id):
     meta = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
     if str((meta.get("context") or {}).get("market") or "").upper() != "JP":
         raise ValueError("Select a registered Japanese-market model")
+    # The standard trainer records publication provenance under factor_coverage.
+    coverage_version = (meta.get("factor_coverage") or {}).get("jp_data_version")
+    declared_version = meta.get("jp_data_version")
+    if declared_version and coverage_version and declared_version != coverage_version:
+        raise RuleDataMissing("JP model publication metadata is inconsistent")
+    version = declared_version or coverage_version
     if (
         meta.get("data_source") != "quantdb_factors"
         or meta.get("factor_source") != "l1_factors"
-        or not meta.get("jp_data_version")
+        or not version
     ):
         raise RuleDataMissing("JP model requires versioned l1_factors metadata")
-    return directory, meta
+    return directory, {**meta, "jp_data_version": version}
 
 
 def prediction_path(directory: Path) -> Path:

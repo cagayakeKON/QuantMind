@@ -63,9 +63,15 @@ def parameters(revision=0):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("version_layout", ["top_level", "trainer_coverage"])
 async def test_model_preview_saved_before_execution_survives_reload(
-    database, registered_model
+    database, registered_model, version_layout
 ):
+    if version_layout == "trainer_coverage":
+        path = registered_model / "metadata.json"
+        meta = json.loads(path.read_text())
+        meta["factor_coverage"] = {"jp_data_version": meta.pop("jp_data_version")}
+        path.write_text(json.dumps(meta))
     async with database() as db:
         sid = await account(db)
         preview = await model_orders.model_plan(
@@ -97,6 +103,24 @@ async def test_model_preview_saved_before_execution_survives_reload(
         )
         assert float(result["state"]["fills"][0]["price"]) == 50
         assert result["pending"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conflicting", [False, True])
+async def test_model_publication_metadata_missing_or_conflicting_is_rejected(
+    registered_model, conflicting
+):
+    from backend.services.simulation.jp.rules import RuleDataMissing
+
+    path = registered_model / "metadata.json"
+    meta = json.loads(path.read_text())
+    if conflicting:
+        meta["factor_coverage"] = {"jp_data_version": "another-publication"}
+    else:
+        meta.pop("jp_data_version")
+    path.write_text(json.dumps(meta))
+    with pytest.raises(RuleDataMissing, match="metadata"):
+        await model_signals.resolve_model("tenant-a", "alice", "jp-test")
 
 
 @pytest.mark.asyncio
