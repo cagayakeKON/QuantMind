@@ -12,6 +12,10 @@ import pandas as pd
 
 from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestResult
 from backend.services.simulation.services.rebalance_calculator import StrategyConfig
+from backend.shared.stock_pool.filters import filter_signals_by_pool
+from backend.shared.stock_pool.resolver import ResolveContext, resolver as pool_resolver
+from backend.shared.stock_pool.schemas import PoolSnapshot
+from backend.shared.stock_utils import StockCodeUtil
 from backend.shared.utc_datetime import utc_now
 from .account import JPCashAccount, money
 from .model_portfolio import portfolio_orders
@@ -25,7 +29,13 @@ from .rules import RuleDataMissing
 from .service import execution_data
 
 
-def run_cash_backtest(request, model_dir: Path, meta: dict) -> QlibBacktestResult:
+def run_cash_backtest(
+    request,
+    model_dir: Path,
+    meta: dict,
+    *,
+    pool_snapshot: PoolSnapshot | None = None,
+) -> QlibBacktestResult:
     started = time.monotonic()
     if request.strategy_type not in {"jp_cash_topk", "TopkDropout"}:
         raise ValueError(
@@ -77,15 +87,14 @@ def run_cash_backtest(request, model_dir: Path, meta: dict) -> QlibBacktestResul
         or request.strategy_params.long_exposure > 1
     ):
         raise ValueError("JP cash backtests do not support shorting or leverage")
-    if (
-        request.pool_id
-        or request.universe != "all"
-        or request.dynamic_position
-        or request.strategy_content
-    ):
+    if request.dynamic_position or request.strategy_content:
         raise ValueError(
-            "JP cash top-k does not yet support custom pools, dynamic positions or strategy code"
+            "JP cash execution does not yet support dynamic positions or strategy code"
         )
+    if (request.pool_id or request.universe != "all") and pool_snapshot is None:
+        raise ValueError("JP custom pools require a resolved shared pool snapshot")
+    if pool_snapshot is not None:
+        _validate_pool(pool_snapshot)
     if (
         meta.get("data_source") != "quantdb_factors"
         or meta.get("factor_source") != "l1_factors"
@@ -153,15 +162,22 @@ def run_cash_backtest(request, model_dir: Path, meta: dict) -> QlibBacktestResul
             raise RuleDataMissing(
                 f"Exact JP test-split signals are missing on {previous}"
             )
+        outcome = filter_signals_by_pool(scores[previous], pool_snapshot)
+        if outcome.empty_pool or outcome.empty_result:
+            raise RuleDataMissing(
+                f"Stock pool has no JP model signals on {previous}: "
+                + "; ".join(outcome.warnings)
+            )
+        daily_scores = outcome.kept
         symbols = sorted(
-            {r["symbol"] for r in scores[previous]} | set(account.state["positions"])
+            {r["symbol"] for r in daily_scores} | set(account.state["positions"])
         )
         prior_bars, prior_master = data.day(
             previous, symbols, list(account.state["positions"])
         )
         orders = portfolio_orders(
             account.state,
-            scores[previous],
+            daily_scores,
             prior_bars,
             prior_master,
             previous,
@@ -215,6 +231,9 @@ def run_cash_backtest(request, model_dir: Path, meta: dict) -> QlibBacktestResul
             "signal_source": "model_pred_test",
             "training_labels_available_on": str(known_after),
             "benchmark_entry": "first_execution_open",
+            "pool_snapshot": pool_snapshot.model_dump(mode="json")
+            if pool_snapshot is not None
+            else None,
         }
     )
     return QlibBacktestResult(
@@ -268,7 +287,33 @@ async def _run_registered_backtest(request, persistence):
     model_dir, meta = await resolve_model(
         request.tenant_id, request.user_id, request.model_id
     )
-    result = await asyncio.to_thread(run_cash_backtest, request, model_dir, meta)
+    ref = (request.pool_id or request.universe or "all").strip()
+    if ref.lower() in {"all", "pool:all"}:
+        ref = "all"
+    lower_ref = ref.lower()
+    contextual_market = (
+        "JP"
+        if ref == "all"
+        or lower_ref.startswith(("list:", "file:"))
+        or "/" in ref
+        or lower_ref.endswith((".txt", ".csv"))
+        else None
+    )
+    pool = await pool_resolver.resolve(
+        ref,
+        ResolveContext(
+            tenant_id=request.tenant_id,
+            user_id=request.user_id,
+            market=contextual_market,
+        ),
+        strict=True,
+    )
+    _validate_pool(pool)
+    request.pool_checksum = pool.checksum
+    request.pool_warnings = list(pool.warnings)
+    result = await asyncio.to_thread(
+        run_cash_backtest, request, model_dir, meta, pool_snapshot=pool
+    )
     await persistence.save_run(
         result.backtest_id,
         request.user_id,
@@ -280,6 +325,23 @@ async def _run_registered_backtest(request, persistence):
         completed_at=result.completed_at,
     )
     return result
+
+
+def _validate_pool(pool: PoolSnapshot):
+    if pool.market != "JP":
+        raise ValueError("Select a Japanese-market stock pool")
+    if not pool.unfiltered and (
+        not pool.symbols
+        or not pool.api_symbols
+        or not all(
+            StockCodeUtil.is_jp_symbol(symbol)
+            for symbol in pool.symbols + pool.api_symbols
+        )
+    ):
+        raise ValueError(
+            "JP stock pool is empty or contains other markets: "
+            + "; ".join(pool.warnings)
+        )
 
 
 async def run_jp_backtest(request, persistence):

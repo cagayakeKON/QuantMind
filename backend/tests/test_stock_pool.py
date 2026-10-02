@@ -922,7 +922,9 @@ class TestP3TrainingBridge:
 
         norm_idx = loading.index(".str.zfill(6)")
         pool_idx = loading.index("pool_symbols:")
-        filter_idx = loading.index("isin(wanted)")
+        # The five-character JP branch has its own normalization and may run
+        # earlier; this six-digit guard applies to the original CN filter.
+        filter_idx = loading.index("_sym6.isin(wanted)")
         assert norm_idx < filter_idx
         assert pool_idx < filter_idx
 
