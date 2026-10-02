@@ -10,6 +10,10 @@ SimulationFundSnapshotService.capture_all 的全局 SCAN 永远扫不到回放�
 from __future__ import annotations
 
 import uuid
+import asyncio
+import json
+
+from redis.exceptions import WatchError
 
 from backend.services.trade_shared.redis_client import RedisClient, get_redis
 from backend.services.trade_shared.simulation_manager import (
@@ -26,11 +30,60 @@ class ReplayAccountManager(SimulationAccountManager):
     统一由 for_session() 包装避免出错。
     """
 
-    def __init__(self, session_id: uuid.UUID | str, redis: RedisClient | None = None):
+    def __init__(
+        self, session_id: uuid.UUID | str, redis: RedisClient | None = None,
+        *, cash_rules=None,
+    ):
         # 省略 redis 时用 get_redis()：它保证共享单例已连接，
         # 直接 RedisClient() 只会拿到 client=None 的未连接实例。
         super().__init__(redis or get_redis())
         self._session_id = str(session_id)
+        self._cash_rules = cash_rules
+
+    @property
+    def execution_market(self):
+        return self._cash_rules.market if self._cash_rules is not None else None
+
+    @property
+    def execution_data_version(self):
+        return self._cash_rules.data_version if self._cash_rules is not None else None
+
+    def _cash_client(self):
+        if self._cash_rules is None:
+            raise NotImplementedError("Replay account has no dated cash rules")
+        if self.redis.client is None:
+            raise RuntimeError("Dated replay cash storage is unavailable")
+        return self.redis.client
+
+    def _read_cash_account(self):
+        raw = self._cash_client().get(self._get_key(0, "default"))
+        if raw is None:
+            return None
+        account = json.loads(raw)
+        return self._cash_rules.project(account)
+
+    def _mutate_cash_account(self, change):
+        """CAS only the registered account's existing replay key.
+
+        A conflict is reported, never retried as a new financial operation.
+        This does not change the original Lua/caching behavior of other accounts.
+        """
+        key = self._get_key(0, "default")
+        try:
+            with self._cash_client().pipeline() as pipe:
+                pipe.watch(key)
+                raw = pipe.get(key)
+                account = json.loads(raw) if raw is not None else None
+                changed = change(account)
+                projected = self._cash_rules.project(changed)
+                pipe.multi()
+                pipe.set(key, json.dumps(projected, ensure_ascii=False, allow_nan=False))
+                response = pipe.execute()
+                if not response or not response[0]:
+                    raise RuntimeError("Dated replay cash write was not acknowledged")
+                return projected
+        except WatchError as error:
+            raise RuntimeError("Dated replay account changed concurrently") from error
 
     @property
     def session_id(self) -> str:
@@ -48,16 +101,33 @@ class ReplayAccountManager(SimulationAccountManager):
     # 便捷包装：省掉调用方到处传占位的 user_id/tenant_id
     # ------------------------------------------------------------------
     async def init(self, initial_cash: float) -> dict:
+        if self._cash_rules is not None:
+            def initialize(account):
+                if account is not None:
+                    return self._cash_rules.validate_initial_cash(account, initial_cash)
+                return self._cash_rules.initialize(initial_cash)
+            return await asyncio.to_thread(self._mutate_cash_account, initialize)
         return await self.init_account(user_id=0, initial_cash=initial_cash, tenant_id="default")
 
     async def get(self) -> dict | None:
+        if self._cash_rules is not None:
+            return await asyncio.to_thread(self._read_cash_account)
         return await self.get_account(user_id=0, tenant_id="default")
 
     def write(self, account_data: dict) -> None:
         """整体回写账户（收盘估值需要，Lua 只按最后成交价算市值）。"""
+        if self._cash_rules is not None:
+            updated = self._mutate_cash_account(
+                lambda current: self._cash_rules.merge_marks(current, account_data)
+            )
+            account_data.clear()
+            account_data.update(updated)
+            return
         write_json_cache(self.redis, self._get_key(0, "default"), account_data)
 
     async def unlock(self) -> dict:
+        if self._cash_rules is not None:
+            raise ValueError("Dated replay account requires prepare_dated_day")
         return await self.unlock_t1(user_id=0, tenant_id="default")
 
     async def apply_fill(
@@ -67,6 +137,8 @@ class ReplayAccountManager(SimulationAccountManager):
         delta_volume: float,
         price: float,
     ) -> dict:
+        if self._cash_rules is not None:
+            raise ValueError("Dated replay account requires apply_dated_fill")
         return await self.update_balance(
             user_id=0,
             symbol=symbol,
@@ -75,6 +147,36 @@ class ReplayAccountManager(SimulationAccountManager):
             price=price,
             tenant_id="default",
         )
+
+    async def prepare_dated_day(self, trade_date) -> None:
+        await asyncio.to_thread(
+            self._mutate_cash_account,
+            lambda current: self._cash_rules.prepare_day(current, trade_date),
+        )
+
+    async def filled_volume_on_date(self, *, trade_date, symbol) -> int:
+        self._cash_client()
+        account = await self.get()
+        if account is None:
+            raise ValueError("ACCOUNT_NOT_FOUND")
+        return self._cash_rules.filled_volume(account, trade_date, symbol)
+
+    async def apply_dated_fill(
+        self, *, trade_date, symbol, side, matched, order_id=None
+    ) -> dict:
+        fill_id = str(order_id or uuid.uuid4())
+        try:
+            await asyncio.to_thread(
+                self._mutate_cash_account,
+                lambda current: self._cash_rules.apply_fill(
+                    current, trade_date, symbol, side, matched, fill_id
+                ),
+            )
+        except ValueError as error:
+            if isinstance(error, self._cash_rules.reader.execution_data_errors):
+                raise
+            return {"success": False, "reason": str(error)}
+        return {"success": True, "order_id": fill_id}
 
     def drop(self) -> None:
         """丢弃会话时清除 Redis 账户。"""

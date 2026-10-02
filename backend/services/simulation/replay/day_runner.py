@@ -26,6 +26,8 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.shared.stock_utils import StockCodeUtil
+
 from backend.services.simulation.models.order import (
     OrderSide,
     OrderStatus,
@@ -788,10 +790,16 @@ class ReplayDayRunner:
             )
             for sym, bar in bars.items()
         }
+        custom_weights = strategy_params.get("custom_weights", {}) or {}
+        if self._execution_context is not None:
+            custom_weights = {
+                self._execution_context.symbol(symbol): weight
+                for symbol, weight in custom_weights.items()
+            }
         config = StrategyConfig(
             topk=int(strategy_params.get("topk", 10)),
             weight_mode=WeightMode(strategy_params.get("weight_mode", "equal")),
-            custom_weights=strategy_params.get("custom_weights", {}) or {},
+            custom_weights=custom_weights,
             min_score=float(strategy_params.get("min_score", 0.0)),
             max_position_pct=float(strategy_params.get("max_position_pct", 0.15)),
             lot_size=int(strategy_params.get("lot_size", 100)),
@@ -906,9 +914,12 @@ class ReplayDayRunner:
             )
             return
 
+        fill_order_id = None
         if context is not None:
+            fill_order_id = uuid.uuid4()
             update = await accounts.apply_dated_fill(
-                trade_date=trade_date, symbol=order.symbol, side=side, matched=mr
+                trade_date=trade_date, symbol=order.symbol, side=side, matched=mr,
+                order_id=fill_order_id,
             )
             # Exact amounts go to the dated cash rules. The common PG/response
             # contract remains numeric, including its existing P&L calculation.
@@ -965,6 +976,7 @@ class ReplayDayRunner:
             price_source=f"local_{cfg.price_mode}",
             avg_cost_before=avg_cost_before,
             holding_days=holding_days,
+            **({"order_id": fill_order_id} if fill_order_id is not None else {}),
         )
         result.realized_pnl_today += realized
         # 买入后记录首次买入日，供后续卖出算持有天数
@@ -1021,13 +1033,17 @@ class ReplayDayRunner:
         price_source: str,
         avg_cost_before: float | None = None,
         holding_days: int | None = None,
+        order_id: uuid.UUID | None = None,
     ) -> float:
         """落库委托 + 成交，返回本笔已实现盈亏（买入返回 0.0）。
 
         avg_cost_before 必须由调用方在 apply_fill **之前**抓取 —— Lua 在
         volume<=0.0001 时会删掉整个持仓 dict，清仓后 cost 永久丢失。
         """
+        if self._execution_context is not None:
+            symbol = StockCodeUtil.to_prefix(symbol, market=self._execution_context.market)
         order_row = ReplayOrder(
+            **({"order_id": order_id} if order_id is not None else {}),
             session_id=session_id,
             trade_date=trade_date,
             symbol=symbol,
@@ -1087,7 +1103,10 @@ class ReplayDayRunner:
             ReplayOrder(
                 session_id=session_id,
                 trade_date=trade_date,
-                symbol=order.symbol,
+                symbol=(
+                    StockCodeUtil.to_prefix(order.symbol, market=self._execution_context.market)
+                    if self._execution_context is not None else order.symbol
+                ),
                 side=OrderSide.BUY if order.side.lower() == "buy" else OrderSide.SELL,
                 order_type=OrderType.MARKET,
                 status=OrderStatus.REJECTED,
@@ -1194,7 +1213,13 @@ class ReplayDayRunner:
         row.realized_pnl_cum = realized_pnl_cum
         row.unrealized_pnl = unrealized_pnl
         row.position_count = len(positions)
-        row.positions = positions
+        row.positions = (
+            {
+                StockCodeUtil.to_prefix(symbol, market=self._execution_context.market): position
+                for symbol, position in positions.items()
+            }
+            if self._execution_context is not None else positions
+        )
         if existing is None:
             db.add(row)
 

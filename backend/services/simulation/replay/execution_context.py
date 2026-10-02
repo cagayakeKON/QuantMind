@@ -26,7 +26,13 @@ class DatedReplayAccount(Protocol):
     async def filled_volume_on_date(self, *, trade_date: date, symbol: str) -> int: ...
 
     async def apply_dated_fill(
-        self, *, trade_date: date, symbol: str, side: str, matched: MatchResult
+        self,
+        *,
+        trade_date: date,
+        symbol: str,
+        side: str,
+        matched: MatchResult,
+        order_id=None,
     ) -> dict: ...
 
 
