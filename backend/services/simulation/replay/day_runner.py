@@ -40,6 +40,7 @@ from backend.services.simulation.models.replay import (
     ReplayTrade,
 )
 from backend.services.simulation.replay.account import ReplayAccountManager
+from backend.services.simulation.replay.persistence import checkpointed_operation
 from backend.services.simulation.replay.execution_context import (
     ReplayExecutionContext,
     open_registered_replay_execution_context,
@@ -168,6 +169,7 @@ class ReplayDayRunner:
                 "before using these execution paths"
             )
 
+    @checkpointed_operation()
     async def run_day(
         self,
         db: AsyncSession,
@@ -264,6 +266,7 @@ class ReplayDayRunner:
         )
         return result
 
+    @checkpointed_operation()
     async def execute_day(
         self,
         db: AsyncSession,
@@ -563,6 +566,7 @@ class ReplayDayRunner:
         )
         return orders, info
 
+    @checkpointed_operation(preview=True)
     async def propose_day(
         self,
         db: AsyncSession,

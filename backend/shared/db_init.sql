@@ -1576,6 +1576,10 @@ CREATE TABLE IF NOT EXISTS replay_equity_snapshots (
     CONSTRAINT uq_replay_equity_session_date UNIQUE (session_id, trade_date)
 );
 
+-- Registered replay cash rules retain funding/settlement metadata atomically
+-- with the existing equity snapshot. Do not reconstruct it from float balances.
+ALTER TABLE replay_equity_snapshots ADD COLUMN IF NOT EXISTS market_state JSONB;
+
 CREATE TABLE IF NOT EXISTS replay_signals (
     id              SERIAL PRIMARY KEY,
     session_id      UUID NOT NULL REFERENCES replay_sessions(session_id) ON DELETE CASCADE,

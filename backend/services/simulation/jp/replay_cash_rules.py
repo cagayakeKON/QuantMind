@@ -67,11 +67,45 @@ class JapanReplayCashRules:
             }
         )
 
+    def validate_settings(self, params):
+        if any(
+            money(params.get(key, default)) != money(self.config[key])
+            for key, default in (("commission_rate", "0"), ("slippage_bps", "5"))
+        ):
+            raise ValueError("Replay cash settings differ from saved session")
+
     def validate_initial_cash(self, account, initial_cash):
         state = self._metadata(account)["state"]
         if money(state["initial_cash"]) != money(initial_cash):
             raise ValueError("Dated replay account already has another initial cash")
         return self.project(account)
+
+    def checkpoint(self, account):
+        """Persist exact rule metadata, without duplicate float projections."""
+        return {
+            "schema_version": 1,
+            "market": self.market,
+            "data_version": self.data_version,
+            "metadata": deepcopy(self._metadata(account)),
+        }
+
+    def restore_checkpoint(self, checkpoint, trade_date):
+        if (
+            not isinstance(checkpoint, dict)
+            or type(checkpoint.get("schema_version")) is not int
+            or checkpoint.get("schema_version") != 1
+            or checkpoint.get("market") != self.market
+            or checkpoint.get("data_version") != self.data_version
+        ):
+            raise ValueError(
+                "Replay checkpoint does not match market/publication/schema"
+            )
+        metadata = checkpoint.get("metadata")
+        if not isinstance(metadata, dict) or metadata.get("prepared_date") != str(
+            trade_date
+        ):
+            raise ValueError("Replay checkpoint does not match snapshot date")
+        return self.project({METADATA_KEY: deepcopy(metadata)})
 
     def _metadata(self, account):
         if account is None:

@@ -287,6 +287,8 @@ class ReplayEquitySnapshot(Base, TimestampMixin):
     unrealized_pnl: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     position_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     positions: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    # Optional registered market-rule checkpoint; original markets leave it NULL.
+    market_state: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     __table_args__ = (
         UniqueConstraint(

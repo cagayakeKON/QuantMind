@@ -12,6 +12,8 @@ from __future__ import annotations
 import uuid
 import asyncio
 import json
+from contextlib import contextmanager
+from copy import deepcopy
 
 from redis.exceptions import WatchError
 
@@ -32,13 +34,51 @@ class ReplayAccountManager(SimulationAccountManager):
 
     def __init__(
         self, session_id: uuid.UUID | str, redis: RedisClient | None = None,
-        *, cash_rules=None,
+        *, cash_rules=None, checkpointed=False,
     ):
         # 省略 redis 时用 get_redis()：它保证共享单例已连接，
         # 直接 RedisClient() 只会拿到 client=None 的未连接实例。
         super().__init__(redis or get_redis())
         self._session_id = str(session_id)
         self._cash_rules = cash_rules
+        if checkpointed and cash_rules is None:
+            raise ValueError("Checkpointed replay requires registered cash rules")
+        self.uses_cash_checkpoint = bool(checkpointed)
+        self._staged_cash = None
+
+    @contextmanager
+    def stage_cash_checkpoint(self, account):
+        """One DB-backed operation owns this state; never publish partial fills."""
+        if not self.uses_cash_checkpoint or self._staged_cash is not None:
+            raise ValueError("Replay cash staging is unavailable or already active")
+        self._staged_cash = self._cash_rules.project(account)
+        try:
+            yield
+        finally:
+            self._staged_cash = None
+
+    def export_cash_checkpoint(self):
+        if self._staged_cash is None:
+            raise ValueError("Replay checkpoint requires an active database operation")
+        return self._cash_rules.checkpoint(self._staged_cash)
+
+    def restore_cash_checkpoint(self, checkpoint, trade_date):
+        return self._cash_rules.restore_checkpoint(checkpoint, trade_date)
+
+    def initial_cash_projection(self, initial_cash):
+        return self._cash_rules.initialize(initial_cash)
+
+    def validate_cash_settings(self, params):
+        self._cash_rules.validate_settings(params)
+
+    def cache_committed_projection(self, account):
+        """Called only after DB commit; cache loss cannot undo committed fills."""
+        response = self._cash_client().set(
+            self._get_key(0, "default"),
+            json.dumps(account, ensure_ascii=False, allow_nan=False),
+        )
+        if not response:
+            raise RuntimeError("Dated replay cache write was not acknowledged")
 
     @property
     def execution_market(self):
@@ -56,6 +96,10 @@ class ReplayAccountManager(SimulationAccountManager):
         return self.redis.client
 
     def _read_cash_account(self):
+        if self.uses_cash_checkpoint:
+            if self._staged_cash is None:
+                raise ValueError("Read checkpointed replay cash through its database scope")
+            return deepcopy(self._staged_cash)
         raw = self._cash_client().get(self._get_key(0, "default"))
         if raw is None:
             return None
@@ -68,6 +112,12 @@ class ReplayAccountManager(SimulationAccountManager):
         A conflict is reported, never retried as a new financial operation.
         This does not change the original Lua/caching behavior of other accounts.
         """
+        if self.uses_cash_checkpoint:
+            if self._staged_cash is None:
+                raise ValueError("Mutate checkpointed replay cash through its database scope")
+            projected = self._cash_rules.project(change(deepcopy(self._staged_cash)))
+            self._staged_cash = projected
+            return deepcopy(projected)
         key = self._get_key(0, "default")
         try:
             with self._cash_client().pipeline() as pipe:
@@ -155,7 +205,8 @@ class ReplayAccountManager(SimulationAccountManager):
         )
 
     async def filled_volume_on_date(self, *, trade_date, symbol) -> int:
-        self._cash_client()
+        if not self.uses_cash_checkpoint:
+            self._cash_client()
         account = await self.get()
         if account is None:
             raise ValueError("ACCOUNT_NOT_FOUND")
