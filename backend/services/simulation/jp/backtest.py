@@ -75,7 +75,7 @@ def run_cash_backtest(
     if not request.start_date or not request.end_date:
         raise ValueError("JP backtest requires explicit start and end dates")
     if (
-        request.benchmark != "TOPIX"
+        request.benchmark.upper() != "TOPIX"
         or request.deal_price != "open"
         or request.signal_lag_days != 1
     ):
@@ -283,7 +283,7 @@ def run_cash_backtest(
     )
 
 
-async def _run_registered_backtest(request, persistence):
+async def execute_backtest(request):
     model_dir, meta = await resolve_model(
         request.tenant_id, request.user_id, request.model_id
     )
@@ -314,16 +314,6 @@ async def _run_registered_backtest(request, persistence):
     result = await asyncio.to_thread(
         run_cash_backtest, request, model_dir, meta, pool_snapshot=pool
     )
-    await persistence.save_run(
-        result.backtest_id,
-        request.user_id,
-        request.tenant_id,
-        result.status,
-        result.created_at,
-        result.config,
-        result,
-        completed_at=result.completed_at,
-    )
     return result
 
 
@@ -342,35 +332,3 @@ def _validate_pool(pool: PoolSnapshot):
             "JP stock pool is empty or contains other markets: "
             + "; ".join(pool.warnings)
         )
-
-
-async def run_jp_backtest(request, persistence):
-    request.market = "JP"
-    request.backtest_id = request.backtest_id or uuid4().hex
-    started = utc_now()
-    try:
-        return await _run_registered_backtest(request, persistence)
-    except Exception as exc:
-        failed = QlibBacktestResult(
-            backtest_id=request.backtest_id,
-            user_id=request.user_id,
-            tenant_id=request.tenant_id,
-            market="JP",
-            currency="JPY",
-            status="failed",
-            created_at=started,
-            completed_at=utc_now(),
-            config=request.model_dump(mode="json"),
-            error_message=str(exc),
-        )
-        await persistence.save_run(
-            failed.backtest_id,
-            request.user_id,
-            request.tenant_id,
-            failed.status,
-            failed.created_at,
-            failed.config,
-            failed,
-            completed_at=failed.completed_at,
-        )
-        raise

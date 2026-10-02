@@ -53,6 +53,8 @@ from backend.services.engine.qlib_app.utils.structured_logger import (
 )
 from backend.shared.notification_publisher import publish_notification_async
 from backend.shared.utils import normalize_user_id
+from backend.shared.utc_datetime import utc_now
+from .backtest_execution import resolve_market_execution
 from .backtest_service_query import QlibBacktestServiceQueryMixin
 
 logger = logging.getLogger(__name__)
@@ -100,10 +102,9 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
 
     async def run_backtest(self, request: QlibBacktestRequest) -> QlibBacktestResult:
         """运行回测"""
-        if getattr(request, "market", None) == "JP" or "jp_data" in str(getattr(request, "qlib_provider_uri", None) or "").lower():
-            from backend.services.simulation.jp.backtest import run_jp_backtest
-
-            return await run_jp_backtest(request, self._persistence)
+        execution = resolve_market_execution(request)
+        if execution is not None:
+            request.market = execution.market
         self._cleanup_stale_runs()
         start_time = time.time()
         signal_meta: dict[str, Any] = {"source": "unknown"}
@@ -116,7 +117,7 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
         )
 
         backtest_id = getattr(request, "backtest_id", None) or uuid4().hex
-        created_at = datetime.now()
+        created_at = utc_now() if execution is not None else datetime.now()
         task_log = StructuredTaskLogger(
             logger,
             "qlib-backtest-runtime",
@@ -129,7 +130,11 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
         )
         self._runs[backtest_id] = {
             "status": "running",
-            "created_at": created_at,
+            # The existing polling clock uses local naive time in memory only.
+            # Registered execution results and persistence retain aware UTC.
+            "created_at": created_at.astimezone().replace(tzinfo=None)
+            if execution is not None
+            else created_at,
             "completed_at": None,
             "user_id": request.user_id,
             "tenant_id": request.tenant_id,
@@ -142,7 +147,9 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                 tenant_id=request.tenant_id,
                 status="running",
                 created_at=created_at,
-                config=self._build_config_payload(request, signal_meta=signal_meta),
+                config=request.model_dump(mode="json")
+                if execution is not None
+                else self._build_config_payload(request, signal_meta=signal_meta),
                 result=None,
             )
         await self._notify_progress(
@@ -155,6 +162,151 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             initial_capital=request.initial_capital,
         )
 
+        signal_state = {"meta": signal_meta}
+        try:
+            if execution is None:
+                result, signal_meta = await self._execute_qlib_backtest(
+                    request, backtest_id, created_at, start_time, task_log, signal_meta,
+                    signal_state,
+                )
+            else:
+                request.backtest_id = backtest_id
+                result = await execution.execute(request)
+                result.created_at = created_at
+                signal_meta = {
+                    "source": (result.config or {}).get("signal_source", "unknown")
+                }
+
+            self._runs[backtest_id].update(
+                {
+                    "status": result.status,
+                    "completed_at": result.completed_at,
+                    "result": result,
+                }
+            )
+            if not is_optimization_child:
+                await self._persistence.save_run(
+                    backtest_id=backtest_id,
+                    user_id=request.user_id,
+                    tenant_id=request.tenant_id,
+                    status=result.status,
+                    created_at=created_at,
+                    completed_at=result.completed_at,
+                    config=result.config
+                    if execution is not None
+                    else self._build_config_payload(request, signal_meta=signal_meta),
+                    result=result,
+                )
+            await self._notify_progress(
+                backtest_id,
+                request.user_id,
+                status="completed",
+                progress=1.0,
+                strategy_name=request.strategy_type,
+                benchmark_symbol=request.benchmark,
+                initial_capital=request.initial_capital,
+                information_ratio=result.information_ratio,
+                beta=result.beta,
+                benchmark_return=result.benchmark_return,
+            )
+            if not is_optimization_child:
+                await publish_notification_async(
+                    user_id=str(request.user_id),
+                    tenant_id=str(request.tenant_id or "default"),
+                    title="回测已完成",
+                    content=f"{request.strategy_type} 回测完成，年化 {result.annual_return:.2%}，最大回撤 {result.max_drawdown:.2%}",
+                    type="strategy",
+                    level="success",
+                    action_url="/backtest",
+                )
+
+            return result
+
+        except Exception as e:
+            if execution is None:
+                signal_meta = signal_state["meta"]
+            execution_time = time.time() - start_time
+            error_detail = traceback.format_exc()
+            task_log.exception("run_failed", "回测失败", error=e)
+
+            # Create failure result for persistence
+            result = QlibBacktestResult(
+                backtest_id=backtest_id,
+                tenant_id=request.tenant_id,
+                status="failed",
+                created_at=created_at,
+                completed_at=utc_now() if execution is not None else datetime.now(),
+                config=request.model_dump(mode="json")
+                if execution is not None
+                else self._build_config_payload(request, signal_meta=signal_meta),
+                annual_return=0.0,
+                sharpe_ratio=0.0,
+                max_drawdown=0.0,
+                alpha=0.0,
+                long_short_is_theoretical=False
+                if execution is not None
+                else request.strategy_params.short_topk > 0,
+                signal_lag_days=request.signal_lag_days,
+                deal_price=request.deal_price,
+                error_message=f"{str(e)}",
+                full_error=error_detail,
+                execution_time=execution_time,
+                **(
+                    {
+                        "market": execution.market,
+                        "currency": execution.currency,
+                        "user_id": request.user_id,
+                    }
+                    if execution is not None
+                    else {}
+                ),
+            )
+
+            self._runs[backtest_id].update(
+                {
+                    "status": "failed",
+                    "completed_at": utc_now() if execution is not None else datetime.now(),
+                    "error_message": str(e),
+                    "full_error": error_detail,
+                }
+            )
+            if not is_optimization_child:
+                await self._persistence.save_run(
+                    backtest_id=backtest_id,
+                    user_id=request.user_id,
+                    tenant_id=request.tenant_id,
+                    status="failed",
+                    created_at=created_at,
+                    completed_at=utc_now() if execution is not None else datetime.now(),
+                    config=result.config
+                    if execution is not None
+                    else self._build_config_payload(request, signal_meta=signal_meta),
+                    result=result,
+                )
+            await self._notify_progress(
+                backtest_id,
+                request.user_id,
+                status="failed",
+                progress=1.0,
+                error_message=f"{str(e)}",
+                full_error=error_detail,
+            )
+            if not is_optimization_child:
+                await publish_notification_async(
+                    user_id=str(request.user_id),
+                    tenant_id=str(request.tenant_id or "default"),
+                    title="回测执行失败",
+                    content=f"{request.strategy_type} 回测失败：{str(e)}",
+                    type="strategy",
+                    level="error",
+                    action_url="/backtest",
+                )
+
+            return result
+
+    async def _execute_qlib_backtest(
+        self, request, backtest_id, created_at, start_time, task_log, signal_meta, signal_state
+    ):
         try:
             self.initialize(
                 provider_uri=getattr(request, "qlib_provider_uri", None),
@@ -863,113 +1015,9 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     on_progress=analysis_progress_callback,
                 )
 
-            self._runs[backtest_id].update(
-                {
-                    "status": result.status,
-                    "completed_at": result.completed_at,
-                    "result": result,
-                }
-            )
-            if not is_optimization_child:
-                await self._persistence.save_run(
-                    backtest_id=backtest_id,
-                    user_id=request.user_id,
-                    tenant_id=request.tenant_id,
-                    status=result.status,
-                    created_at=created_at,
-                    completed_at=result.completed_at,
-                    config=self._build_config_payload(request, signal_meta=signal_meta),
-                    result=result,
-                )
-            await self._notify_progress(
-                backtest_id,
-                request.user_id,
-                status="completed",
-                progress=1.0,
-                strategy_name=request.strategy_type,
-                benchmark_symbol=request.benchmark,
-                initial_capital=request.initial_capital,
-                information_ratio=result.information_ratio,
-                beta=result.beta,
-                benchmark_return=result.benchmark_return,
-            )
-            if not is_optimization_child:
-                await publish_notification_async(
-                    user_id=str(request.user_id),
-                    tenant_id=str(request.tenant_id or "default"),
-                    title="回测已完成",
-                    content=f"{request.strategy_type} 回测完成，年化 {result.annual_return:.2%}，最大回撤 {result.max_drawdown:.2%}",
-                    type="strategy",
-                    level="success",
-                    action_url="/backtest",
-                )
-
-            return result
-
-        except Exception as e:
-            execution_time = time.time() - start_time
-            error_detail = traceback.format_exc()
-            task_log.exception("run_failed", "回测失败", error=e)
-
-            # Create failure result for persistence
-            result = QlibBacktestResult(
-                backtest_id=backtest_id,
-                tenant_id=request.tenant_id,
-                status="failed",
-                created_at=created_at,
-                completed_at=datetime.now(),
-                config=self._build_config_payload(request, signal_meta=signal_meta),
-                annual_return=0.0,
-                sharpe_ratio=0.0,
-                max_drawdown=0.0,
-                alpha=0.0,
-                long_short_is_theoretical=request.strategy_params.short_topk > 0,
-                signal_lag_days=request.signal_lag_days,
-                deal_price=request.deal_price,
-                error_message=f"{str(e)}",
-                full_error=error_detail,
-                execution_time=execution_time,
-            )
-
-            self._runs[backtest_id].update(
-                {
-                    "status": "failed",
-                    "completed_at": datetime.now(),
-                    "error_message": str(e),
-                    "full_error": error_detail,
-                }
-            )
-            if not is_optimization_child:
-                await self._persistence.save_run(
-                    backtest_id=backtest_id,
-                    user_id=request.user_id,
-                    tenant_id=request.tenant_id,
-                    status="failed",
-                    created_at=created_at,
-                    completed_at=datetime.now(),
-                    config=self._build_config_payload(request, signal_meta=signal_meta),
-                    result=result,
-                )
-            await self._notify_progress(
-                backtest_id,
-                request.user_id,
-                status="failed",
-                progress=1.0,
-                error_message=f"{str(e)}",
-                full_error=error_detail,
-            )
-            if not is_optimization_child:
-                await publish_notification_async(
-                    user_id=str(request.user_id),
-                    tenant_id=str(request.tenant_id or "default"),
-                    title="回测执行失败",
-                    content=f"{request.strategy_type} 回测失败：{str(e)}",
-                    type="strategy",
-                    level="error",
-                    action_url="/backtest",
-                )
-
-            return result
+            return result, signal_meta
+        finally:
+            signal_state["meta"] = signal_meta
 
     def _resolve_path(self, path_str: str) -> str | None:
         if not path_str:

@@ -12,12 +12,45 @@ from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestReques
 from backend.services.engine.qlib_app.services.backtest_service_runtime import (
     QlibBacktestServiceRuntimeMixin,
 )
+from backend.services.engine.qlib_app.services import (
+    backtest_service_runtime as runtime,
+)
+from backend.services.engine.qlib_app.services.backtest_service import (
+    QlibBacktestService,
+)
 from backend.services.simulation.jp import backtest
 from backend.services.simulation.jp.model_signals import model_registry_service
 from backend.services.simulation.jp.model_portfolio import portfolio_orders
 from backend.services.simulation.jp.rules import RuleDataMissing
 
 pytest_plugins = ["backend.tests.test_jp_data_platform"]
+
+
+@pytest.fixture
+def runtime_factory(monkeypatch):
+    notifications = []
+
+    async def notify(**payload):
+        notifications.append(payload)
+
+    monkeypatch.setattr(runtime, "publish_notification_async", notify)
+
+    def create(persistence):
+        service = object.__new__(QlibBacktestService)
+        service._runs = {}
+        service._persistence = persistence
+        service._initialized = True
+        service._cache = None
+        service.events = []
+        service.notifications = notifications
+
+        async def progress(*args, **kwargs):
+            service.events.append(kwargs)
+
+        service._notify_progress = progress
+        return service
+
+    return create
 
 
 @pytest.fixture
@@ -154,33 +187,21 @@ def test_prior_close_sizing_sells_first_without_using_future_open():
 
 
 @pytest.mark.asyncio
-async def test_dispatch_retains_existing_market_runtime(monkeypatch):
-    async def jp_run(request, persistence):
-        assert request.market == "JP" and persistence == "store"
-        return "jp-ledger"
-
-    monkeypatch.setattr(backtest, "run_jp_backtest", jp_run)
-
+async def test_dispatch_retains_existing_market_runtime(runtime_factory):
     def original_cleanup():
         raise RuntimeError("original runtime reached")
 
-    service = SimpleNamespace(
-        _persistence="store", _cleanup_stale_runs=original_cleanup
-    )
-    assert (
-        await QlibBacktestServiceRuntimeMixin.run_backtest(
-            service, QlibBacktestRequest(market="JP")
-        )
-        == "jp-ledger"
-    )
-    with pytest.raises(RuntimeError, match="original runtime reached"):
-        await QlibBacktestServiceRuntimeMixin.run_backtest(
-            service, QlibBacktestRequest()
-        )
+    service = runtime_factory("store")
+    service._cleanup_stale_runs = original_cleanup
+    for market in ("JP", "CN"):
+        with pytest.raises(RuntimeError, match="original runtime reached"):
+            await QlibBacktestServiceRuntimeMixin.run_backtest(
+                service, QlibBacktestRequest(market=market)
+            )
 
 
 @pytest.mark.asyncio
-async def test_failure_is_persisted_and_never_falls_back(monkeypatch):
+async def test_failure_is_persisted_and_never_falls_back(monkeypatch, runtime_factory):
     async def resolve(**kwargs):
         return SimpleNamespace(fallback_used=True, effective_model_id="cn-default")
 
@@ -188,14 +209,15 @@ async def test_failure_is_persisted_and_never_falls_back(monkeypatch):
     saved = []
 
     async def save(*args, **kwargs):
-        saved.append(args[6])
+        saved.append(kwargs["status"])
 
-    with pytest.raises(LookupError, match="unavailable"):
-        await backtest.run_jp_backtest(
-            QlibBacktestRequest(market="JP", model_id="missing"),
-            SimpleNamespace(save_run=save),
-        )
-    assert saved[0].status == "failed" and saved[0].currency == "JPY"
+    service = runtime_factory(SimpleNamespace(save_run=save))
+    result = await service.run_backtest(
+        QlibBacktestRequest(market="JP", model_id="missing")
+    )
+    assert "unavailable" in result.error_message
+    assert saved == ["running", "failed"]
+    assert result.status == "failed" and result.currency == "JPY"
 
 
 @pytest.mark.asyncio

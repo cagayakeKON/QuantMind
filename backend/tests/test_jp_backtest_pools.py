@@ -7,7 +7,6 @@ import pandas as pd
 import pytest
 
 from backend.services.simulation.jp import backtest
-from backend.services.simulation.jp.rules import RuleDataMissing
 from backend.shared.stock_pool.resolver import PoolResolver, ResolveContext
 from backend.shared.stock_pool.schemas import PoolSnapshot
 
@@ -22,7 +21,7 @@ class Store:
         self.results = []
 
     async def save_run(self, *args, **kwargs):
-        self.results.append(args[6])
+        self.results.append(kwargs["result"])
 
 
 @pytest.fixture
@@ -49,7 +48,7 @@ def registered(model_data, monkeypatch):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("syntax", ["list:", "LIST:", "file:"])
 async def test_existing_resolver_filters_out_higher_score_outside_pool(
-    registered, tmp_path, syntax
+    registered, tmp_path, syntax, runtime_factory
 ):
     request, _, _ = registered
     if syntax == "file:":
@@ -59,7 +58,7 @@ async def test_existing_resolver_filters_out_higher_score_outside_pool(
     else:
         request.pool_id = f"{syntax}216A0.JP"
     store = Store()
-    result = await backtest.run_jp_backtest(request, store)
+    result = await runtime_factory(store).run_backtest(request)
     assert {fill["symbol"] for fill in result.trades} == {"JP216A0"}
     expected = PoolResolver().resolve_sync(
         request.pool_id, ResolveContext(market="JP"), strict=True
@@ -71,7 +70,7 @@ async def test_existing_resolver_filters_out_higher_score_outside_pool(
 
 @pytest.mark.asyncio
 async def test_pool_id_precedes_universe_and_passes_existing_identity(
-    registered, monkeypatch
+    registered, monkeypatch, runtime_factory
 ):
     request, _, _ = registered
     request.pool_id, request.universe = "pool:my-jp", "list:JP72030"
@@ -88,13 +87,13 @@ async def test_pool_id_precedes_universe_and_passes_existing_identity(
         return actual
 
     monkeypatch.setattr(backtest.pool_resolver, "resolve", resolve)
-    result = await backtest.run_jp_backtest(request, Store())
+    result = await runtime_factory(Store()).run_backtest(request)
     assert {fill["symbol"] for fill in result.trades} == {"JP216A0"}
 
 
 @pytest.mark.asyncio
 async def test_user_pool_uses_shared_database_lookup_and_member_file(
-    registered, tmp_path, monkeypatch
+    registered, tmp_path, monkeypatch, runtime_factory
 ):
     request, _, _ = registered
     request.pool_id = "pool:my-jp"
@@ -127,7 +126,7 @@ async def test_user_pool_uses_shared_database_lookup_and_member_file(
         yield DB()
 
     monkeypatch.setattr("backend.shared.database_pool.get_db", get_db)
-    result = await backtest.run_jp_backtest(request, Store())
+    result = await runtime_factory(Store()).run_backtest(request)
     assert any(p["uid"] == "alice" and p["tid"] == "tenant-a" for p in seen)
     assert result.config["pool_snapshot"]["pool_id"] == "pool-for-alice"
     assert {fill["symbol"] for fill in result.trades} == {"JP216A0"}
@@ -138,7 +137,7 @@ async def test_user_pool_uses_shared_database_lookup_and_member_file(
     "kind", ["empty", "wrong-market", "no-signals", "resolver-denied"]
 )
 async def test_unusable_pool_fails_and_is_persisted_without_all_market_fallback(
-    registered, monkeypatch, kind
+    registered, monkeypatch, kind, runtime_factory
 ):
     request, _, _ = registered
     request.pool_id = "pool:requested"
@@ -159,15 +158,8 @@ async def test_unusable_pool_fails_and_is_persisted_without_all_market_fallback(
 
     monkeypatch.setattr(backtest.pool_resolver, "resolve", resolve)
     store = Store()
-    expected = (
-        PermissionError
-        if kind == "resolver-denied"
-        else RuleDataMissing
-        if kind == "no-signals"
-        else ValueError
-    )
-    with pytest.raises(expected):
-        await backtest.run_jp_backtest(request, store)
+    result = await runtime_factory(store).run_backtest(request)
+    assert result.status == "failed" and result.error_message
     assert store.results[-1].status == "failed"
     assert not store.results[-1].trades
 
@@ -181,27 +173,27 @@ def test_sync_executor_cannot_bypass_shared_pool_resolution(registered):
 
 @pytest.mark.asyncio
 async def test_missing_raw_member_file_reports_missing_pool_in_jp_context(
-    registered, tmp_path
+    registered, tmp_path, runtime_factory
 ):
     request, _, _ = registered
     request.universe = str(tmp_path / "absent.txt")
     store = Store()
-    with pytest.raises(ValueError, match="absent.txt"):
-        await backtest.run_jp_backtest(request, store)
+    result = await runtime_factory(store).run_backtest(request)
+    assert "absent.txt" in result.error_message
     assert store.results[-1].status == "failed"
 
 
 @pytest.mark.asyncio
 async def test_changed_member_file_changes_checksum_and_traded_symbols(
-    registered, tmp_path
+    registered, tmp_path, runtime_factory
 ):
     request, _, _ = registered
     path = tmp_path / "members.txt"
     path.write_text("JP216A0\n", encoding="utf-8")
     request.universe = str(path)
-    first = await backtest.run_jp_backtest(request, Store())
+    first = await runtime_factory(Store()).run_backtest(request)
     path.write_text("JP72030\n", encoding="utf-8")
-    second = await backtest.run_jp_backtest(request, Store())
+    second = await runtime_factory(Store()).run_backtest(request)
     assert first.config["pool_checksum"] != second.config["pool_checksum"]
     assert {fill["symbol"] for fill in first.trades} == {"JP216A0"}
     assert {fill["symbol"] for fill in second.trades} == {"JP72030"}
@@ -209,7 +201,7 @@ async def test_changed_member_file_changes_checksum_and_traded_symbols(
 
 @pytest.mark.asyncio
 async def test_running_backtest_keeps_resolved_snapshot_when_members_change(
-    registered, tmp_path, monkeypatch
+    registered, tmp_path, monkeypatch, runtime_factory
 ):
     request, _, _ = registered
     path = tmp_path / "members.txt"
@@ -223,7 +215,7 @@ async def test_running_backtest_keeps_resolved_snapshot_when_members_change(
         return original(*args, **kwargs)
 
     monkeypatch.setattr(backtest, "run_cash_backtest", execute)
-    result = await backtest.run_jp_backtest(request, Store())
+    result = await runtime_factory(Store()).run_backtest(request)
     assert {fill["symbol"] for fill in result.trades} == {"JP216A0"}
     assert result.config["pool_snapshot"]["api_symbols"] == ["JP216A0"]
     current = PoolResolver().resolve_sync(request.pool_id, ResolveContext(market="JP"))
