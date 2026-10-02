@@ -19,7 +19,7 @@ import asyncio
 import logging
 import math
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from typing import Any
 
@@ -38,6 +38,10 @@ from backend.services.simulation.models.replay import (
     ReplayTrade,
 )
 from backend.services.simulation.replay.account import ReplayAccountManager
+from backend.services.simulation.replay.execution_context import (
+    ReplayExecutionContext,
+    open_registered_replay_execution_context,
+)
 from backend.services.simulation.replay.proposal import (
     resolve_stop_fill_price,
     scan_stop_loss,
@@ -122,12 +126,45 @@ class ReplayDayRunner:
         market_data: LocalMarketData | None = None,
         loader: ReplaySignalLoader | None = None,
         match_config: MatchConfig | None = None,
+        *,
+        execution_context: ReplayExecutionContext | None = None,
     ):
         self._market_data = market_data or get_local_market_data()
         self._loader = loader or replay_signal_loader
         # 回放按开盘价撮合：信号是昨收后算出来的，次日开盘才可交易
         self._cfg = match_config or MatchConfig(price_mode="open")
         self._calculator = RebalanceCalculator()
+        self._execution_context = execution_context
+        self._provided_execution_context = execution_context
+        self._has_market_match_config = match_config is not None
+
+    async def _prepare_execution_context(
+        self, params, trade_date, accounts, match_config=None
+    ):
+        context = self._provided_execution_context
+        if context is None:
+            context = await asyncio.to_thread(
+                open_registered_replay_execution_context, params, trade_date
+            )
+        if context is not None:
+            selected = params.get("market")
+            if (
+                not isinstance(selected, str)
+                or selected.upper() != context.market
+                or params.get("data_version") != context.data_version
+            ):
+                raise ValueError("Replay parameters do not match execution context")
+            context.require_account(accounts, trade_date)
+            if not self._has_market_match_config and match_config is None:
+                raise ValueError("Registered replay requires explicit matching settings")
+        self._execution_context = context
+
+    def _require_market_features(self, *, code=False, stop_loss=False):
+        if self._execution_context is not None and (code or stop_loss):
+            raise NotImplementedError(
+                "Registered replay requires its code/intraday data adapter "
+                "before using these execution paths"
+            )
 
     async def run_day(
         self,
@@ -151,6 +188,13 @@ class ReplayDayRunner:
         cfg = match_config or self._cfg
 
         params = strategy_params or {}
+        await self._prepare_execution_context(
+            params, trade_date, accounts, match_config
+        )
+        self._require_market_features(
+            code=self._is_code_session(params),
+            stop_loss=bool(stop_loss_pct and stop_loss_pct > 0),
+        )
         account_data, signals, bars = await self._prepare_day(
             db, session_id, trade_date, accounts, params
         )
@@ -239,6 +283,13 @@ class ReplayDayRunner:
         result = DayResult(trade_date=trade_date)
         cfg = match_config or self._cfg
 
+        await self._prepare_execution_context(
+            strategy_params or {}, trade_date, accounts, match_config
+        )
+        self._require_market_features(
+            code=self._is_code_session(strategy_params),
+            stop_loss=any(item.get("origin") == "stop_loss" for item in accepted),
+        )
         account_data, signals, bars = await self._prepare_day(
             db, session_id, trade_date, accounts, strategy_params
         )
@@ -310,6 +361,7 @@ class ReplayDayRunner:
         cfg: MatchConfig,
     ) -> None:
         """执行单笔止损（手动模式下止损强制执行，复用 auto 路径的价格逻辑）。"""
+        self._require_market_features(stop_loss=True)
         symbol = item["symbol"]
         bar = bars.get(symbol)
         if bar is None or bar.suspended:
@@ -391,11 +443,16 @@ class ReplayDayRunner:
         code 模式不载模型分数（signals=[]），wanted 按持仓 ∪ 策略代码
         symbols 取行情，保证策略标的有 bar 可撮合。
         """
+        if self._execution_context is not None:
+            self._execution_context.require_account(accounts, trade_date)
         account_data = await accounts.get()
         if not account_data:
             return None, [], {}
 
-        await accounts.unlock()
+        if self._execution_context is not None:
+            await accounts.prepare_dated_day(trade_date)
+        else:
+            await accounts.unlock()
         account_data = await accounts.get() or {}
 
         held = list((account_data.get("positions") or {}).keys())
@@ -418,7 +475,13 @@ class ReplayDayRunner:
         # 行情直读是同步磁盘 IO，放线程里跑，避免阻塞事件循环
         bars = (
             await asyncio.to_thread(
-                self._market_data.load_date, trade_date, wanted
+                (
+                    self._execution_context.reader
+                    if self._execution_context is not None
+                    else self._market_data
+                ).load_date,
+                trade_date,
+                wanted,
             )
             if wanted
             else {}
@@ -437,6 +500,7 @@ class ReplayDayRunner:
         user_id: str,
     ) -> Any:
         """取 code 会话编译产物；进程重启导致缓存丢失时按固化代码自动重编。"""
+        self._require_market_features(code=True)
         from backend.services.simulation.models.replay import ReplaySession
         from backend.services.simulation.replay import code_runner
 
@@ -481,6 +545,7 @@ class ReplayDayRunner:
         user_id: str,
     ) -> tuple[list[Order], dict[str, Any]]:
         """code 模式：跑用户 hooks → OrderIntent → Order（具体 qty+开盘价）。"""
+        self._require_market_features(code=True)
         from backend.services.simulation.replay import code_runner
 
         await self._ensure_code_compiled(
@@ -515,6 +580,11 @@ class ReplayDayRunner:
         卖出附 avg_cost/est_pnl，买入附 est_amount。
         """
         params = strategy_params or {}
+        await self._prepare_execution_context(params, trade_date, accounts)
+        self._require_market_features(
+            code=self._is_code_session(params),
+            stop_loss=bool(stop_loss_pct and stop_loss_pct > 0),
+        )
         account_data, signals, bars = await self._prepare_day(
             db, session_id, trade_date, accounts, params
         )
@@ -596,6 +666,7 @@ class ReplayDayRunner:
         result: DayResult,
         cfg: MatchConfig | None = None,
     ) -> None:
+        self._require_market_features(stop_loss=True)
         cfg = cfg or self._cfg
         account_data = await accounts.get() or {}
         for symbol, pos in list((account_data.get("positions") or {}).items()):
@@ -745,7 +816,14 @@ class ReplayDayRunner:
             total_asset=float(account_data.get("total_asset", 0)),
             positions=account_data.get("positions", {}) or {},
         )
-        return self._calculator.calculate(
+        calculator = self._calculator
+        if self._execution_context is not None:
+            calculator = RebalanceCalculator(
+                trading_unit=lambda symbol: self._execution_context.trading_unit(
+                    symbol, bars
+                )
+            )
+        return calculator.calculate(
             signals=signals, strategy=config, quotes=quotes, account=account,
             day_index=day_index,
         )
@@ -762,6 +840,11 @@ class ReplayDayRunner:
         origin: OrderOrigin,
         cfg: MatchConfig | None = None,
     ) -> None:
+        context = self._execution_context
+        if context is not None:
+            context.require_account(accounts, trade_date)
+            if cfg is None and not self._has_market_match_config:
+                raise ValueError("Registered replay requires explicit matching settings")
         cfg = cfg or self._cfg
         bar = bars.get(order.symbol)
         if bar is None:
@@ -791,13 +874,25 @@ class ReplayDayRunner:
                 avg_cost_before = cost if cost > 0 else None
                 holding_days = _compute_holding_days(pos.get("first_buy_date"), trade_date)
 
-        mr = match_order(
-            side=side,
-            quantity=int(order.quantity),
-            bar=bar,
-            cfg=cfg,
-            available_volume=available_volume,
-        )
+        if context is not None:
+            used_volume = await context.executed_volume(accounts, order.symbol)
+            mr = context.match(
+                symbol=order.symbol,
+                side=side,
+                quantity=order.quantity,
+                bar=bar,
+                cfg=cfg,
+                available_volume=available_volume,
+                used_volume=used_volume,
+            )
+        else:
+            mr = match_order(
+                side=side,
+                quantity=int(order.quantity),
+                bar=bar,
+                cfg=cfg,
+                available_volume=available_volume,
+            )
         if not mr.success:
             result.rejected.append(
                 {
@@ -811,18 +906,35 @@ class ReplayDayRunner:
             )
             return
 
-        gross = mr.fill_quantity * mr.fill_price
-        if side == "buy":
-            delta_cash, delta_volume = -(gross + mr.total_fee), mr.fill_quantity
+        if context is not None:
+            update = await accounts.apply_dated_fill(
+                trade_date=trade_date, symbol=order.symbol, side=side, matched=mr
+            )
+            # Exact amounts go to the dated cash rules. The common PG/response
+            # contract remains numeric, including its existing P&L calculation.
+            mr = replace(
+                mr,
+                **{
+                    name: float(getattr(mr, name))
+                    for name in (
+                        "fill_price", "commission", "stamp_duty",
+                        "transfer_fee", "total_fee",
+                    )
+                },
+            )
         else:
-            delta_cash, delta_volume = gross - mr.total_fee, -mr.fill_quantity
+            gross = mr.fill_quantity * mr.fill_price
+            if side == "buy":
+                delta_cash, delta_volume = -(gross + mr.total_fee), mr.fill_quantity
+            else:
+                delta_cash, delta_volume = gross - mr.total_fee, -mr.fill_quantity
 
-        update = await accounts.apply_fill(
-            symbol=order.symbol,
-            delta_cash=delta_cash,
-            delta_volume=delta_volume,
-            price=mr.fill_price,
-        )
+            update = await accounts.apply_fill(
+                symbol=order.symbol,
+                delta_cash=delta_cash,
+                delta_volume=delta_volume,
+                price=mr.fill_price,
+            )
         if not update.get("success"):
             reason = update.get("reason", "BALANCE_UPDATE_FAILED")
             result.rejected.append(

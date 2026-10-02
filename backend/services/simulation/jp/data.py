@@ -61,6 +61,8 @@ def open_execution_data(version: str | None = None) -> JPExecutionData:
 
 
 class JPExecutionData:
+    execution_data_errors = (RuleDataMissing,)
+
     def __init__(self, hub: QuantJPDataHub, units_path: str | Path | None = None):
         self.hub = hub
         calendar = hub.fetch_calendar()
