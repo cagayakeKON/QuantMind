@@ -1,5 +1,7 @@
 """Map recorded JP cash results to the existing analysis data contracts."""
 
+from functools import partial
+
 import numpy as np
 import pandas as pd
 
@@ -49,12 +51,68 @@ def read_benchmark_prices(result, benchmark_id, start_date, end_date):
 
 
 def public_trades(fills):
-    """Add the public action field to copies, preserving ledger quantities/times."""
+    """Add public date/fee/PnL fields to copies without changing ledger fields."""
     return [
         {
             **fill,
             "symbol": StockCodeUtil.to_prefix(fill["symbol"], market="JP"),
             "action": fill["side"].lower(),
+            "date": fill["trade_date"],
+            "commission": float(fill["fee"]),
+            **(
+                {"pnl": float(fill["realized_pnl"])}
+                if fill.get("realized_pnl") is not None
+                else {}
+            ),
         }
         for fill in fills
     ]
+
+
+def public_report_metrics(result, request):
+    """Map cash valuations to the original public report metric algorithms."""
+    from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
+
+    equity = pd.DataFrame(result.equity_curve).set_index("date")
+    equity.index = pd.to_datetime(equity.index)
+    # The saved first row is the prior-session initial balance, not an executed
+    # session. Keep it in the curve, but supply actual session rows to the public
+    # report's existing period-counting and net-equity metrics.
+    report = pd.DataFrame(
+        {
+            "account": equity["value"].iloc[1:],
+            "return": equity["value"].pct_change().iloc[1:],
+        }
+    )
+    effective_request = request.model_copy(
+        update={"risk_free_rate": result.config["risk_free_rate"]}
+    )
+    performance = RiskAnalyzer._extract_performance_metrics(report, effective_request)
+    daily_returns = performance.pop("daily_returns")
+    # The cash report keeps its initial balance; its signed drawdown already
+    # comes from the same public curve algorithm.
+    performance["max_drawdown"] = min(row["drawdown"] for row in result.drawdown_curve)
+    performance["annual_return"] = performance["annual_return"] or 0.0
+    performance["sharpe_ratio"] = performance["sharpe_ratio"] or 0.0
+    risk = RiskAnalyzer._compute_risk_metrics(
+        daily_returns=daily_returns,
+        benchmark=request.benchmark,
+        start_date=str(equity.index[0].date()),
+        end_date=request.end_date,
+        annual_return=performance["annual_return"],
+        risk_free_rate=effective_request.risk_free_rate,
+        price_loader=partial(read_benchmark_prices, result),
+    )
+    trade = RiskAnalyzer._calculate_trade_stats(result.trades, daily_returns)
+    # Preserve the common calculation, while exposing its non-finite values as
+    # JSON null in these new cash-report fields, as the public helper specifies.
+    trade = {key: RiskAnalyzer._clean_nan(value) for key, value in trade.items()}
+    advanced = RiskAnalyzer._calculate_advanced_trade_stats(
+        result.trades, daily_returns
+    )
+    return {
+        **performance,
+        **risk,
+        **trade,
+        "advanced_stats": {**result.advanced_stats, **advanced},
+    }

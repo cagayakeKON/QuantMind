@@ -307,11 +307,25 @@ def run_cash_backtest(
             }
         )
         previous = day
-    values = np.array([row["value"] for row in equity_curve])
-    returns = values[1:] / values[:-1] - 1
-    total = float(values[-1] / values[0] - 1)
-    volatility = float(np.std(returns, ddof=1)) if len(returns) > 1 else 0
-    drawdowns = 1 - values / np.maximum.accumulate(values)
+    legacy_metrics = {}
+    drawdowns = []
+    if request.strategy_type == "jp_cash_topk":
+        values = np.array([row["value"] for row in equity_curve])
+        returns = values[1:] / values[:-1] - 1
+        total = float(values[-1] / values[0] - 1)
+        volatility = float(np.std(returns, ddof=1)) if len(returns) > 1 else 0
+        drawdowns = 1 - values / np.maximum.accumulate(values)
+        legacy_metrics = {
+            "total_return": total,
+            "annual_return": float((1 + total) ** (252 / len(sessions)) - 1),
+            "sharpe_ratio": float(
+                (np.mean(returns) - risk_free / 252) / volatility * math.sqrt(252)
+            )
+            if volatility
+            else None,
+            "volatility": volatility * math.sqrt(252),
+            "max_drawdown": float(max(drawdowns)),
+        }
     config = request.model_dump(mode="json")
     config.update(
         {
@@ -377,7 +391,7 @@ def run_cash_backtest(
 
         common_drawdowns = RiskAnalyzer._build_drawdown_curve(equity_curve)
         trades = public_trades(trades)
-    return QlibBacktestResult(
+    report = QlibBacktestResult(
         backtest_id=request.backtest_id or uuid4().hex,
         user_id=request.user_id,
         tenant_id=request.tenant_id,
@@ -387,17 +401,7 @@ def run_cash_backtest(
         market="JP",
         currency="JPY",
         data_version=execution_version,
-        total_return=total,
-        annual_return=float((1 + total) ** (252 / len(sessions)) - 1),
-        sharpe_ratio=float(
-            (np.mean(returns) - risk_free / 252) / volatility * math.sqrt(252)
-        )
-        if volatility
-        else None,
-        volatility=volatility * math.sqrt(252),
-        max_drawdown=min(row["drawdown"] for row in common_drawdowns)
-        if common_drawdowns is not None
-        else float(max(drawdowns)),
+        **legacy_metrics,
         benchmark_symbol="TOPIX",
         benchmark_return=equity_curve[-1]["benchmark_value"]
         / float(request.initial_capital)
@@ -426,6 +430,11 @@ def run_cash_backtest(
         },
         execution_time=time.monotonic() - started,
     )
+    if request.strategy_type != "jp_cash_topk":
+        from .analysis_data import public_report_metrics
+
+        report = report.model_copy(update=public_report_metrics(report, request))
+    return report
 
 
 async def execute_backtest(request):

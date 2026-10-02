@@ -157,7 +157,12 @@ def test_public_trade_mapping_preserves_ledger_and_original_fifo_holding_rule():
     public = analysis_data.public_trades(fills)
     assert fills == before
     assert public[0]["action"] == "buy" and public[1]["action"] == "sell"
-    assert [{k: v for k, v in row.items() if k != "action"} for row in public] == before
+    assert [
+        {k: row[k] for k in original}
+        for original, row in zip(before, public, strict=True)
+    ] == before
+    assert public[0]["date"] == fills[0]["trade_date"]
+    assert public[0]["commission"] == float(fills[0]["fee"])
     holding = TradeStatsService()._derive_holding_days_from_trades(pd.DataFrame(public))
     assert holding.tolist() == [3]  # Existing public statistics use calendar days.
 
