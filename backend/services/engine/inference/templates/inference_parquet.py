@@ -69,6 +69,14 @@ _DEFAULT_DATA_DIR = "/app/db/feature_snapshots"
 
 def _quantdb_reader(meta: dict, data_dir: Path):
     """Open the immutable raw QuantDB source for new direct-read models."""
+    market = str((meta.get("context") or {}).get("market") or "CN").upper()
+    if market == "JP":
+        if meta.get("data_source") != "quantdb_factors" or meta.get("factor_source") != "l1_factors":
+            raise ValueError("JP inference requires the published l1_factors source")
+        from backend.services.engine.data_platform.quantdb_factor_reader import QuantDBFactorReader
+        from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+        # The runner supplies the current publication pinned for this inference.
+        return QuantDBFactorReader(QuantJPDataHub(data_dir).data_dir, market="JP")
     if meta.get("data_source") != "quantdb_factors":
         return None
     from backend.services.engine.data_platform.quantdb_factor_reader import QuantDBFactorReader

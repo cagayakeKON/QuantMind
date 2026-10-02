@@ -60,13 +60,14 @@ _describe_lock = threading.Lock()
 
 def _cached_describe(reader, source: str) -> Any:
     now = time.monotonic()
+    cache_key = f"{reader.data_dir}:{getattr(reader, 'market', '')}:{source}"
     with _describe_lock:
-        hit = _describe_cache.get(source)
+        hit = _describe_cache.get(cache_key)
         if hit and now - hit[0] < _DESCRIBE_TTL:
             return hit[1]
     status = reader.describe(source)
     with _describe_lock:
-        _describe_cache[source] = (time.monotonic(), status)
+        _describe_cache[cache_key] = (time.monotonic(), status)
     return status
 from sqlalchemy.orm import sessionmaker
 
@@ -114,10 +115,12 @@ def _resolve_market_factor_data_dir(meta: dict) -> str:
         )
         return str(market_data_dir(market))
     except Exception:  # noqa: BLE001
+        if str((meta.get("context") or {}).get("market") or "").upper() == "JP":
+            raise
         return _resolve_quantdb_data_dir()
 
 
-def _load_close_price_map(trade_date: str) -> dict[str, float]:
+def _load_close_price_map(trade_date: str, market: str = "CN") -> dict[str, float]:
     """从 QuantDB 日线 parquet 一次加载当日收盘价。
 
     返回 {纯数字代码: close}，与 engine_signal_scores.symbol 口径一致。
@@ -128,6 +131,15 @@ def _load_close_price_map(trade_date: str) -> dict[str, float]:
         import pandas as pd
 
         day = date.fromisoformat(str(trade_date)[:10])
+        if market.upper() == "JP":
+            from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+            hub = QuantJPDataHub()
+            frame = hub._read("1_kline_data/daily_unadjusted", day, day)
+            return {
+                StockCodeUtil.to_prefix(row.symbol, market="JP"): float(row.close)
+                for row in frame.itertuples()
+                if pd.notna(row.close) and float(row.close) > 0
+            }
         dt = day.strftime("%Y%m%d")
         base = Path(_resolve_quantdb_data_dir())
         frame = None
@@ -520,8 +532,12 @@ class InferenceScriptRunner:
         try:
             from backend.services.engine.data_platform.quantdb_factor_reader import QuantDBFactorReader
             data_dir = Path(_resolve_market_factor_data_dir(meta))
-            reader = QuantDBFactorReader(data_dir)
-            source = str(meta.get("factor_source") or "l1_l2_factors")
+            market = str((meta.get("context") or {}).get("market") or "CN").upper()
+            reader = (
+                QuantDBFactorReader(data_dir, market="JP")
+                if market == "JP" else QuantDBFactorReader(data_dir)
+            )
+            source = str(meta.get("factor_source") or ("l1_factors" if market == "JP" else "l1_l2_factors"))
             # describe() 会全量扫描 parquet 求 min/max，开销大；做 TTL 缓存避免每次预检 2.6s
             status = _cached_describe(reader, source)
             if not status.ready:
@@ -699,6 +715,10 @@ class InferenceScriptRunner:
         from datetime import date as _date, timedelta
 
         market_upper = (market or "A").upper()
+        if market_upper == "JP":
+            from backend.services.engine.data_platform.jp_calendar import resolve_cash_session
+            day = _date.fromisoformat(str(data_trade_date)[:10])
+            return resolve_cash_session(day, direction="next").isoformat()
 
         # 加密货币 7×24，T+1 自然日
         if market_upper == "CRYPTO":
@@ -1365,6 +1385,8 @@ class InferenceScriptRunner:
     @staticmethod
     def _normalize_code(code: str) -> str:
         """提取纯 6 位数字代码，去掉 SH/SZ/BJ 前缀和 .SH/.SZ/.BJ 后缀。"""
+        if StockCodeUtil.is_jp_symbol(code):
+            return StockCodeUtil.to_prefix(code, market="JP")
         c = code.strip().upper()
         for prefix in ("SH", "SZ", "BJ"):
             if c.startswith(prefix):
@@ -1426,40 +1448,41 @@ class InferenceScriptRunner:
             if isinstance(item, dict) and "symbol" in item and "score" in item:
                 try:
                     symbol = str(item["symbol"]).strip().upper()
-                    # 1. 排除 B 股: 上海 B (900xxx), 深圳 B (200xxx)
-                    if symbol.startswith("SH900") or symbol.startswith("SZ200"):
-                        continue
-                    if ".SH" in symbol and symbol.startswith("900"):
-                        continue
-                    if ".SZ" in symbol and symbol.startswith("200"):
-                        continue
-                    # 处理无前缀的纯数字
-                    if symbol.isdigit() and len(symbol) == 6:
-                        if symbol.startswith("900") or symbol.startswith("200"):
+                    if not StockCodeUtil.is_jp_symbol(symbol):
+                        # 1. 排除 B 股: 上海 B (900xxx), 深圳 B (200xxx)
+                        if symbol.startswith("SH900") or symbol.startswith("SZ200"):
+                            continue
+                        if ".SH" in symbol and symbol.startswith("900"):
+                            continue
+                        if ".SZ" in symbol and symbol.startswith("200"):
+                            continue
+                        # 处理无前缀的纯数字
+                        if symbol.isdigit() and len(symbol) == 6:
+                            if symbol.startswith("900") or symbol.startswith("200"):
+                                continue
+
+                        # 2. 排除北交所: BJ 前缀或 .BJ 后缀，或数字开头 (43, 83, 87, 88)
+                        if symbol.startswith("BJ") or ".BJ" in symbol:
+                            continue
+                        if symbol.startswith(("43", "83", "87", "88", "92")):
                             continue
 
-                    # 2. 排除北交所: BJ 前缀或 .BJ 后缀，或数字开头 (43, 83, 87, 88)
-                    if symbol.startswith("BJ") or ".BJ" in symbol:
-                        continue
-                    if symbol.startswith(("43", "83", "87", "88", "92")):
-                        continue
+                        # 3. 排除指数代码: SH000xxx, SZ399xxx 等
+                        if symbol.startswith("SH000") or symbol.startswith("SZ399"):
+                            continue
+                        if symbol.startswith("000") and symbol.endswith(".SH"):
+                            continue
+                        if symbol.startswith("399") and symbol.endswith(".SZ"):
+                            continue
 
-                    # 3. 排除指数代码: SH000xxx, SZ399xxx 等
-                    if symbol.startswith("SH000") or symbol.startswith("SZ399"):
-                        continue
-                    if symbol.startswith("000") and symbol.endswith(".SH"):
-                        continue
-                    if symbol.startswith("399") and symbol.endswith(".SZ"):
-                        continue
-
-                    # 4. 排除 ST/*ST 股票（代码匹配 + 名称匹配）
-                    sym_code = InferenceScriptRunner._normalize_code(symbol)
-                    if sym_code and sym_code in st_normalized:
-                        continue
-                    # 名称包含 ST 的也要排除（兜底）
-                    name = str(item.get("name", "")).upper()
-                    if "ST" in name and ("*" in name or name.startswith("ST")):
-                        continue
+                        # 4. 排除 ST/*ST 股票（代码匹配 + 名称匹配）
+                        sym_code = InferenceScriptRunner._normalize_code(symbol)
+                        if sym_code and sym_code in st_normalized:
+                            continue
+                        # 名称包含 ST 的也要排除（兜底）
+                        name = str(item.get("name", "")).upper()
+                        if "ST" in name and ("*" in name or name.startswith("ST")):
+                            continue
 
                     valid.append(
                         {
@@ -1527,6 +1550,7 @@ class InferenceScriptRunner:
         feature_version = self._resolve_feature_version(model_name)
         # 推理日期默认等于预测日期（兼容旧调用）
         inference_date = data_trade_date or prediction_trade_date
+        model_market = str((self._read_primary_metadata().get("context") or {}).get("market") or "CN").upper()
 
         # shared.database 的 SessionLocal 在 asyncpg URL 下会触发 greenlet 错误，
         # 这里显式构造一个同步驱动会话，仅用于脚本写库链路。
@@ -1578,12 +1602,19 @@ class InferenceScriptRunner:
         except Exception as exc:
             logger.error(f"[InferenceScriptRunner] 写库失败: {exc}")
             db.rollback()
+            if model_market == "JP":
+                raise
         finally:
             db.close()
             try:
                 sync_engine.dispose()
             except Exception:
                 pass
+
+        # JP execution belongs to its isolated cash ledger. Do not send JP
+        # signals to the shared broker stream or CN-only TDX hooks.
+        if model_market == "JP":
+            return
 
         # 发布信号到 Redis Stream（失败不影响主流程）
         try:
@@ -1849,7 +1880,11 @@ class InferenceScriptRunner:
         # 历史补全与当日推理同源、一次加载；禁止对 ~5000 股逐个打远程行情 Redis
         # （此前单日写库因此卡在 5–7 分钟）。
         _ = raw_symbols  # 保留签名兼容；价格已不再依赖 Redis 前缀键
-        price_map = _load_close_price_map(inference_date)
+        model_market = str((self._read_primary_metadata().get("context") or {}).get("market") or "CN").upper()
+        price_map = (
+            _load_close_price_map(inference_date, market="JP")
+            if model_market == "JP" else _load_close_price_map(inference_date)
+        )
 
         score_sql = text("""
             INSERT INTO engine_signal_scores (
@@ -1890,7 +1925,10 @@ class InferenceScriptRunner:
                 quality_parts["confidence"] = round(float(confidence_list[idx]), 4)
             quality = json.dumps(quality_parts) if quality_parts else None
             digits = re.sub(r"\D", "", str(sym))
-            expected_price = price_map.get(digits) if digits else None
+            expected_price = (
+                price_map.get(StockCodeUtil.to_prefix(sym, market="JP"))
+                if model_market == "JP" else price_map.get(digits) if digits else None
+            )
             price_by_sym[str(sym)] = expected_price
             score_rows.append(
                 {

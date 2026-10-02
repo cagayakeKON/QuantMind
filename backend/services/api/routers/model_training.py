@@ -434,6 +434,7 @@ from backend.shared.qlib_paths import (
 
 _MARKET_QLIB_DATA_PATH: dict[str, str] = {
     "CN": resolve_qlib_provider_uri("CN"),
+    "JP": resolve_qlib_provider_uri("JP"),
     "HK": resolve_qlib_provider_uri("HK"),
     "US": resolve_qlib_provider_uri("US"),
     "CRYPTO": resolve_qlib_provider_uri("CRYPTO"),
@@ -442,6 +443,7 @@ _MARKET_QLIB_DATA_PATH: dict[str, str] = {
 
 _MARKET_CALENDAR: dict[str, str] = {
     "CN": "SSE",
+    "JP": "XTKS",
     "HK": "HKEX",
     "US": "NYSE",
     "CRYPTO": "24/7",

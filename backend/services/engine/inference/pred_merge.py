@@ -46,7 +46,7 @@ def merge_signals_into_pred(
     for d, signals in signals_by_date:
         for s in signals or []:
             sym = StockCodeUtil.to_prefix(str(s.get("symbol", "")))
-            if not re.match(r"^(SH|SZ|BJ)\d{6}$", sym):
+            if not (re.match(r"^(SH|SZ|BJ)\d{6}$", sym) or StockCodeUtil.is_jp_symbol(sym)):
                 continue
             try:
                 score = float(s.get("score"))
@@ -103,6 +103,7 @@ def _refresh_pred_daily(parquet_file: Path, new_df) -> None:
     import tempfile
 
     import pandas as pd
+    from backend.shared.stock_utils import StockCodeUtil
 
     if new_df.empty or "trade_date" not in new_df.columns:
         return
@@ -112,7 +113,7 @@ def _refresh_pred_daily(parquet_file: Path, new_df) -> None:
         rows = []
         for _, r in grp.iterrows():
             sym = str(r.get("symbol", ""))
-            if not re.match(r"^(SH|SZ|BJ)\d{6}$", sym):
+            if not (re.match(r"^(SH|SZ|BJ)\d{6}$", sym) or StockCodeUtil.is_jp_symbol(sym)):
                 continue
             if sym.startswith("SH000") or sym.startswith("SZ399"):
                 continue

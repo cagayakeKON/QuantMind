@@ -274,6 +274,8 @@ class TradingCalendarService:
         m = str(market or "").strip().upper()
         if not m:
             raise ValueError("market is required")
+        if m in {"JP", "JPX"}:
+            return "XTKS"
         # 自动解析: 如果是股票代码，推断市场
         if "." in m or m.isdigit() or len(m) > 6:
             resolved = resolve_market_from_symbol(m)
@@ -434,6 +436,11 @@ class TradingCalendarService:
         mkt = self._normalize_market(market)
         d = self._normalize_trade_date(trade_date)
 
+        if mkt == "XTKS":
+            from backend.services.engine.data_platform.jp_calendar import is_cash_session
+
+            return is_cash_session(d)
+
         # 1. 先查 DB override
         db_override = await self._find_db_override(
             market=mkt, trade_date=d, tenant_id=tenant_id, user_id=user_id
@@ -462,6 +469,11 @@ class TradingCalendarService:
     ) -> date:
         mkt = self._normalize_market(market)
         cursor = self._normalize_trade_date(trade_date) + timedelta(days=1)
+
+        if mkt == "XTKS":
+            from backend.services.engine.data_platform.jp_calendar import resolve_cash_session
+
+            return resolve_cash_session(self._normalize_trade_date(trade_date), direction="next")
 
         # 1. exchange_calendars 为主
         xcal_next = self._next_trading_day_xcal(mkt, self._normalize_trade_date(trade_date))
@@ -503,6 +515,11 @@ class TradingCalendarService:
     ) -> date:
         mkt = self._normalize_market(market)
         cursor = self._normalize_trade_date(trade_date) - timedelta(days=1)
+
+        if mkt == "XTKS":
+            from backend.services.engine.data_platform.jp_calendar import resolve_cash_session
+
+            return resolve_cash_session(self._normalize_trade_date(trade_date), direction="previous")
 
         # 1. exchange_calendars 为主
         xcal_prev = self._prev_trading_day_xcal(mkt, self._normalize_trade_date(trade_date))

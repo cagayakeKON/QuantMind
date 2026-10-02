@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Search, Play, Calendar, Sparkles, RefreshCw, Layers, Database, Sliders, Clock,
   Cpu, TrendingUp, BarChart3, History, Shield, CheckCircle2, AlertCircle, Info, Star,
@@ -46,6 +46,7 @@ import { selectCurrentMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
 import { normalizeStockCode, toSuffixCode } from '../utils/portfolioUtils';
 import { stockListService, Stock } from '../services/stockListService';
+import { marketDataService } from '../services/marketDataService';
 
 const { Text } = Typography;
 
@@ -66,6 +67,8 @@ export const InferenceCenterPage: React.FC = () => {
   const location = useLocation();
   const currentMarket = useAppSelector(selectCurrentMarket);
   const marketConfig = getMarketConfig(currentMarket);
+  const activeMarket = useRef(currentMarket);
+  activeMarket.current = currentMarket;
 
   // 顶层 Tab：'cross-section'（市场截面推理）| 'individual'（个股推理中心）
   // 从别的页面带 state.tab 跳进来时要真正生效（原来三元两支都写 'cross-section'，该 Tab 永远进不去）
@@ -103,8 +106,8 @@ export const InferenceCenterPage: React.FC = () => {
   // ─────────────────────────────────────────────────────────────
   // 模块 2：个股推理中心 (Individual Stock Inference) 状态
   // ─────────────────────────────────────────────────────────────
-  const [symbol, setSymbol] = useState('SH600519');
-  const [inputCode, setInputCode] = useState('SH600519');
+  const [symbol, setSymbol] = useState(currentMarket === 'JP' ? '' : 'SH600519');
+  const [inputCode, setInputCode] = useState(currentMarket === 'JP' ? '' : 'SH600519');
   const [singleStockModelId, setSingleStockModelId] = useState<string>('');
   const [modelCategoryFilter, setModelCategoryFilter] = useState<'all' | 'dl' | 'tree' | 'ensemble'>('all');
   const [horizon, setHorizon] = useState<number>(5);
@@ -118,13 +121,31 @@ export const InferenceCenterPage: React.FC = () => {
   // 目标代码联想搜索
   const [codeSuggestions, setCodeSuggestions] = useState<Stock[]>([]);
   const [showCodeSuggestions, setShowCodeSuggestions] = useState(false);
+  const previousMarket = useRef(currentMarket);
+  const stockContexts = useRef<Record<string, {symbol: string; inputCode: string}>>({});
+
+  useEffect(() => {
+    if (previousMarket.current === currentMarket) return;
+    stockContexts.current[previousMarket.current] = {symbol, inputCode};
+    if (previousMarket.current === 'JP' || currentMarket === 'JP') {
+      const remembered = stockContexts.current[currentMarket];
+      setSymbol(remembered?.symbol ?? (currentMarket === 'JP' ? '' : 'SH600519'));
+      setInputCode(remembered?.inputCode ?? (currentMarket === 'JP' ? '' : 'SH600519'));
+      setPrediction(null);
+      setKline([]);
+      setShowCodeSuggestions(false);
+      setCodeSuggestions([]);
+    }
+    previousMarket.current = currentMarket;
+  }, [currentMarket, symbol, inputCode]);
 
   // 挂载时预加载本地股票列表（内存搜索，零延迟）
   useEffect(() => {
+    if (marketConfig.stockSearch === 'gateway') return;
     stockListService.load().catch((err) => {
       console.warn('[InferenceCenter] 股票列表加载失败，联想搜索降级为直接输入:', err);
     });
-  }, []);
+  }, [marketConfig.stockSearch]);
 
   // 输入防抖联想：代码或名称模糊匹配
   useEffect(() => {
@@ -133,8 +154,16 @@ export const InferenceCenterPage: React.FC = () => {
       setCodeSuggestions([]);
       return;
     }
-    const timer = setTimeout(() => {
+    let cancelled = false;
+    const timer = setTimeout(async () => {
       try {
+        if (marketConfig.stockSearch === 'gateway') {
+          const response = await marketDataService.searchStocks(kw, 8);
+          if (!cancelled) setCodeSuggestions(response.data.map(stock => ({
+            symbol: stock.symbol, code: stock.symbol, market: currentMarket, name: stock.name,
+          })));
+          return;
+        }
         // 输入已是前缀式(如 SH600036)时取纯数字部分匹配，兼容本地 code 字段
         const digits = kw.replace(/^(SH|SZ|BJ)/i, '').replace(/[^\dA-Za-z]/g, '');
         const results = stockListService.isLoaded()
@@ -144,15 +173,17 @@ export const InferenceCenterPage: React.FC = () => {
           : [];
         setCodeSuggestions(results);
       } catch {
-        setCodeSuggestions([]);
+        if (!cancelled) setCodeSuggestions([]);
       }
     }, 250);
-    return () => clearTimeout(timer);
-  }, [inputCode, showCodeSuggestions]);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [inputCode, showCodeSuggestions, currentMarket, marketConfig.stockSearch]);
 
   const handleSelectSuggestion = (stock: Stock) => {
     // 本地索引 symbol 为后缀式(600000.SH)，统一转前缀式(SH600000)
-    const normalized = normalizeStockCode(`${stock.market}${stock.code}`);
+    const normalized = marketConfig.stockSearch === 'gateway'
+      ? normalizeStockCode(stock.symbol, currentMarket)
+      : normalizeStockCode(`${stock.market}${stock.code}`);
     setShowCodeSuggestions(false);
     setCodeSuggestions([]);
     handleCommitSingleCode(normalized);
@@ -169,6 +200,7 @@ export const InferenceCenterPage: React.FC = () => {
         modelTrainingService.listUserModels(false, marketUpper).catch(() => ({ items: [], total: 0 })),
         modelTrainingService.listSystemModels(marketUpper).catch(() => []),
       ]);
+      if (activeMarket.current !== currentMarket) return;
       const activeUser = (uRes.items || []).filter((m) => m.status !== 'archived');
       const activeSys = (sList || []).map(systemModelToUserModel);
       const combined = [...activeUser, ...activeSys];
@@ -433,7 +465,7 @@ export const InferenceCenterPage: React.FC = () => {
     targetModelId?: string,
     targetHorizon?: number
   ) => {
-    const sym = (targetSymbol || symbol || 'SH600519').trim();
+    const sym = (targetSymbol || symbol || (currentMarket === 'JP' ? '' : 'SH600519')).trim();
     // 主模型：显式指定 > 首个勾选模型；勾选的模型集合整体传给后端同时推理
     const mId = targetModelId || singleStockModelId || consensusModelIds[0] || '';
     const hor = targetHorizon || horizon;
@@ -451,6 +483,7 @@ export const InferenceCenterPage: React.FC = () => {
       // 实际走势对照预测；数字口径（基准价/扇形）仍按基准日截断，无前视泄露
       const startStr = singleStockDate ? singleStockDate.subtract(100, 'day').format('YYYY-MM-DD') : undefined;
       const klineData = await inferenceCenterService.getStockKline(sym, 60, undefined, startStr);
+      if (activeMarket.current !== currentMarket) return;
       if (klineData && klineData.length > 0) {
         setKline(klineData);
       }
@@ -464,6 +497,7 @@ export const InferenceCenterPage: React.FC = () => {
         consensus_model_ids: consensusModelIds.length ? consensusModelIds : undefined,
         execute: Boolean(targetSymbol === undefined && targetModelId === undefined),
       });
+      if (activeMarket.current !== currentMarket) return;
 
       if (res && res.status === 'success') {
         setPrediction(res);
@@ -517,7 +551,13 @@ export const InferenceCenterPage: React.FC = () => {
 
   const handleCommitSingleCode = (raw: string) => {
     if (!raw.trim()) return;
-    const normalized = normalizeStockCode(raw.trim());
+    let normalized: string;
+    try {
+      normalized = normalizeStockCode(raw.trim(), currentMarket);
+    } catch (error) {
+      message.warning(error instanceof Error ? error.message : '股票代码无效');
+      return;
+    }
     setSymbol(normalized);
     setInputCode(normalized);
     handleRunSingleStockInference(normalized);
@@ -805,7 +845,7 @@ export const InferenceCenterPage: React.FC = () => {
                   <div className="flex items-center bg-slate-50/70 border border-slate-200 hover:border-blue-400 focus-within:border-blue-500 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-100 rounded-xl px-3 py-1.5 transition-all shadow-2xs">
                     <Input
                       variant="borderless"
-                      placeholder="输入代码/名称搜索 (如 600036 或 茅台)"
+                      placeholder={currentMarket === 'JP' ? '输入日股代码/名称（如 7203 或 トヨタ）' : '输入代码/名称搜索 (如 600036 或 茅台)'}
                       value={inputCode}
                       onChange={(e) => {
                         setInputCode(e.target.value.toUpperCase());

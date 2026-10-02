@@ -37,7 +37,7 @@ export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
     label: '日本市场', qlibRegion: 'us',
     qlibProviderUri: '/data/quantjp/.qlib_cache/jp_data',
     defaultUniverse: 'all', benchmark: 'TOPIX', benchmarkName: 'TOPIX 价格指数',
-    currency: 'JPY', calendar: 'JPX', adapterId: 'japan',
+    currency: 'JPY', calendar: 'XTKS', adapterId: 'japan',
     trainingDefaults: { commissionRate: 0, dealPrice: 'open' },
     trainingCapabilities: {dealPrices: ['open'], industryFeature: false},
     simulationUi: 'jp_cash',

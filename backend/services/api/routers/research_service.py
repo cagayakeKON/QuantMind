@@ -1316,7 +1316,7 @@ def _materialize_pred_day(parquet_file: Path, trade_date: str) -> Path | None:
         scores: list[float] = []
         for r in rows:
             symbol = StockCodeUtil.to_prefix(str(r[0] or ""))
-            if not re.match(r"^(SH|SZ|BJ)\d{6}$", symbol):
+            if not (re.match(r"^(SH|SZ|BJ)\d{6}$", symbol) or StockCodeUtil.is_jp_symbol(symbol)):
                 continue
             symbols.append(symbol)
             scores.append(float(r[1]))
@@ -1386,7 +1386,7 @@ def _read_model_pred_day(storage_path: str, trade_date: str) -> list[dict[str, A
             ).fetchall()
             for r in res:
                 symbol = StockCodeUtil.to_prefix(str(r[0] or ""))
-                if not re.match(r"^(SH|SZ|BJ)\d{6}$", symbol):
+                if not (re.match(r"^(SH|SZ|BJ)\d{6}$", symbol) or StockCodeUtil.is_jp_symbol(symbol)):
                     continue
                 rows.append(
                     {"symbol": symbol, "score": float(r[1]), "rank": int(r[2])}
@@ -1441,7 +1441,7 @@ def _read_model_pred_day(storage_path: str, trade_date: str) -> list[dict[str, A
                 ).fetchall()
                 for r in res:
                     symbol = StockCodeUtil.to_prefix(str(r[0] or ""))
-                    if not re.match(r"^(SH|SZ|BJ)\d{6}$", symbol):
+                    if not (re.match(r"^(SH|SZ|BJ)\d{6}$", symbol) or StockCodeUtil.is_jp_symbol(symbol)):
                         continue
                     rows.append(
                         {"symbol": symbol, "score": float(r[1]), "rank": int(r[2])}
@@ -1473,6 +1473,15 @@ def _read_pred_single_symbol(
     if parquet_file is None:
         return None
     digits = re.sub(r"[^0-9]", "", normalized_symbol)
+    is_jp = StockCodeUtil.is_jp_symbol(normalized_symbol)
+    variants = [StockCodeUtil.to_prefix(normalized_symbol, market="JP"),
+                StockCodeUtil.to_suffix(normalized_symbol, market="JP"),
+                StockCodeUtil.to_qlib(normalized_symbol)] if is_jp else []
+    symbol_filter = (
+        "UPPER(CAST({sym_col} AS VARCHAR)) IN (SELECT UPPER(unnest(?)))"
+        if is_jp else
+        f"regexp_replace(CAST({{sym_col}} AS VARCHAR), '[^0-9]', '', 'g') = '{digits}'"
+    )
     try:
         import duckdb
 
@@ -1497,9 +1506,10 @@ def _read_pred_single_symbol(
                 FROM read_parquet('{str(parquet_file)}')
                 WHERE CAST({date_col} AS DATE) = CAST('{trade_date}' AS DATE)
                   AND CAST({score_col} AS DOUBLE) IS NOT NULL
-                  AND regexp_replace(CAST({sym_col} AS VARCHAR), '[^0-9]', '', 'g') = '{digits}'
+                  AND {symbol_filter.format(sym_col=sym_col)}
                 LIMIT 1
-                """
+                """,
+                [variants] if is_jp else [],
             ).fetchone()
             if not row or row[0] is None:
                 return None
@@ -1772,7 +1782,7 @@ async def _infer_market_from_run(tid: str, uid: str, run_id: str) -> str | None:
                 context = meta.get("context")
                 if isinstance(context, dict):
                     market = str(context.get("market", "")).upper()
-                    if market in ("CN", "HK", "US", "CRYPTO"):
+                    if market in ("CN", "HK", "JP", "US", "CRYPTO"):
                         return market
     except Exception:
         pass
@@ -1837,7 +1847,7 @@ async def _model_market(tid: str, uid: str, model_id: str) -> tuple[str, str | N
         try:
             meta = row[1] if isinstance(row[1], dict) else json.loads(row[1])
             m = str((meta.get("context") or {}).get("market", "")).upper()
-            if m in ("CN", "HK", "US", "CRYPTO"):
+            if m in ("CN", "HK", "JP", "US", "CRYPTO"):
                 market = m
         except Exception:
             market = None
@@ -2253,7 +2263,11 @@ def _quantdb_kline_items(
     try:
         from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
 
-        hub = QuantDBDataHub.get_instance()
+        if StockCodeUtil.is_jp_symbol(normalized_symbol):
+            from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+            hub = QuantJPDataHub()
+        else:
+            hub = QuantDBDataHub.get_instance()
         if not hub.available:
             return []
         suffix = StockCodeUtil.to_suffix(normalized_symbol)
@@ -2509,7 +2523,7 @@ async def predict_single_stock(
     execute: bool = False,
 ) -> dict[str, Any]:
     """单只股票未来走势与区间分位数预测服务。"""
-    normalized_symbol = StockCodeUtil.to_prefix(symbol)
+    normalized_symbol = StockCodeUtil.to_prefix(symbol, market="JP") if market.upper() == "JP" else StockCodeUtil.to_prefix(symbol)
 
     # 1. 名称/价格/波动一律走 QuantDB（stock_daily_latest 已弃用）
     stock_name = normalized_symbol
@@ -2519,9 +2533,14 @@ async def predict_single_stock(
     ma_gap_5 = 0.0
     ma_gap_20 = 0.0
     main_flow = 0.0
-    _ = market
     try:
-        quantdb_names = _load_quantdb_stock_names()
+        if market.upper() == "JP":
+            from backend.services.engine.data_platform.local_stock_snapshot import local_stock_snapshot
+            snapshot = await _offload_sdl_read(local_stock_snapshot, normalized_symbol, "JP",
+                                               date.fromisoformat(target_date) if target_date else None)
+            quantdb_names = {normalized_symbol: (snapshot or {}).get("name")}
+        else:
+            quantdb_names = _load_quantdb_stock_names()
         suffix = StockCodeUtil.to_suffix(normalized_symbol)
         stock_name = quantdb_names.get(suffix) or quantdb_names.get(normalized_symbol) or stock_name
     except Exception:  # noqa: BLE001
@@ -2714,11 +2733,14 @@ async def predict_single_stock(
         data_source = str(independent_main.get("data_source") or "live")
 
     # 3. 读真实推理分数：engine_signal_scores（混合A：默认读持久化真实分数）
-    _sym_variants = list({
-        normalized_symbol,
-        normalized_symbol.lower(),
-        re.sub(r"[^0-9]", "", normalized_symbol),
-    })
+    _sym_variants = (
+        [normalized_symbol, normalized_symbol.lower(),
+         StockCodeUtil.to_suffix(normalized_symbol, market="JP"),
+         StockCodeUtil.to_qlib(normalized_symbol)]
+        if market.upper() == "JP" else
+        list({normalized_symbol, normalized_symbol.lower(),
+              re.sub(r"[^0-9]", "", normalized_symbol)})
+    )
     score_params: dict[str, Any] = {"tid": tid}
     date_bound_str = target_date or latest_date
     try:
@@ -2977,6 +2999,12 @@ async def predict_single_stock(
                     quantile_prediction = None
 
     # 7. 多模型共识（真实当日各模型分数）
+    if market.upper() == "JP":
+        # Labels start at the next open; the as-of close cannot anchor a
+        # tradable price forecast before that entry price is known.
+        forecast_curve = []
+        quantile_prediction = None
+        forecast_warning = "日股模型预测下一现金交易日开盘后的收益；当前收盘价不能作为开盘入场价，仅展示真实模型分数。"
     consensus = []
     for r in consensus_rows:
         fs = float(r["fusion_score"] or 0.0)
