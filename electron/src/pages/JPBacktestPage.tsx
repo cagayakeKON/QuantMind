@@ -7,6 +7,7 @@ import { jpSimulationService, type JPFill, type JPOrder } from '../services/jpSi
 import { modelTrainingService } from '../services/modelTrainingService';
 import { modelDisplayName } from './modelRegistryUtils';
 import type { BacktestResult } from '../services/backtestService';
+import { jpBacktestDefaultRange } from '../utils/jpBacktestDates';
 
 const errorText = (error: unknown) => {
   const e = error as {response?: {data?: {detail?: string}}; message?: string};
@@ -15,12 +16,15 @@ const errorText = (error: unknown) => {
 
 export default function JPBacktestPage() {
   const [form] = Form.useForm();
-  const [models, setModels] = useState<Array<{value: string; label: string}>>([]);
+  const [models, setModels] = useState<Array<{value: string; label: string; testStart: string; testEnd: string}>>([]);
+  const [latestDate, setLatestDate] = useState('');
+  const [rangeLoading, setRangeLoading] = useState(false);
   const [result, setResult] = useState<JPBacktestResult | null>(null);
   const [history, setHistory] = useState<BacktestResult[]>([]);
   const [error, setError] = useState('');
   const [running, setRunning] = useState(false);
   const generation = useRef(0);
+  const rangeGeneration = useRef(0);
   useEffect(() => {
     const request = ++generation.current;
     void Promise.all([
@@ -30,13 +34,15 @@ export default function JPBacktestPage() {
     ]).then(([users, systems, readiness, records]) => {
       if (request !== generation.current) return;
       setModels([
-        ...users.items.filter(m => ['ready', 'active'].includes(m.status)).map(m => ({value: m.model_id, label: modelDisplayName(m)})),
-        ...systems.map(m => ({value: m.model_id, label: m.display_name || m.model_id})),
+        ...users.items.filter(m => ['ready', 'active'].includes(m.status)).map(m => ({value: m.model_id, label: modelDisplayName(m),
+          testStart: String(m.metadata_json?.test_start || ''), testEnd: String(m.metadata_json?.test_end || '')})),
+        ...systems.map(m => ({value: m.model_id, label: m.display_name || m.model_id,
+          testStart: m.test_start || '', testEnd: m.test_end || ''})),
       ]);
-      form.setFieldsValue({start: dayjs(readiness.latest_date).startOf('month'), end: dayjs(readiness.latest_date)});
+      setLatestDate(readiness.latest_date);
       setHistory(records);
     }).catch(e => { if (request === generation.current) setError(errorText(e)); });
-    return () => { generation.current++; };
+    return () => { generation.current++; rangeGeneration.current++; };
   }, [form]);
   useEffect(() => {
     if (!running || !result?.backtest_id) return;
@@ -54,6 +60,18 @@ export default function JPBacktestPage() {
     }, 3000);
     return () => { cancelled = true; clearInterval(timer); };
   }, [running, result?.backtest_id]);
+  const selectModel = async (id: string) => {
+    const request = ++rangeGeneration.current;
+    const model = models.find(item => item.value === id);
+    form.setFieldsValue({start: undefined, end: undefined});
+    setRangeLoading(true); setError('');
+    try {
+      const range = await jpBacktestDefaultRange(model?.testStart || '', model?.testEnd || '', latestDate,
+        (market, date) => modelTrainingService.nextTradingDay(market, date));
+      if (request === rangeGeneration.current) form.setFieldsValue({start: dayjs(range.start), end: dayjs(range.end)});
+    } catch (e) { if (request === rangeGeneration.current) setError(errorText(e)); }
+    finally { if (request === rangeGeneration.current) setRangeLoading(false); }
+  };
   const run = async () => {
     const values = await form.validateFields();
     const request = ++generation.current;
@@ -79,7 +97,7 @@ export default function JPBacktestPage() {
     {error && <Alert type="error" showIcon message={error} />}
     <Card title="模型与回测参数" size="small">
       <Form form={form} layout="inline" initialValues={{cash: 1000000, topk: 5, minScore: 0, exposure: 95, commission: 0, slippage: 5}}>
-        <Form.Item name="model" label="日股模型" rules={[{required: true}]}><Select style={{width: 250}} options={models} placeholder="选择已注册模型" /></Form.Item>
+        <Form.Item name="model" label="日股模型" rules={[{required: true}]}><Select style={{width: 250}} options={models} placeholder="选择已注册模型" onChange={id => { void selectModel(id); }} /></Form.Item>
         <Form.Item name="start" label="开始日" rules={[{required: true}]}><DatePicker /></Form.Item>
         <Form.Item name="end" label="结束日" rules={[{required: true}]}><DatePicker /></Form.Item>
         <Form.Item name="cash" label="初始 JPY" rules={[{required: true}]}><InputNumber min={1} /></Form.Item>
@@ -88,9 +106,9 @@ export default function JPBacktestPage() {
         <Form.Item name="exposure" label="资金占比 %"><InputNumber min={0} max={100} /></Form.Item>
         <Form.Item name="commission" label="佣金 %"><InputNumber min={0} max={99} step={0.01} /></Form.Item>
         <Form.Item name="slippage" label="滑点 bps"><InputNumber min={0} max={9999} /></Form.Item>
-        <Button type="primary" loading={running} onClick={() => void run()}>运行回测</Button>
+        <Button type="primary" loading={running} disabled={rangeLoading} onClick={() => void run()}>运行回测</Button>
       </Form>
-      <p className="mt-3 text-slate-500 text-sm">起止日需为已有现金交易日；每个前一交易日须有测试集预测。缺失数据或历史规则时报告原因，不填充信号。</p>
+      <p className="mt-3 text-slate-500 text-sm">选择模型后按其测试区间和日本现金日历预填执行日期，可手动调整。每个前一交易日须有真实测试预测；数据截止 {latestDate || '读取中'}，缺失数据或历史规则时报告原因。</p>
     </Card>
     {result && <Card title={`回测 ${result.backtest_id} · ${result.status}`} size="small">
       <Space wrap><Statistic title="总收益" value={(result.total_return || 0) * 100} precision={2} suffix="%" />
