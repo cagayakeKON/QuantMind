@@ -108,3 +108,23 @@ def test_experiment_config_rejects_unknown_template_and_incomplete_context(
         compile_factor_template(
             template, CONTEXT, DataConfig(), costs, benchmark="jp_topix"
         )
+
+
+def test_tabular_sota_template_accepts_upstream_optional_time_series_context(
+    template_dir,
+):
+    template = (template_dir / "conf_combined_factors_sota_model.yaml").read_text()
+    context = {
+        key: value
+        for key, value in CONTEXT.items()
+        if key not in ("step_len", "num_timesteps")
+    }
+    config = compile_factor_template(
+        template,
+        context,
+        DataConfig(provider_uri="/data/jp", market="all"),
+        BacktestConfig(region="us"),
+        benchmark="jp_topix",
+    )
+    assert config["task"]["dataset"]["class"] == "DatasetH"
+    assert "step_len" not in config["task"]["dataset"]["kwargs"]

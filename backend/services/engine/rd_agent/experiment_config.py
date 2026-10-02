@@ -24,7 +24,9 @@ def compile_factor_template(
 ) -> dict[str, Any]:
     """Retain the common experiment, changing its declared market parameters."""
     config = yaml.safe_load(
-        Template(template, undefined=StrictUndefined).render(context)
+        Template(template, undefined=StrictUndefined).render(
+            {"num_timesteps": None, "step_len": None, **context}
+        )
     )
     required = ("qlib_init", "data_handler_config", "port_analysis_config", "task")
     if not isinstance(config, dict) or any(key not in config for key in required):
