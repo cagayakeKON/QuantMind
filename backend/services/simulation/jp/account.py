@@ -9,17 +9,18 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import date
-from decimal import Decimal, ROUND_CEILING
+from decimal import Decimal
 from fractions import Fraction
 
 from backend.shared.stock_utils import StockCodeUtil
+from backend.services.simulation.services.ashare_matcher import MatchConfig, match_order
+from backend.services.simulation.services.local_market_data import DailyBar
+from .matching_rules import JapanDailyMatchRules
 from .rules import (
     RuleDataMissing,
     TradingCalendar,
-    daily_limit_width,
     lot_size,
     opening_utc,
-    round_price,
 )
 
 
@@ -310,57 +311,48 @@ class JPCashAccount:
                 trade_date=str(day), settlement_date=settles, status="rejected"
             )
             try:
-                if not bar or any(
-                    bar.get(k) is None for k in ("open", "close", "volume")
-                ):
-                    raise ValueError("No daily trade/bar; no forward-filled execution")
-                opened = money(bar["open"])
-                if opened <= 0 or money(bar["volume"]) <= 0:
-                    raise ValueError("No valid opening trade")
                 used_volume = sum(
                     fill["quantity"]
                     for fill in self.state["fills"]
                     if fill["symbol"] == symbol and fill["trade_date"] == str(day)
                 )
-                if used_volume + quantity > money(bar["volume"]):
-                    raise ValueError("JP simulated fills exceed observed daily volume")
-                flag = "upper_limit_touched" if side == "BUY" else "lower_limit_touched"
-                if bar.get(flag):
-                    base = info.get("limit_base_price")
-                    if base is None:
-                        base = info.get("previous_close")
-                        if base is not None:
-                            base = money(base) * money(bar.get("adj_factor", "1"))
-                    locked = all(
-                        bar.get(k) == bar["open"] for k in ("high", "low", "close")
-                    )
-                    extreme = bar.get("high" if side == "BUY" else "low")
-                    if extreme is None or money(extreme) == opened:
-                        raise ValueError(
-                            "Opening at a touched limit; queue execution unavailable"
-                        )
-                    if locked or base is None:
-                        raise ValueError(
-                            "Limit liquidity cannot be established from daily data"
-                        )
-                    width = daily_limit_width(money(base))
-                    limit = money(base) + (width if side == "BUY" else -width)
-                    if (side == "BUY" and opened >= limit) or (
-                        side == "SELL" and opened <= limit
-                    ):
-                        raise ValueError(
-                            "Opening at price limit; queue execution unavailable"
-                        )
-                slip = money(self.state["config"]["slippage_bps"]) / 10000
-                price = round_price(
-                    opened * (1 + slip if side == "BUY" else 1 - slip), side, day, info
+                raw = bar or {}
+                daily = DailyBar(
+                    symbol=StockCodeUtil.to_suffix(symbol, market="JP"),
+                    trade_date=day,
+                    open=raw.get("open") or 0,
+                    high=raw.get("high") or 0,
+                    low=raw.get("low") or 0,
+                    close=raw.get("close") or 0,
+                    volume=raw.get("volume") or 0,
+                    amount=raw.get("amount") or 0,
+                    vwap=0,
+                    pre_close=0,
+                    limit_up=float("inf"),
+                    limit_down=0,
+                    is_st=False,
+                    suspended=False,
                 )
-                if price <= 0:
-                    raise ValueError("Nonpositive execution price")
+                cfg = MatchConfig(
+                    price_mode="open",
+                    slippage_bps=money(self.state["config"]["slippage_bps"]),
+                    commission_rate=money(self.state["config"]["commission_rate"]),
+                    commission_min=0,
+                    stamp_duty_rate=0,
+                    transfer_fee_rate=0,
+                    lot_size=unit,
+                )
+                matched = match_order(
+                    side.lower(),
+                    quantity,
+                    daily,
+                    cfg,
+                    rules=JapanDailyMatchRules(info, raw, used_volume),
+                )
+                if not matched.success:
+                    raise ValueError(matched.reason)
+                price, fee = money(matched.fill_price), money(matched.total_fee)
                 gross = price * quantity
-                fee = (
-                    gross * money(self.state["config"]["commission_rate"])
-                ).to_integral_value(rounding=ROUND_CEILING)
                 if side == "BUY":
                     funding = self._allocate_cash(gross + fee, symbol, settles)
                     position = self.state["positions"].setdefault(
