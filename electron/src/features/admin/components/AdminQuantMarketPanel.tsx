@@ -21,13 +21,14 @@ const { Text } = Typography;
 const JOB_POLL_INTERVAL_MS = 3000;
 const MAX_PREVIEW_LIMIT = 200;
 
-type MarketKey = 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures';
+type MarketKey = 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures' | 'quantjp';
 
 const MARKET_KEY_TO_SCHEDULE: Record<MarketKey, string> = {
     quantus: 'US',
     quanthk: 'HK',
     quantbc: 'BC',
     quantfutures: 'FUTURES',
+    quantjp: 'JP',
 };
 
 const LAYOUT_LABELS: Record<QuantDBDataset['layout'], { text: string; color: string }> = {

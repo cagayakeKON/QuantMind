@@ -25,6 +25,7 @@ MARKETS = {
     "A": "QuantDB A股",
     "US": "QuantUS 美股",
     "HK": "QuantHK 港股",
+    "JP": "QuantJP 日股",
     "BC": "QuantBC 区块链",
     "FUTURES": "QuantFutures 期货",
 }
@@ -146,6 +147,8 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
         from backend.scripts.quantus_daily_sync import run
     elif market == "HK":
         from backend.scripts.quanthk_daily_sync import run
+    elif market == "JP":
+        from backend.scripts.quantjp_daily_sync import run
     elif market == "BC":
         from backend.scripts.quantbc_daily_sync import run
     elif market == "FUTURES":
@@ -181,6 +184,7 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
                 qlib_market = {
                     "US": "US",
                     "HK": "HK",
+                    "JP": "JP",
                     "BC": "CRYPTO",
                     "FUTURES": "FUTURES",
                 }[market]

@@ -57,6 +57,15 @@ def _default_datasets(market: str) -> tuple[DatasetSpec, ...]:
 
     ccass_top50 为港股专属（CCASS 机构持仓），仅 HK 市场展示。
     """
+    if market == "JP":
+        return (
+            DatasetSpec("daily_unadjusted", "原始日线 · JPY", "1", "kline", "1_kline_data/daily_unadjusted", "partition", "普通股模拟交易用原始价格；同步以完整日包发布"),
+            DatasetSpec("daily_forward", "研究用复权日线", "1", "kline", "1_kline_data/daily_forward", "partition", "价格与成交量复权因子分别保存；不含股息再投资"),
+            DatasetSpec("index_daily", "TOPIX 价格指数", "1", "kline", "1_kline_data/index_daily", "partition"),
+            DatasetSpec("master", "逐日证券主表", "2", "base_sector", "2_base_sector/master", "partition", "普通股筛选、历史行业和 TOPIX 规模分类"),
+            DatasetSpec("trading_calendar", "日股现金市场日历", "2", "base_sector", "2_base_sector/trading_calendar", "single"),
+            DatasetSpec("valuation", "估值 · JPY", "5", "technical", "5_technical_derived/valuation", "partition"),
+        )
     if market == "BC":
         return (
             # 1 K线行情
@@ -753,6 +762,9 @@ def make_market_router(
         return spec
 
     def _root() -> Path:
+        if market == "JP":
+            from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+            return QuantJPDataHub().data_dir
         return _data_dir(env_var, default_dir)
 
     # ------------------------------------------------------------------

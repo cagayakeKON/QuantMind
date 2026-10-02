@@ -817,11 +817,11 @@ class DataPlatformService {
     }
 
     // ---- QuantUS / QuantHK / QuantBC 本地数据管理（复用 QuantDB 的类型与响应格式） ----
-    private marketBase(market: 'quantdb' | 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures'): string {
+    private marketBase(market: 'quantdb' | 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures' | 'quantjp'): string {
         return `/admin/data-platform/${market}`;
     }
 
-    async getMarketCatalog(market: 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures'): Promise<{
+    async getMarketCatalog(market: 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures' | 'quantjp'): Promise<{
         data_dir: string;
         market: string;
         groups: QuantDBGroup[];
@@ -834,7 +834,7 @@ class DataPlatformService {
         return this.unwrap(resp);
     }
 
-    async getMarketConfig(market: 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures'): Promise<{
+    async getMarketConfig(market: 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures' | 'quantjp'): Promise<{
         market: string;
         data_dir: string;
         env_var: string;
@@ -845,7 +845,7 @@ class DataPlatformService {
         return this.unwrap(resp);
     }
 
-    async previewMarketDataset(market: 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures', params: {
+    async previewMarketDataset(market: 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures' | 'quantjp', params: {
         dataset: string;
         symbol?: string;
         limit?: number;
@@ -857,7 +857,7 @@ class DataPlatformService {
         return this.unwrap(resp);
     }
 
-    async syncMarketDatasets(market: 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures', payload: {
+    async syncMarketDatasets(market: 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures' | 'quantjp', payload: {
         datasets: string[];
         days?: number;
         with_qlib?: boolean;
@@ -866,17 +866,17 @@ class DataPlatformService {
         return this.unwrap(resp);
     }
 
-    async listMarketSyncJobs(market: 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures'): Promise<{ jobs: QuantDBSyncJob[]; timestamp: string }> {
+    async listMarketSyncJobs(market: 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures' | 'quantjp'): Promise<{ jobs: QuantDBSyncJob[]; timestamp: string }> {
         const resp = await this.axiosInstance.get(`${this.marketBase(market)}/sync-jobs`);
         return this.unwrap(resp);
     }
 
-    async getMarketSyncJob(market: 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures', jobId: string): Promise<{ job: QuantDBSyncJob }> {
+    async getMarketSyncJob(market: 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures' | 'quantjp', jobId: string): Promise<{ job: QuantDBSyncJob }> {
         const resp = await this.axiosInstance.get(`${this.marketBase(market)}/sync-jobs/${jobId}`);
         return this.unwrap(resp);
     }
 
-    async cancelMarketSyncJob(market: 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures', jobId: string): Promise<{
+    async cancelMarketSyncJob(market: 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures' | 'quantjp', jobId: string): Promise<{
         job_id: string;
         status: string;
         message: string;
@@ -886,7 +886,7 @@ class DataPlatformService {
     }
 
     // ---- 数据源勾选配置 ----
-    async getMarketDataSources(market: 'quantdb' | 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures'): Promise<{
+    async getMarketDataSources(market: 'quantdb' | 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures' | 'quantjp'): Promise<{
         market: string;
         sources: Array<{ source: string; label: string; enabled: boolean }>;
         timestamp: string;
@@ -895,7 +895,7 @@ class DataPlatformService {
         return this.unwrap(resp);
     }
 
-    async saveMarketDataSources(market: 'quantdb' | 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures', sources: Record<string, boolean>): Promise<{
+    async saveMarketDataSources(market: 'quantdb' | 'quantus' | 'quanthk' | 'quantbc' | 'quantfutures' | 'quantjp', sources: Record<string, boolean>): Promise<{
         market: string;
         sources: Record<string, boolean>;
         timestamp: string;

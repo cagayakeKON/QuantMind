@@ -32,6 +32,7 @@ class Market(str, Enum):
     CN = "CN"
     HK = "HK"
     US = "US"
+    JP = "JP"
     FUTURES = "FUTURES"
     CRYPTO = "CRYPTO"
 
@@ -40,6 +41,7 @@ _MARKET_CURRENCIES: dict[Market, str] = {
     Market.CN: "CNY",
     Market.HK: "HKD",
     Market.US: "USD",
+    Market.JP: "JPY",
     Market.FUTURES: "CNY",
     Market.CRYPTO: "USDT",
 }
@@ -49,6 +51,7 @@ SUPPORTED_BROKERS: dict[Market, tuple[str, ...]] = {
     Market.CN: ("qmt", "tdx"),
     Market.HK: ("futu", "tiger", "ib"),
     Market.US: ("tiger", "ib", "futu"),
+    Market.JP: (),  # JP supports simulation only.
     Market.FUTURES: ("ib",),
     Market.CRYPTO: (),
 }
@@ -136,10 +139,22 @@ CRYPTO_RULES = MarketTradingRules(
     has_price_limit=False,
 )
 
+JP_RULES = MarketTradingRules(
+    market=Market.JP,
+    currency="JPY",
+    t_plus_1=False,
+    lot_size=100,  # Current default; historical lots require dated metadata.
+    commission_rate=0.0,
+    commission_min=0.0,
+    stamp_duty_rate=0.0,
+    has_price_limit=True,
+)
+
 RULES_BY_MARKET: dict[Market, MarketTradingRules] = {
     Market.CN: CN_RULES,
     Market.HK: HK_RULES,
     Market.US: US_RULES,
+    Market.JP: JP_RULES,
     Market.FUTURES: FUTURES_RULES,
     Market.CRYPTO: CRYPTO_RULES,
 }
@@ -175,6 +190,8 @@ def infer_market(symbol: str) -> Market:
     text = str(symbol or "").strip()
     if not text:
         return Market.CN
+    if StockCodeUtil.is_jp_symbol(text):
+        return Market.JP
     if _HK_RE.fullmatch(text):
         return Market.HK
     if _CN_SUFFIX_RE.fullmatch(text) or _CN_NUMERIC_RE.fullmatch(text):

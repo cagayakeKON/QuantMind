@@ -41,6 +41,7 @@ DEFAULT_FACTOR_SOURCE: FactorSource = "l1_factors"
 # 各市场 6_ml_datasets/ 下实际存在的训练直读数据集。
 # CUSTOM 为用户自传市场：仅做因子扫描，不强制 OHLCV 完备性（见 describe）。
 MARKET_FACTOR_SOURCES: dict[str, tuple[FactorSource, ...]] = {
+    "JP": ("l1_factors",),
     "CN": ("l1_factors", "l2_factors", "l1_l2_factors"),
     "HK": ("l1_factors", "ccass_factors", "south_factors"),
     "US": ("l1_factors",),
@@ -49,6 +50,7 @@ MARKET_FACTOR_SOURCES: dict[str, tuple[FactorSource, ...]] = {
     "CUSTOM": ("l1_factors",),
 }
 DEFAULT_FACTOR_SOURCE_BY_MARKET: dict[str, FactorSource] = {
+    "JP": "l1_factors",
     "CN": "l1_factors",
     "HK": "l1_factors",
     "US": "l1_factors",
@@ -58,6 +60,7 @@ DEFAULT_FACTOR_SOURCE_BY_MARKET: dict[str, FactorSource] = {
 }
 # 各市场数据根目录环境变量（容器内路径，本地编排器挂载后亦可见）
 MARKET_DATA_DIR_ENV: dict[str, str] = {
+    "JP": "QM_QUANTJP_DATA_DIR",
     "CN": "QM_QUANTDB_DATA_DIR",
     "HK": "QM_QUANTHK_DATA_DIR",
     "US": "QM_QUANTUS_DATA_DIR",
@@ -66,6 +69,7 @@ MARKET_DATA_DIR_ENV: dict[str, str] = {
     "CUSTOM": "QM_QUANTCUSTOM_DATA_DIR",
 }
 MARKET_DATA_DIR_DEFAULT: dict[str, str] = {
+    "JP": "/data/quantjp",
     "CN": "/data/quantdb",
     "HK": "/data/quanthk",
     "US": "/data/quantus",
@@ -107,6 +111,10 @@ def market_data_dir(market: str | None = None) -> Path:
     不探测 Windows 盘符，避免本地盘符污染服务端判断。
     """
     market_upper = normalize_market(market)
+    if market_upper == "JP":
+        from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+
+        return QuantJPDataHub().data_dir
     env_val = os.getenv(MARKET_DATA_DIR_ENV[market_upper], "").strip()
     if env_val:
         return Path(env_val)
@@ -165,7 +173,11 @@ class QuantDBFactorReader:
         data_dir: str | Path | None = None,
         market: str | None = None,
     ) -> None:
-        if data_dir is not None:
+        if data_dir is not None and normalize_market(market) == "JP":
+            from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+
+            self.data_dir = QuantJPDataHub(data_dir).data_dir
+        elif data_dir is not None:
             self.data_dir = Path(data_dir)
         else:
             self.data_dir = market_data_dir(market)

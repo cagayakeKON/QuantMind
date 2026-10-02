@@ -2681,3 +2681,22 @@ END $$;
 -- ========================
 -- DONE - 所有缺失表已创建
 -- ========================
+
+-- JP cash accounts: separate JPY ledger for daily simulation and historical replay.
+CREATE TABLE IF NOT EXISTS jp_simulation_sessions (
+    session_id UUID PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id VARCHAR(64) NOT NULL,
+    name VARCHAR(128) NOT NULL,
+    mode VARCHAR(16) NOT NULL CHECK (mode IN ('daily', 'replay')),
+    anchor_date DATE NOT NULL,
+    end_date DATE,
+    data_version VARCHAR(96) NOT NULL,
+    state JSONB NOT NULL,
+    pending JSONB NOT NULL DEFAULT '[]'::jsonb,
+    revision INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_jp_simulation_scope
+    ON jp_simulation_sessions (tenant_id, user_id, mode);

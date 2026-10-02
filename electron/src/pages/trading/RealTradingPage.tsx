@@ -10,6 +10,7 @@ import PositionMonitor from './tabs/PositionMonitor';
 import TradingHistory from './tabs/TradingHistory';
 import SettingsCenter from './tabs/SettingsCenter';
 import ReplayPage from './tabs/ReplayPage';
+import JPSimulationPage from './tabs/JPSimulationPage';
 import type { RealTradingStatus, AccountInfo, PreflightCheckResponse, PreflightCheckItem } from '../../services/realTradingService';
 import { authService } from '../../features/auth/services/authService';
 import type { StrategyFile } from '../../types/backtest/strategy';
@@ -21,7 +22,7 @@ import LiveTradeConfigWizard from './components/LiveTradeConfigWizard';
 import type { DeployMode, ExecutionConfig, LiveTradeConfig } from '../../types/liveTrading';
 
 type TradingMode = 'real' | 'simulation'; // 仅保留模拟交易：实盘入口已隐藏，store 被强制为 simulation（恢复见 git 历史）
-type ActiveTab = 'manage' | 'manual-task' | 'personal' | 'position' | 'history' | 'settings' | 'replay';
+type ActiveTab = 'manage' | 'manual-task' | 'personal' | 'position' | 'history' | 'settings' | 'replay' | 'jp';
 type PreflightStage = 'trading-readiness' | 'preflight';
 type PendingDeploy = {
     strategyId: string;
@@ -490,6 +491,7 @@ const RealTradingPage: React.FC = () => {
 
     const tabs: Array<{ id: ActiveTab; label: string; icon: LucideIcon }> = [
         { id: 'manage', label: '策略管理', icon: LayoutDashboard },
+        { id: 'jp', label: '日股模拟', icon: Clock },
         // 时光回放功能尚存多处问题，暂时隐藏入口，完善后取消注释即可恢复（ReplayPage 渲染分支保留）
         // { id: 'replay', label: '时光回放', icon: Clock },
         { id: 'manual-task', label: '手动任务', icon: ClipboardList },
@@ -504,7 +506,7 @@ const RealTradingPage: React.FC = () => {
             {/* Unified Frame Container with 32px Border Radius (BacktestCenter Style) */}
             <div className="bg-white border border-gray-200 shadow-sm w-full h-full rounded-[32px] flex flex-col overflow-hidden">
                 {/* Integrated Top Header - Account Overview（占可用高度 3/10） */}
-                <div className="flex-[3] min-h-0 flex flex-col bg-white border-b border-gray-200 overflow-hidden z-10">
+                {activeTab !== 'jp' && <div className="flex-[3] min-h-0 flex flex-col bg-white border-b border-gray-200 overflow-hidden z-10">
                     <TopBar
                         isConnected={!!status}
                         strategyStatus={strategyStatus}
@@ -515,7 +517,7 @@ const RealTradingPage: React.FC = () => {
                             return accountInfo ? buildTradingTopBarAccountInfo(accountInfo, status) : undefined;
                         })()}
                     />
-                </div>
+                </div>}
 
                 {/* Bottom Section - Sidebar & Content（占可用高度 7/10） */}
                 <div className="flex-[7] min-h-0 flex overflow-hidden">
@@ -583,6 +585,7 @@ const RealTradingPage: React.FC = () => {
                     )}
                     {activeTab === 'settings' && <SettingsCenter userId={userId} isActive={activeTab === 'settings'} />}
                     {activeTab === 'replay' && <ReplayPage />}
+                    {activeTab === 'jp' && <JPSimulationPage />}
                 </div>
             </div>
         </div>

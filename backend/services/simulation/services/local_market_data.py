@@ -45,6 +45,7 @@ _MARKET_KLINE_VIEWS: dict[Market, str] = {
     Market.CN: "qdb_daily_unadjusted",
     Market.HK: "qhk_daily_forward",
     Market.US: "qus_daily_forward",
+    Market.JP: "qjp_daily_unadjusted",
     Market.FUTURES: "qfut_daily_forward",
     Market.CRYPTO: "qbc_daily_forward",
 }
@@ -57,6 +58,7 @@ _MARKET_KLINE_DIRS: dict[Market, str] = {
     Market.CN: "1_kline_data/daily_unadjusted",
     Market.HK: "1_kline_data/daily_forward",
     Market.US: "1_kline_data/daily_forward",
+    Market.JP: "1_kline_data/daily_unadjusted",
     Market.FUTURES: "1_kline_data/daily_forward",
     Market.CRYPTO: "1_kline_data/daily_forward",
 }
@@ -259,6 +261,12 @@ class LocalMarketData:
         market: Market | str | None = None,
     ) -> None:
         self.market = normalize_market(market)
+        if self.market is Market.JP:
+            # JP data is available through QuantJPDataHub. Do not enable the
+            # legacy simulator until the JP cash/settlement engine is integrated.
+            raise NotImplementedError(
+                "JP simulation requires the dated cash-account execution engine"
+            )
         self._hub = hub or self._resolve_hub(self.market)
         self._kline_view = _MARKET_KLINE_VIEWS[self.market]
         self._lock = threading.RLock()
@@ -283,6 +291,10 @@ class LocalMarketData:
             from backend.services.engine.data_platform.quantus_hub import QuantUSDataHub
 
             return QuantUSDataHub.get_instance()
+        if market is Market.JP:
+            from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+
+            return QuantJPDataHub.get_instance()
         if market is Market.FUTURES:
             from backend.services.engine.data_platform.quantfutures_hub import (
                 QuantFuturesDataHub,

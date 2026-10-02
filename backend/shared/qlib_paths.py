@@ -23,6 +23,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # 各市场本地 parquet 数据目录（与 docker-compose 的 QM_QUANT*_DATA_DIR 对齐）
 _MARKET_DATA_DIR: dict[str, str] = {
+    "JP": os.getenv(
+        "QM_QUANTJP_DATA_DIR",
+        str(
+            Path("/data/quantjp")
+            if Path("/data/quantjp").is_dir()
+            else _PROJECT_ROOT / "data" / "quantjp"
+        ),
+    ),
     "US": os.getenv("QM_QUANTUS_DATA_DIR", "/data/quantus"),
     "HK": os.getenv("QM_QUANTHK_DATA_DIR", "/data/quanthk"),
     "CRYPTO": os.getenv("QM_QUANTBC_DATA_DIR", "/data/quantbc"),
@@ -66,6 +74,7 @@ def resolve_qlib_provider_uri(market: str = "CN") -> str:
 
     # 非 A 股市场：固定子目录
     _MARKET_SUBDIR: dict[str, str] = {
+        "JP": "jp_data",
         "HK": "hk_data",
         "US": "us_data",
         "CRYPTO": "bc_data",
@@ -73,6 +82,7 @@ def resolve_qlib_provider_uri(market: str = "CN") -> str:
     }
     # 各市场 .qlib_cache 缓存子目录名（QlibDataBuilder.for_market 生成）
     _CACHE_SUBDIR: dict[str, str] = {
+        "JP": "jp_data",
         "HK": "hk_data",
         "US": "us_data",
         "CRYPTO": "bc_data",
@@ -152,6 +162,7 @@ def resolve_qlib_data_dir(market: str = "CN") -> str:
 
 
 _PATH_MARKET_HINTS = {
+    "jp_data": "JP",
     "cn_data": "CN",
     "hk_data": "HK",
     "us_data": "US",

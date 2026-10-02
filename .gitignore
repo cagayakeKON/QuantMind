@@ -98,6 +98,8 @@ db.tar.gz
 !backend/tests/**/*.csv
 !data/examples/**/*.csv
 data/backtest_results/
+data/quantjp/
+data/jquants_jp/
 data/alpha_agent_logs/
 userdata/
 research/data/

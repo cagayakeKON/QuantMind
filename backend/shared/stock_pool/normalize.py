@@ -42,6 +42,9 @@ def to_storage_symbol(symbol: str, market: str = MARKET_CN) -> str:
     if mk == MARKET_CN:
         return StockCodeUtil.to_suffix(raw)
 
+    if mk == "JP":
+        return StockCodeUtil.to_suffix(raw, market="JP")
+
     if mk == MARKET_HK:
         return StockCodeUtil.to_hk_suffix(raw)
 
@@ -65,12 +68,17 @@ def to_api_symbol(symbol: str, market: str = MARKET_CN) -> str:
     mk = normalize_market(market)
     if mk == MARKET_CN:
         return StockCodeUtil.to_prefix(raw)
+    if mk == "JP":
+        return StockCodeUtil.to_prefix(raw, market="JP")
     return raw.upper()
 
 
 def is_valid_symbol(symbol: str, market: str = MARKET_CN) -> bool:
     """按市场做轻量格式校验（不查库，仅拦明显脏数据）。"""
-    code = to_storage_symbol(symbol, market)
+    try:
+        code = to_storage_symbol(symbol, market)
+    except ValueError:
+        return False
     if not code:
         return False
     mk = normalize_market(market)
@@ -78,6 +86,8 @@ def is_valid_symbol(symbol: str, market: str = MARKET_CN) -> bool:
         return bool(re.match(r"^\d{6}\.(SH|SZ|BJ)$", code))
     if mk == MARKET_HK:
         return bool(re.match(r"^\d{4,5}\.HK$", code))
+    if mk == "JP":
+        return StockCodeUtil.is_jp_symbol(code)
     if mk == "US":
         return bool(_US_TICKER_RE.match(code))
     # FUTURES / BC 无统一规则，只要非空且长度合理即放行
@@ -100,6 +110,8 @@ def normalize_symbols(symbols, market: str = MARKET_CN) -> list[str]:
 def normalize_to_qlib(symbol: str, market: str = MARKET_CN) -> str:
     """库内后缀式 → Qlib 桥接格式（全小写前缀，如 sh600036）。"""
     code = to_storage_symbol(symbol, market)
+    if normalize_market(market) == "JP":
+        return StockCodeUtil.to_qlib(code, market="JP")
     if normalize_market(market) != MARKET_CN:
         return code.lower()
     return StockCodeUtil.to_qlib(code)

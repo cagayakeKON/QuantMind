@@ -287,6 +287,11 @@ services:
       # QuantUS / QuantHK 本地数据中枢（美股/港股，Yahoo Finance 摄取）
       - QM_QUANTUS_DATA_DIR=/data/quantus
       - QM_QUANTHK_DATA_DIR=/data/quanthk
+      # JP: J-Quants credentials stay in the server environment; never in snapshots.
+      - QM_QUANTJP_DATA_DIR=/data/quantjp
+      - QM_JQUANTS_CACHE_DB=/data/jquants_jp/source.duckdb
+      - QM_JP_TRADING_UNITS_FILE=/data/quantjp/trading_units.csv
+      - JQUANTS_API_KEY=${JQUANTS_API_KEY:-}
       # QuantBC 本地数据中枢（区块链/加密货币，Binance 摄取）
       - QM_QUANTBC_DATA_DIR=/data/quantbc
       # QuantFutures 本地数据中枢（期货/贵金属，akshare 摄取）
@@ -470,6 +475,9 @@ services:
       # QuantDB API（密钥已删除，如需在线同步请加回 QUANTDB_API_KEY 行）
       - QM_QUANTDB_DATA_DIR=/data/quantdb
       # QuantDB 同步状态库（避免容器内空库导致全量重下）
+      - QM_QUANTJP_DATA_DIR=/data/quantjp
+      - QM_JQUANTS_CACHE_DB=/data/jquants_jp/source.duckdb
+      - JQUANTS_API_KEY=${JQUANTS_API_KEY:-}
       - QUANTDB_STATE_DIR=/data/quantdb/.sync_state
 
       # Huntly 资讯 enrich (news_enrich_recent 任务在 worker 执行, 需要凭据)
@@ -587,6 +595,7 @@ services:
       # QuantDB SDK（数据同步调度需要）
       # QuantDB API（密钥已删除，如需在线同步请加回 QUANTDB_API_KEY 行）
       - QM_QUANTDB_DATA_DIR=/data/quantdb
+      - QM_QUANTJP_DATA_DIR=/data/quantjp
       - QUANTDB_STATE_DIR=/data/quantdb/.sync_state
 
       # 数据同步定时任务

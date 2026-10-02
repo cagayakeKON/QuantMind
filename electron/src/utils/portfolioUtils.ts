@@ -38,9 +38,19 @@ export const normalizePositions = (accountInfo: AccountInfo | null): Array<{ key
 /**
  * 解析股票代码并强制归一化为 Prefix 格式 (如 SH600036)
  */
-export const normalizeStockCode = (raw: string): string => {
+export const normalizeStockCode = (raw: string, market?: string): string => {
     const s = (raw || '').trim().toUpperCase();
     if (!s) return s;
+
+    // Bare numeric codes remain ambiguous between JP and HK without market context.
+    if (market?.toUpperCase() === 'JP' || /^JP_?\d[A-Z0-9]{3}\d$/.test(s) || /\.(JP|T)$/.test(s)) {
+        let code = s.replace(/^JP_?/, '').replace(/\.(JP|T)$/, '');
+        if (/^\d[A-Z0-9]{3}$/.test(code)) code += '0';
+        if (!/^\d[A-Z0-9]{3}\d$/.test(code)) {
+            throw new Error('Invalid Japanese security code: ' + raw);
+        }
+        return 'JP' + code;
+    }
     
     // 1. 已经是正确的 Prefix 格式 (SH/SZ/BJ + 6位数字)
     if (/^(SH|SZ|BJ)\d{6}$/.test(s)) return s;
@@ -69,8 +79,9 @@ export const normalizeStockCode = (raw: string): string => {
  * 前缀式转后缀式（SH600519 -> 600519.SH），供行情/终端等后缀口径组件使用。
  * 非标准代码原样返回。
  */
-export const toSuffixCode = (raw: string): string => {
-    const s = normalizeStockCode(raw);
+export const toSuffixCode = (raw: string, market?: string): string => {
+    const s = normalizeStockCode(raw, market);
+    if (/^JP\d[A-Z0-9]{3}\d$/.test(s)) return s.slice(2) + '.JP';
     const m = s.match(/^(SH|SZ|BJ)(\d{6})$/);
     return m ? `${m[2]}.${m[1]}` : s;
 };

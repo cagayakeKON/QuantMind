@@ -7,6 +7,7 @@ from .quantus_console import router as quantus_console_router
 from .quanthk_console import router as quanthk_console_router
 from .quantbc_console import router as quantbc_console_router
 from .quantfutures_console import router as quantfutures_console_router
+from .quantjp_console import router as quantjp_console_router
 from .model_management import router as model_management_router
 from .model_management_ops import router as model_management_ops_router
 from .admin_training import router as admin_training_router
@@ -68,6 +69,9 @@ admin_router.include_router(
 )
 admin_router.include_router(
     quantfutures_console_router, prefix="/data-platform/quantfutures", tags=["Admin-QuantFutures"]
+)
+admin_router.include_router(
+    quantjp_console_router, prefix="/data-platform/quantjp", tags=["Admin-QuantJP"]
 )
 admin_router.include_router(
     alpha_factor_pipeline_router, prefix="/alpha-factors", tags=["Admin-AlphaFactorPipeline"]

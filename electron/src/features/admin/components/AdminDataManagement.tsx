@@ -21,6 +21,11 @@ export const AdminDataManagement: React.FC = () => {
 
   const tabItems = [
     {
+      key: 'quantjp',
+      label: <span className="flex items-center gap-2 font-bold text-sm"><span>🇯🇵</span><span>日股市场 (J-Quants)</span></span>,
+      children: <AdminQuantMarketPanel market="quantjp" marketLabel="日股市场" color="#e11d48" />,
+    },
+    {
       key: 'a_share',
       label: (
         <span className="flex items-center gap-2 font-bold text-sm">

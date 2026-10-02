@@ -44,6 +44,9 @@ MARKET_SOURCES = {
         "akshare": {"label": "akshare", "default": True},
         "yahoo": {"label": "雅虎", "default": False},
     },
+    "JP": {
+        "jquants": {"label": "J-Quants API V2", "default": True},
+    },
     "BC": {
         "binance": {"label": "Binance", "default": True},
     },

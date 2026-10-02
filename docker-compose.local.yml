@@ -1,0 +1,28 @@
+# Local development: retain the shared application image, isolate host ports.
+# docker compose -f docker-compose.yml -f docker-compose.local.yml up -d quantmind celery-worker celery-beat
+services:
+  db:
+    ports: !override
+      - "127.0.0.1:55432:5432"
+  redis:
+    ports: !override
+      - "127.0.0.1:56379:6379"
+  quantmind:
+    ports: !override
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8001:8001"
+      - "127.0.0.1:8002:8002"
+      - "127.0.0.1:8003:8003"
+    environment:
+      TRAINING_PAUSE_OTHERS: "false"
+      QUANTMIND_ENABLE_WEB_UPDATE: "false"
+      REMOTE_QUOTE_REDIS_HOST: redis
+      REMOTE_QUOTE_REDIS_PORT: "6379"
+      REMOTE_QUOTE_REDIS_PASSWORD: ""
+      ENABLE_REAL_TRADING: "false"
+      SIMULATION_MIRROR_TO_REAL: "false"
+  celery-worker:
+    environment:
+      TRAINING_PAUSE_OTHERS: "false"
+      ENABLE_REAL_TRADING: "false"
+      SIMULATION_MIRROR_TO_REAL: "false"

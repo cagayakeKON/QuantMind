@@ -49,6 +49,7 @@ _KLINE_COL_MAP = {
 # A 股是 Qlib 原生格式 sh600036（exchange+code）；其他市场用 {market}_ 前缀
 # + 原始 symbol（保留大小写与点号），反向剥离前缀即可无损还原。
 _MARKET_QLIB_PREFIX: dict[str, str] = {
+    "JP": "jp_",
     "CN": "",  # 特殊：A 股用原生 exchange 前缀（sh600036），不走统一前缀
     "US": "us_",
     "HK": "hk_",
@@ -105,7 +106,12 @@ class QlibDataBuilder:
         data_dir: 数据目录（默认按市场解析）
         qlib_dir: Qlib 输出目录（默认 {data_dir}/.qlib_cache/{market}_data）
         """
-        from backend.services.engine.data_platform import quantus_hub, quanthk_hub, quantbc_hub, quantfutures_hub
+        from backend.services.engine.data_platform import (
+            quantus_hub,
+            quanthk_hub,
+            quantbc_hub,
+            quantfutures_hub,
+        )
 
         market_upper = market.upper()
         if market_upper == "CN":
@@ -118,6 +124,17 @@ class QlibDataBuilder:
                 data_dir = quantus_hub._resolve_quantus_data_dir()
             hub = quantus_hub.QuantUSDataHub(data_dir)
             default_qlib = Path("/data/qlib/us_data")
+        elif market_upper == "JP":
+            from backend.services.engine.data_platform.quantjp_hub import (
+                QuantJPDataHub,
+                _resolve_quantjp_data_dir,
+            )
+
+            hub = QuantJPDataHub(data_dir or _resolve_quantjp_data_dir())
+            hub = QuantJPDataHub(
+                hub.data_dir
+            )  # Pin the publication for the whole build.
+            default_qlib = Path("/data/qlib/jp_data")
         elif market_upper == "HK":
             if data_dir is None:
                 data_dir = quanthk_hub._resolve_quanthk_data_dir()
@@ -162,6 +179,7 @@ class QlibDataBuilder:
         Returns:
             {"calendar": int, "instruments": int, "features": int, "skipped": int}
         """
+
         def _notify(p: int) -> None:
             if callable(progress_cb):
                 try:
@@ -193,8 +211,11 @@ class QlibDataBuilder:
 
         logger.info(
             "QlibDataBuilder[%s] 完成: calendar=%d, instruments=%d, features=%d, skipped=%d",
-            self._market, result["calendar"], result["instruments"],
-            result["features"], result["skipped"],
+            self._market,
+            result["calendar"],
+            result["instruments"],
+            result["features"],
+            result["skipped"],
         )
         return result
 
@@ -207,6 +228,13 @@ class QlibDataBuilder:
         cal_dir.mkdir(parents=True, exist_ok=True)
         cal_file = cal_dir / "day.txt"
 
+        if self._market == "JP":
+            # The source calendar includes dates before/after available prices.
+            dates = self._dates_from_parquet()
+            with cal_file.open("w", encoding="utf-8") as handle:
+                handle.write("".join(f"{day}\n" for day in dates))
+            return len(dates)
+
         df = self._hub.fetch_calendar()
         dates = self._extract_dates(df) if not df.empty else None
 
@@ -218,7 +246,9 @@ class QlibDataBuilder:
             if merged != set(dates):
                 logger.info(
                     "Qlib[%s] 日历补齐行情日期: %d -> %d",
-                    self._market, len(dates), len(merged),
+                    self._market,
+                    len(dates),
+                    len(merged),
                 )
             dates = sorted(merged)
         elif not dates:
@@ -232,13 +262,25 @@ class QlibDataBuilder:
         with open(cal_file, "w") as f:
             f.write("\n".join(dates) + "\n")
 
-        logger.info("Qlib[%s] calendar: %d trading days -> %s", self._market, len(dates), cal_file)
+        logger.info(
+            "Qlib[%s] calendar: %d trading days -> %s",
+            self._market,
+            len(dates),
+            cal_file,
+        )
         return len(dates)
 
     def _extract_dates(self, df: pd.DataFrame) -> list[str] | None:
         """从 hub fetch_calendar 返回的 DataFrame 提取日期列表。"""
         date_col = None
-        for col in ("trade_date", "date", "time", "cal_date", "TradingDate", "trading_date"):
+        for col in (
+            "trade_date",
+            "date",
+            "time",
+            "cal_date",
+            "TradingDate",
+            "trading_date",
+        ):
             if col in df.columns:
                 date_col = col
                 break
@@ -301,6 +343,22 @@ class QlibDataBuilder:
         inst_dir.mkdir(parents=True, exist_ok=True)
         inst_file = inst_dir / "all.txt"
 
+        if self._market == "JP":
+            periods = self._hub.fetch_instrument_periods()
+            with inst_file.open("w", encoding="utf-8") as handle:
+                for row in periods.itertuples(index=False):
+                    handle.write(
+                        f"{self._to_qlib_symbol(row.symbol)}\t"
+                        f"{pd.Timestamp(row.start_date).date()}\t"
+                        f"{pd.Timestamp(row.end_date).date()}\n"
+                    )
+            calendar = self._load_calendar()
+            if calendar:
+                (inst_dir / "indices.txt").write_text(
+                    f"jp_topix\t{calendar[0]}\t{calendar[-1]}\n", encoding="utf-8"
+                )
+            return len(periods)
+
         raw_symbols = self._collect_raw_symbols()
 
         cal_dates = self._load_calendar()
@@ -317,7 +375,12 @@ class QlibDataBuilder:
             for sym in qlib_symbols:
                 f.write(f"{sym}\t{start_date}\t{end_date}\n")
 
-        logger.info("Qlib[%s] instruments: %d symbols -> %s", self._market, len(qlib_symbols), inst_file)
+        logger.info(
+            "Qlib[%s] instruments: %d symbols -> %s",
+            self._market,
+            len(qlib_symbols),
+            inst_file,
+        )
 
         # 各市场股票池成分文件（P2：仅 A 股有内置指数池，其他市场跳过）
         if self._market == "CN":
@@ -353,7 +416,9 @@ class QlibDataBuilder:
                             symbols.add(qs)
                     stock_list_loaded = len(symbols) > 0
         except Exception as exc:  # noqa: BLE001
-            logger.warning("%s fetch_stock_list 失败，改从行情 parquet 推导: %s", self._market, exc)
+            logger.warning(
+                "%s fetch_stock_list 失败，改从行情 parquet 推导: %s", self._market, exc
+            )
 
         # 2) 基础列表缺失/为空时，从 daily_forward 行情分区全量推导（依赖 K 线，不受基础表缺失影响）
         if not stock_list_loaded:
@@ -375,7 +440,8 @@ class QlibDataBuilder:
                             symbols.add(qs)
                     logger.info(
                         "%s 基础股票列表缺失，已从行情 parquet 推导 %d 个标的",
-                        self._market, len(symbols),
+                        self._market,
+                        len(symbols),
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("从 parquet 推导标的失败: %s", exc)
@@ -420,7 +486,9 @@ class QlibDataBuilder:
                 with open(out, "w") as f:
                     for s in sorted(syms):
                         f.write(f"{s}\t{start_date}\t{end_date}\n")
-                logger.info("Qlib universe %s: %d symbols -> %s", universe, len(syms), out)
+                logger.info(
+                    "Qlib universe %s: %d symbols -> %s", universe, len(syms), out
+                )
             except Exception as e:
                 logger.warning("生成股票池 %s 成分文件失败: %s", universe, e)
 
@@ -448,17 +516,51 @@ class QlibDataBuilder:
             return {"updated": 0, "skipped": 0}
 
         result = self.build_features_bulk(symbols=symbols, progress_cb=progress_cb)
+        if self._market == "JP":
+            calendar = self._load_calendar()
+            frame = self._hub.fetch_index_kline("TOPIX")
+            if calendar and not frame.empty:
+                positions = {
+                    str(pd.Timestamp(day).date()): index
+                    for index, day in enumerate(calendar)
+                }
+                feature_dir = self._qlib_dir / "features/jp_topix"
+                feature_dir.mkdir(parents=True, exist_ok=True)
+                for field in ("open", "high", "low", "close"):
+                    values = np.full(len(calendar), np.nan, dtype=np.float32)
+                    for day, value in zip(
+                        frame["trade_date"], frame[field], strict=True
+                    ):
+                        offset = positions.get(str(pd.Timestamp(day).date()))
+                        if offset is not None:
+                            values[offset] = value
+                    self._write_bin_file(feature_dir / f"{field}.day.bin", 0, values)
+                self._write_bin_file(
+                    feature_dir / "factor.day.bin",
+                    0,
+                    np.ones(len(calendar), dtype=np.float32),
+                )
 
         # A 股指数不在 daily_* 行情分区中，bulk 读不到，单独补建（仅 3 只，开销极小）
         if self._market == "CN":
             cal_dates = self._load_calendar()
             if cal_dates:
                 cal_index = {d: i for i, d in enumerate(cal_dates)}
-                for qlib_sym in (self._to_qlib_symbol(s) for s in CN_QLIB_INDEX_SYMBOLS):
-                    feat_dir = self._qlib_dir / "features" / self._feat_dir_name(qlib_sym)
+                for qlib_sym in (
+                    self._to_qlib_symbol(s) for s in CN_QLIB_INDEX_SYMBOLS
+                ):
+                    feat_dir = (
+                        self._qlib_dir / "features" / self._feat_dir_name(qlib_sym)
+                    )
                     feat_dir.mkdir(parents=True, exist_ok=True)
                     try:
-                        if self._build_index_features(qlib_sym, self._to_qdb_symbol(qlib_sym), feat_dir, cal_dates, cal_index):
+                        if self._build_index_features(
+                            qlib_sym,
+                            self._to_qdb_symbol(qlib_sym),
+                            feat_dir,
+                            cal_dates,
+                            cal_index,
+                        ):
                             result["updated"] += 1
                         else:
                             result["skipped"] += 1
@@ -543,14 +645,20 @@ class QlibDataBuilder:
         cal_index = {d: i for i, d in enumerate(cal_dates)}
 
         is_cn = self._market == "CN"
+        is_jp = self._market == "JP"
         kline_sub = "daily_backward" if is_cn else "daily_forward"
-        kline_glob = str(self._hub.data_dir / f"1_kline_data/{kline_sub}/dt=*/data.parquet")
+        kline_glob = str(
+            self._hub.data_dir / f"1_kline_data/{kline_sub}/dt=*/data.parquet"
+        )
 
         con = duckdb.connect(config={"memory_limit": "8GB", "threads": "4"})
         try:
             if is_cn:
                 # 未复权价单独取回：close_bin 要写成 raw x 乘法因子，不能再拿 hfq 当价格
-                unadj_glob = str(self._hub.data_dir / "1_kline_data/daily_unadjusted/dt=*/data.parquet")
+                unadj_glob = str(
+                    self._hub.data_dir
+                    / "1_kline_data/daily_unadjusted/dt=*/data.parquet"
+                )
                 df = con.execute(
                     f"""
                     SELECT k.symbol,
@@ -564,6 +672,16 @@ class QlibDataBuilder:
                       ON u.symbol = k.symbol AND CAST(u.time AS DATE) = CAST(k.time AS DATE)
                     WHERE k.close > 0 AND u.close > 0
                     ORDER BY k.symbol, d
+                    """
+                ).fetchdf()
+            elif is_jp:
+                df = con.execute(
+                    f"""
+                    SELECT symbol, CAST(time AS DATE) d,
+                           open, high, low, close, volume, amount,
+                           price_factor AS factor, volume_factor
+                    FROM read_parquet('{kline_glob}', hive_partitioning=1)
+                    ORDER BY symbol, d
                     """
                 ).fetchdf()
             else:
@@ -592,7 +710,9 @@ class QlibDataBuilder:
             # symbol 保留大小写，非 CN 市场过滤需两侧都小写比较
             if not is_cn:
                 qlib_wanted = {s.lower() for s in symbols}
-                df = df[df["symbol"].map(self._to_qlib_symbol).str.lower().isin(qlib_wanted)]
+                df = df[
+                    df["symbol"].map(self._to_qlib_symbol).str.lower().isin(qlib_wanted)
+                ]
             else:
                 qlib_wanted = set(symbols)
                 df = df[df["symbol"].map(self._to_qlib_symbol).isin(qlib_wanted)]
@@ -604,7 +724,11 @@ class QlibDataBuilder:
         for qdb_sym, group in df.groupby("symbol", sort=False):
             processed += 1
             # 特征阶段占据总耗时主体（8~95%）：按批次上报进度，让上层看到"在动"并续心跳
-            if callable(progress_cb) and total_syms and (processed % 20 == 0 or processed == total_syms):
+            if (
+                callable(progress_cb)
+                and total_syms
+                and (processed % 20 == 0 or processed == total_syms)
+            ):
                 try:
                     progress_cb(int(8 + 87 * processed / total_syms))
                 except Exception:  # noqa: BLE001 - 进度回调非关键路径
@@ -625,10 +749,24 @@ class QlibDataBuilder:
                     field: group[field].values
                     for field in ("open", "high", "low", "close", "volume", "amount")
                 }
-                factor = group["factor"].values if is_cn else np.ones(len(group))
+                if is_jp:
+                    # amount is raw JPY, volume is split-adjusted. Rights do not
+                    # alter volume, so price and volume factors must be separate.
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        cols["vwap"] = (
+                            group["amount"].values
+                            / group["volume"].values
+                            * group["factor"].values
+                            / group["volume_factor"].values
+                        )
+                factor = (
+                    group["factor"].values if is_cn or is_jp else np.ones(len(group))
+                )
                 if is_cn:
                     f_mult = self._multiplicative_factor(
-                        qlib_sym, group["d"].values, group["raw_close"].values,
+                        qlib_sym,
+                        group["d"].values,
+                        group["raw_close"].values,
                         group["close"].values,
                     )
                     if f_mult is not None:
@@ -649,6 +787,12 @@ class QlibDataBuilder:
                 f_aligned = np.full(span, 1.0, dtype=np.float32)
                 f_aligned[offsets] = np.asarray(factor, dtype=np.float32)
                 aligned["factor"] = f_aligned
+                if is_jp:
+                    volume_factor = np.full(span, np.nan, dtype=np.float32)
+                    volume_factor[offsets] = np.asarray(
+                        group["volume_factor"].values, dtype=np.float32
+                    )
+                    aligned["volume_factor"] = volume_factor
                 for field, arr in aligned.items():
                     self._write_bin_file(feat_dir / f"{field}.day.bin", start_idx, arr)
                 if is_cn:
@@ -670,7 +814,12 @@ class QlibDataBuilder:
                 "（该口径会逐日漂移）",
                 factor_fallback,
             )
-        logger.info("Qlib[%s] features (bulk): updated=%d, skipped=%d", self._market, updated, skipped)
+        logger.info(
+            "Qlib[%s] features (bulk): updated=%d, skipped=%d",
+            self._market,
+            updated,
+            skipped,
+        )
         return {"updated": updated, "skipped": skipped}
 
     def _load_calendar(self) -> list[str]:
@@ -741,12 +890,20 @@ class QlibDataBuilder:
         - 期货: CL.FUT -> fut_CL.FUT, Au99.99 -> fut_Au99.99
         """
         s = symbol.strip()
+        if self._market == "JP":
+            from backend.shared.stock_utils import StockCodeUtil
+
+            if s.upper() in {"TOPIX.JP", "JPTOPIX", "JP_TOPIX"}:
+                return "jp_topix"
+            return StockCodeUtil.to_qlib(s, market="JP")
         if self._market == "CN":
             if "." in s:
                 code, exchange = s.split(".", 1)
                 if exchange.upper() in ("SH", "SZ", "BJ"):
                     return f"{exchange.lower()}{code}"
-            return s.lower() if not s.lower().startswith(("sh", "sz", "bj")) else s.lower()
+            return (
+                s.lower() if not s.lower().startswith(("sh", "sz", "bj")) else s.lower()
+            )
         # 非 A 股：统一前缀 + 原始 symbol（含点号，保留大小写）
         prefix = _MARKET_QLIB_PREFIX.get(self._market, "mkt_")
         # 幂等：已是该市场前缀则直接返回
@@ -763,6 +920,12 @@ class QlibDataBuilder:
     def _to_qdb_symbol(self, qlib_symbol: str) -> str:
         """Qlib 格式 -> 原生 symbol。必须与 _to_qlib_symbol 完全对称。"""
         s = qlib_symbol.strip()
+        if self._market == "JP":
+            from backend.shared.stock_utils import StockCodeUtil
+
+            if s.lower() == "jp_topix":
+                return "TOPIX.JP"
+            return StockCodeUtil.to_suffix(s, market="JP")
         # A 股：exchange 前缀还原
         if self._market == "CN":
             if s.startswith("sh"):
@@ -777,7 +940,7 @@ class QlibDataBuilder:
         # 非 A 股：剥离市场前缀
         prefix = _MARKET_QLIB_PREFIX.get(self._market, "mkt_")
         if s.startswith(prefix):
-            return s[len(prefix):]
+            return s[len(prefix) :]
         # 可能已经是原生格式
         return s
 
@@ -812,7 +975,7 @@ class QlibDataBuilder:
 
         if cal_file.exists():
             with open(cal_file) as f:
-                dates = [l.strip() for l in f if l.strip()]
+                dates = [line.strip() for line in f if line.strip()]
             status["calendar_count"] = len(dates)
             if dates:
                 status["calendar_range"] = f"{dates[0]} ~ {dates[-1]}"
@@ -882,7 +1045,7 @@ def ensure_qlib_cache(
         qlib_dir: Qlib 输出目录（默认按 resolve_qlib_provider_uri 解析）
     """
     # 向后兼容：旧调用 ensure_qlib_cache("/data/quantdb") 把路径当 market
-    if isinstance(market, (str, Path)) and str(market).startswith(("/", "~", ".")):
+    if isinstance(market, str | Path) and str(market).startswith(("/", "~", ".")):
         p = Path(str(market))
         if p.is_dir() or "/quantdb" in str(market):
             quantdb_dir = quantdb_dir or p
@@ -895,7 +1058,9 @@ def ensure_qlib_cache(
 
         qlib_dir = resolve_qlib_provider_uri(market)
 
-    builder = QlibDataBuilder.for_market(market, data_dir=quantdb_dir, qlib_dir=qlib_dir)
+    builder = QlibDataBuilder.for_market(
+        market, data_dir=quantdb_dir, qlib_dir=qlib_dir
+    )
 
     if not builder.is_built():
         logger.info("Qlib[%s] 缓存不存在，开始构建...", market)

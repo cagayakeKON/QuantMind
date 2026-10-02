@@ -29,9 +29,7 @@ POOL_TYPE_SYSTEM_INDEX = "system_index"  # 指数成分池（成分来自 QuantD
 POOL_TYPE_STATIC = "static"  # 手工维护的固定成分
 POOL_TYPE_IMPORTED = "imported"  # 文件导入
 
-POOL_TYPES = frozenset(
-    {POOL_TYPE_SYSTEM_INDEX, POOL_TYPE_STATIC, POOL_TYPE_IMPORTED}
-)
+POOL_TYPES = frozenset({POOL_TYPE_SYSTEM_INDEX, POOL_TYPE_STATIC, POOL_TYPE_IMPORTED})
 
 # ---------------------------------------------------------------------------
 # 作用域
@@ -86,9 +84,12 @@ BINDING_MODES = frozenset(
 # 支持的市场（与 data_platform.normalize_market 口径对齐）
 # ---------------------------------------------------------------------------
 MARKET_CN = "CN"
+MARKET_JP = "JP"
 MARKET_HK = "HK"
 MARKET_US = "US"
 MARKET_BC = "BC"
 MARKET_FUTURES = "FUTURES"
 
-MARKETS = frozenset({MARKET_CN, MARKET_HK, MARKET_US, MARKET_BC, MARKET_FUTURES})
+MARKETS = frozenset(
+    {MARKET_CN, MARKET_HK, MARKET_US, MARKET_JP, MARKET_BC, MARKET_FUTURES}
+)
