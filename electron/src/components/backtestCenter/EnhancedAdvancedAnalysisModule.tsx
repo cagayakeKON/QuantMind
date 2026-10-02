@@ -23,6 +23,8 @@ import { TradeStatsPanel } from './analysis/TradeStatsPanel';
 import { BenchmarkPanel } from './analysis/BenchmarkPanel';
 import { authService } from '../../features/auth/services/authService';
 import { resolveStrategyName, resolveBacktestPeriod } from '../backtest/BacktestHistory';
+import { getMarketConfig } from '../../config/marketConfig';
+import type { AppMarket } from '../../store/slices/uiSlice';
 
 type AnalysisType = 'risk' | 'trade' | 'benchmark';
 
@@ -212,7 +214,11 @@ export const EnhancedAdvancedAnalysisModule: React.FC = () => {
         </div>
 
         {backtestId ? (
-          <AnalysisResults type={activeAnalysis} backtestId={backtestId} />
+          <AnalysisResults
+            type={activeAnalysis}
+            backtestId={backtestId}
+            market={(selectedBacktest?.market || selectedBacktest?.config?.market) as AppMarket | undefined}
+          />
         ) : (
           <div className="bg-gray-50 rounded-2xl border border-gray-200 p-10 text-center text-gray-500">
             请先选择一个已完成的回测结果
@@ -223,14 +229,22 @@ export const EnhancedAdvancedAnalysisModule: React.FC = () => {
   );
 };
 
-const AnalysisResults: React.FC<{ type: AnalysisType; backtestId: string }> = ({ type, backtestId }) => {
+const AnalysisResults: React.FC<{
+  type: AnalysisType;
+  backtestId: string;
+  market?: AppMarket;
+}> = ({ type, backtestId, market }) => {
   switch (type) {
     case 'risk':
       return <BasicRiskPanel backtestId={backtestId} />;
     case 'trade':
       return <TradeStatsPanel backtestId={backtestId} />;
     case 'benchmark':
-      return <BenchmarkPanel backtestId={backtestId} />;
+      return <BenchmarkPanel
+        key={market && getMarketConfig(market).analysis ? `${market}:${backtestId}` : 'legacy'}
+        backtestId={backtestId}
+        market={market}
+      />;
     default:
       return null;
   }

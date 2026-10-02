@@ -4,6 +4,9 @@
 提供策略与基准的对比指标
 """
 
+import asyncio
+from functools import partial
+from importlib import import_module
 import logging
 from typing import Optional
 
@@ -21,6 +24,7 @@ from backend.services.engine.qlib_app.services.backtest_persistence import (
 from backend.services.engine.qlib_app.utils.benchmark_symbol import benchmark_candidates
 from backend.services.engine.qlib_app.utils.qlib_utils import D
 from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
+from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
 
 logger = logging.getLogger(__name__)
 DEFAULT_RISK_FREE_RATE = 0.02
@@ -42,10 +46,49 @@ class BenchmarkService:
     ) -> BenchmarkComparisonResponse:
         try:
             # 1. 获取真实策略收益
-            strategy_returns = await self._get_strategy_returns(backtest_id, user_id, tenant_id)
+            provider = next(
+                (
+                    item
+                    for item in LOCAL_MARKET_PROVIDERS.values()
+                    if item.benchmark == benchmark_id.upper()
+                    and item.benchmark_price_loader
+                ),
+                None,
+            )
+            price_loader = None
+            if provider:
+                recorded = await self._persistence.get_result(
+                    backtest_id,
+                    tenant_id=tenant_id,
+                    include_fields=[
+                        "equity_curve",
+                        "config",
+                        "market",
+                        "data_version",
+                        "benchmark_symbol",
+                    ],
+                )
+                if recorded is None:
+                    raise ValueError("回测或基准收益数据缺失")
+                strategy_returns = await self._get_strategy_returns(
+                    backtest_id, user_id, tenant_id, recorded=recorded
+                )
+                if strategy_returns is None:
+                    raise ValueError("回测或基准收益数据缺失")
+                module_name, function_name = provider.benchmark_price_loader.rsplit(".", 1)
+                price_loader = partial(
+                    getattr(import_module(module_name), function_name), recorded
+                )
+            else:
+                strategy_returns = await self._get_strategy_returns(backtest_id, user_id, tenant_id)
 
             # 2. 从 Qlib 获取真实基准收益
-            benchmark_returns = await self._get_benchmark_returns(benchmark_id, strategy_returns.index)
+            if price_loader:
+                benchmark_returns = await self._get_benchmark_returns(
+                    benchmark_id, strategy_returns.index, price_loader=price_loader
+                )
+            else:
+                benchmark_returns = await self._get_benchmark_returns(benchmark_id, strategy_returns.index)
 
             if strategy_returns is None or benchmark_returns is None:
                 raise ValueError("回测或基准收益数据缺失")
@@ -113,10 +156,15 @@ class BenchmarkService:
             ).exception("failed", "基准对比分析失败", error=exc)
             raise
 
-    async def _get_strategy_returns(self, backtest_id: str, user_id: str, tenant_id: str) -> pd.Series | None:
+    async def _get_strategy_returns(
+        self, backtest_id: str, user_id: str, tenant_id: str, *, recorded=None
+    ) -> pd.Series | None:
         """获取真实策略收益"""
         # 优化：按需加载
-        result = await self._persistence.get_result(backtest_id, tenant_id=tenant_id, include_fields=["equity_curve"])
+        if recorded is not None:
+            result = recorded
+        else:
+            result = await self._persistence.get_result(backtest_id, tenant_id=tenant_id, include_fields=["equity_curve"])
         if not result or not result.equity_curve:
             return None
 
@@ -126,7 +174,9 @@ class BenchmarkService:
         returns = df["value"].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0)
         return returns.clip(lower=-0.95, upper=1.0)
 
-    async def _get_benchmark_returns(self, benchmark_id: str, dates: pd.Index) -> pd.Series | None:
+    async def _get_benchmark_returns(
+        self, benchmark_id: str, dates: pd.Index, *, price_loader=None
+    ) -> pd.Series | None:
         """从 Qlib 数据源获取真实基准收益"""
         try:
             # 确保 Qlib 已初始化 (由 main.py 处理，此处作为保险)
@@ -135,15 +185,20 @@ class BenchmarkService:
                 end_date = dates[-1].strftime("%Y-%m-%d")
 
                 df = None
-                for candidate in benchmark_candidates(benchmark_id):
-                    df = D.features(
-                        [candidate],
-                        ["$close"],
-                        start_time=start_date,
-                        end_time=end_date,
+                if price_loader is not None:
+                    df = await asyncio.to_thread(
+                        price_loader, benchmark_id, start_date, end_date
                     )
-                    if df is not None and not df.empty:
-                        break
+                else:
+                    for candidate in benchmark_candidates(benchmark_id):
+                        df = D.features(
+                            [candidate],
+                            ["$close"],
+                            start_time=start_date,
+                            end_time=end_date,
+                        )
+                        if df is not None and not df.empty:
+                            break
 
                 if df is not None and not df.empty:
                     df = df.droplevel(level="instrument")
@@ -157,6 +212,8 @@ class BenchmarkService:
                     # 重新采样以匹配策略日期
                     return benchmark_returns.reindex(dates).fillna(0)
         except Exception as e:
+            if price_loader is not None:
+                raise
             StructuredTaskLogger(
                 logger,
                 "benchmark-service",
@@ -164,6 +221,8 @@ class BenchmarkService:
             ).warning("benchmark_unavailable", "无法获取真实基准数据", error=e)
 
         # 最后的兜底：如果 Qlib 数据不可用，才使用模拟（但这不应该发生）
+        if price_loader is not None:
+            raise ValueError("Recorded market benchmark prices are unavailable")
         np.random.seed(42)
         returns = np.random.normal(0.0004, 0.01, len(dates))
         return pd.Series(returns, index=dates)

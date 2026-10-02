@@ -72,6 +72,9 @@ export interface BacktestConfig {
 
 /** 回测结果 */
 export interface BacktestResult {
+  market?: AppMarket;
+  currency?: string;
+  data_version?: string;
   // 基础信息
   backtest_id: string;
   task_id?: string;

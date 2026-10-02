@@ -5,6 +5,8 @@
 import React, { useEffect, useState } from 'react';
 import { AlertTriangle, Info, RefreshCw, TrendingUp } from 'lucide-react';
 import ReactECharts from 'echarts-for-react';
+import { getMarketConfig } from '../../../config/marketConfig';
+import type { AppMarket } from '../../../store/slices/uiSlice';
 import {
   advancedAnalysisService,
   type BenchmarkComparisonResponse,
@@ -12,6 +14,7 @@ import {
 
 interface BenchmarkPanelProps {
   backtestId: string;
+  market?: AppMarket;
 }
 
 const BENCHMARK_OPTIONS = [
@@ -20,8 +23,14 @@ const BENCHMARK_OPTIONS = [
   { id: 'SH000852', name: '中证1000' },
 ];
 
-export const BenchmarkPanel: React.FC<BenchmarkPanelProps> = ({ backtestId }) => {
-  const [benchmarkId, setBenchmarkId] = useState<string>(BENCHMARK_OPTIONS[0].id);
+export const BenchmarkPanel: React.FC<BenchmarkPanelProps> = ({ backtestId, market }) => {
+  const benchmarkOptions = market
+    ? getMarketConfig(market).analysis?.benchmarks || BENCHMARK_OPTIONS
+    : BENCHMARK_OPTIONS;
+  const [selectedBenchmarkId, setBenchmarkId] = useState<string>(benchmarkOptions[0].id);
+  const benchmarkId = benchmarkOptions.some(item => item.id === selectedBenchmarkId)
+    ? selectedBenchmarkId
+    : benchmarkOptions[0].id;
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<BenchmarkComparisonResponse | null>(null);
   const [error, setError] = useState<string>('');
@@ -124,7 +133,7 @@ export const BenchmarkPanel: React.FC<BenchmarkPanelProps> = ({ backtestId }) =>
       <div className="bg-white rounded-2xl border border-gray-200 p-4">
         <label className="text-xs font-medium text-gray-600">基准指数</label>
         <div className="mt-2 flex flex-wrap gap-2">
-          {BENCHMARK_OPTIONS.map((option) => (
+          {benchmarkOptions.map((option) => (
             <button
               key={option.id}
               onClick={() => setBenchmarkId(option.id)}
