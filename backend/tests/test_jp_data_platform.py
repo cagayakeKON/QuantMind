@@ -255,3 +255,15 @@ def test_jp_factor_reader_resolves_published_generation(
     assert market_data_dir("JP") == expected
     assert QuantDBFactorReader(market="JP").data_dir == expected
     assert QuantDBFactorReader(root, market="JP").data_dir == expected
+
+
+def test_partition_inventory_tracks_atomic_publication(snapshot, tmp_path):
+    root = tmp_path / "quantjp"
+    import_jquants_snapshot(snapshot, root)
+    hub = QuantJPDataHub(root)
+    assert len(hub._partition_dates("1_kline_data/daily_unadjusted")) == 3
+    import_jquants_snapshot(snapshot, root, end=date(2026, 9, 29))
+    assert hub._partition_dates("1_kline_data/daily_unadjusted") == [
+        "20260928",
+        "20260929",
+    ]

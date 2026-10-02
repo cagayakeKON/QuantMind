@@ -6,6 +6,7 @@ import os
 import json
 import threading
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
@@ -23,6 +24,28 @@ def _resolve_quantjp_data_dir() -> Path:
     if container.is_dir():
         return container
     return Path(__file__).resolve().parents[4] / "data" / "quantjp"
+
+
+def _scan_partition_dates(root: Path, relative: str) -> tuple[str, ...]:
+    # DirEntry carries file type metadata. Path.iterdir()+is_dir() issues a
+    # separate stat for every partition on Docker Desktop Windows mounts.
+    try:
+        with os.scandir(root / relative) as entries:
+            return tuple(
+                sorted(
+                    entry.name[3:]
+                    for entry in entries
+                    if entry.name.startswith("dt=")
+                    and len(entry.name) == 11
+                    and entry.name[3:].isdigit()
+                    and entry.is_dir(follow_symlinks=False)
+                )
+            )
+    except FileNotFoundError:
+        return ()
+
+
+_published_partition_dates = lru_cache(maxsize=128)(_scan_partition_dates)
 
 
 class QuantJPDataHub(QuantDBDataHub):
@@ -65,6 +88,20 @@ class QuantJPDataHub(QuantDBDataHub):
     @property
     def available(self) -> bool:
         return bool(self._partition_dates("1_kline_data/daily_unadjusted"))
+
+    def _partition_dates(
+        self, rel_path: str, start: date | None = None, end: date | None = None
+    ) -> list[str]:
+        root = self.data_dir
+        # Only immutable published versions can safely share cached inventories.
+        read = (
+            _published_partition_dates
+            if (root / "manifest.json").is_file()
+            else _scan_partition_dates
+        )
+        first = start.strftime("%Y%m%d") if start else ""
+        last = end.strftime("%Y%m%d") if end else "99999999"
+        return [day for day in read(root, rel_path) if first <= day <= last]
 
     def _mount_views(self, conn, force: bool = False) -> None:
         if id(conn) in self._views_mounted_per_conn and not force:
