@@ -298,11 +298,14 @@ class BacktestPersistence:
         }
 
     async def list_history(
-        self, user_id: str, tenant_id: str | None = None, limit: int | None = None
+        self, user_id: str, tenant_id: str | None = None, limit: int | None = None,
+        market: str | None = None,
     ) -> list[QlibBacktestResult]:
         """历史列表只返回摘要字段，不加载 equity_curve/trades/positions 等大字段"""
         user_id = normalize_user_id(user_id)
         params = {"user_id": user_id}
+        if market:
+            params["market"] = market.upper()
         if tenant_id:
             params["tenant_id"] = tenant_id
         sql_limit = ""
@@ -348,7 +351,9 @@ class BacktestPersistence:
                         AND m.tenant_id = b.tenant_id
                         AND m.user_id = b.user_id
                     WHERE b.user_id = :user_id
-                    """ + (" AND b.tenant_id = :tenant_id" if tenant_id else "") + " ORDER BY b.created_at DESC" + sql_limit
+                    """ + (" AND b.tenant_id = :tenant_id" if tenant_id else "")
+                    + (" AND COALESCE(b.config_json->>'market', 'CN') = :market" if market else "")
+                    + " ORDER BY b.created_at DESC" + sql_limit
                 ),
                 params,
             )
@@ -643,7 +648,7 @@ class BacktestPersistence:
 
     async def _prune_user_history(self, session, user_id: str, tenant_id: str) -> None:
         """
-        每个 user_id + tenant_id 仅保留最近 HISTORY_RETENTION_LIMIT 条记录，
+        JP 与原市场分别保留每个 user_id + tenant_id 最近 HISTORY_RETENTION_LIMIT 条记录，
         避免回测历史无限增长导致查询和存储压力持续升高。
 
         注意：本地结果文件（trades/equity_curve 等大字段的唯一副本）
@@ -660,7 +665,9 @@ class BacktestPersistence:
                     SELECT
                         backtest_id,
                         ROW_NUMBER() OVER (
-                            PARTITION BY user_id, tenant_id
+                            PARTITION BY user_id, tenant_id,
+                                CASE WHEN config_json->>'market' = 'JP'
+                                     THEN 'JP' ELSE 'legacy' END
                             ORDER BY created_at DESC, backtest_id DESC
                         ) AS rn
                     FROM qlib_backtest_runs

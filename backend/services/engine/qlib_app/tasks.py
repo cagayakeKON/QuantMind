@@ -438,7 +438,8 @@ def run_backtest_async(self, request_dict: dict[str, Any]) -> dict[str, Any]:
 
     try:
         service = _get_qlib_service_instance()
-        service.initialize()
+        if request.market != "JP" and "jp_data" not in str(request.qlib_provider_uri or "").lower():
+            service.initialize()
 
         # 进度：10%
         self.update_state(state="PROGRESS", meta={"progress": 0.1, "status": "running"})
@@ -470,7 +471,7 @@ def run_backtest_async(self, request_dict: dict[str, Any]) -> dict[str, Any]:
         )
 
         # 核心增强：如果是自定义策略回测成功，标记为“已验证可用”
-        if request.strategy_id and request.strategy_id.isdigit():
+        if request.market != "JP" and "jp_data" not in str(request.qlib_provider_uri or "").lower() and request.strategy_id and request.strategy_id.isdigit():
             from backend.shared.strategy_storage import get_strategy_storage_service
 
             try:

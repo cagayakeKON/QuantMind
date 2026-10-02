@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
 
 
 GRID_SEARCH_MAX_COMBINATIONS = 100
@@ -63,6 +63,9 @@ class QlibBacktestRequest(BaseModel):
     """Qlib 回测请求"""
 
     model_config = ConfigDict(populate_by_name=True)
+    market: Literal["CN", "HK", "JP", "US", "CRYPTO", "FUTURES"] | None = None
+    jp_commission_rate: float | None = Field(None, ge=0, lt=1)
+    jp_slippage_bps: float = Field(5.0, ge=0, lt=10000)
 
     # 策略配置 (支持原生 ID 和前端模板 ID)
     strategy_type: str = Field(
@@ -229,6 +232,17 @@ class QlibBacktestResult(BaseModel):
     """Qlib 回测结果"""
 
     backtest_id: str
+    market: str | None = None
+    currency: str | None = None
+    data_version: str | None = None
+
+    @field_serializer("created_at", "completed_at", when_used="json")
+    def serialize_instant(self, value):
+        if self.market == "JP":
+            from backend.shared.utc_datetime import to_utc_iso
+
+            return to_utc_iso(value)
+        return value.isoformat() if value is not None else None
     user_id: str | None = None
     tenant_id: str = "default"
     status: str = "completed"

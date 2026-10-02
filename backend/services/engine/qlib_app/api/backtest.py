@@ -16,6 +16,7 @@ from backend.services.engine.qlib_app.api.optimization import router as optimiza
 from backend.services.engine.qlib_app.api.risk import router as risk_router
 from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestRequest, QlibBacktestResult
 from backend.shared.utils import normalize_user_id
+from backend.shared.utc_datetime import utc_now
 from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
 
 # 前端 backtestService 的 baseUrl 是 /api/v1/qlib
@@ -74,28 +75,54 @@ async def run_backtest(
         request.tenant_id = auth_tenant_id
 
         backtest_id = getattr(request, "backtest_id", None) or uuid4().hex
+        is_jp = request.market == "JP" or "jp_data" in str(request.qlib_provider_uri or "").lower()
 
         if async_mode:
-            request_dict = request.dict()
+            request_dict = request.model_dump(exclude_unset=True) if is_jp else request.dict()
+            if is_jp:
+                request_dict["market"] = "JP"
             request_dict["backtest_id"] = backtest_id
 
             try:
                 from backend.services.engine.qlib_app.services.backtest_persistence import BacktestPersistence
                 from backend.services.engine.qlib_app.tasks import run_backtest_async
 
-                task = run_backtest_async.apply_async(args=[request_dict])
-
                 persistence = BacktestPersistence()
-                await persistence.save_run(
-                    backtest_id=backtest_id,
-                    user_id=request.user_id,
-                    tenant_id=request.tenant_id,
-                    status="pending",
-                    created_at=datetime.now(),
-                    config=request_dict,
-                    result=None,
-                    task_id=task.id,
-                )
+                if is_jp:
+                    # Persist before queueing so a fast worker cannot have its
+                    # completed/failed result overwritten by a pending record.
+                    await persistence.save_run(
+                        backtest_id=backtest_id, user_id=request.user_id,
+                        tenant_id=request.tenant_id, status="pending",
+                        created_at=utc_now(), config=request_dict, result=None,
+                    )
+                try:
+                    task = run_backtest_async.apply_async(args=[request_dict])
+                except Exception as exc:
+                    if is_jp:
+                        failed = QlibBacktestResult(
+                            backtest_id=backtest_id, user_id=request.user_id,
+                            tenant_id=request.tenant_id, market="JP", currency="JPY",
+                            status="failed", config=request_dict, created_at=utc_now(),
+                            completed_at=utc_now(), error_message=str(exc),
+                        )
+                        await persistence.save_run(
+                            backtest_id, request.user_id, request.tenant_id, "failed",
+                            failed.created_at, request_dict, failed,
+                            completed_at=failed.completed_at,
+                        )
+                    raise
+                if not is_jp:
+                    await persistence.save_run(
+                        backtest_id=backtest_id,
+                        user_id=request.user_id,
+                        tenant_id=request.tenant_id,
+                        status="pending",
+                        created_at=datetime.now(),
+                        config=request_dict,
+                        result=None,
+                        task_id=task.id,
+                    )
 
                 return QlibBacktestResult(
                     backtest_id=backtest_id,
@@ -106,6 +133,7 @@ async def run_backtest(
                     sharpe_ratio=0.0,
                     max_drawdown=0.0,
                     alpha=0.0,
+                    **({"created_at": utc_now(), "market": "JP", "currency": "JPY"} if is_jp else {}),
                 )
             except Exception as celery_err:
                 task_logger.error(

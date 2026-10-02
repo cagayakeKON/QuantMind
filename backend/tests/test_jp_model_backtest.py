@@ -1,0 +1,227 @@
+"""Model portfolios and reports share the strict JP execution ledger."""
+
+from datetime import date
+from types import SimpleNamespace
+
+import duckdb
+import pandas as pd
+import pytest
+
+from backend.services.engine.data_platform.jquants_import import import_jquants_snapshot
+from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestRequest
+from backend.services.engine.qlib_app.services.backtest_service_runtime import (
+    QlibBacktestServiceRuntimeMixin,
+)
+from backend.services.simulation.jp import backtest
+from backend.services.simulation.jp.model_portfolio import portfolio_orders
+from backend.services.simulation.jp.rules import RuleDataMissing
+
+pytest_plugins = ["backend.tests.test_jp_data_platform"]
+
+
+@pytest.fixture
+def model_data(snapshot, tmp_path, monkeypatch):
+    with duckdb.connect(str(snapshot)) as conn:
+        conn.execute(
+            "INSERT INTO research.calendar VALUES ('2026-09-24','1'), ('2026-09-25','1'), ('2026-10-01','1'), ('2026-10-02','1')"
+        )
+    root = tmp_path / "quantjp"
+    version = import_jquants_snapshot(snapshot, root)
+    monkeypatch.setenv("QM_QUANTJP_DATA_DIR", str(root))
+    model = tmp_path / "model"
+    model.mkdir()
+    pd.DataFrame(
+        {
+            "symbol": ["JP72030"],
+            "trade_date": pd.to_datetime(["2026-09-28"]),
+            "pred": [0.8],
+            "split": ["test"],
+        }
+    ).to_parquet(model / "pred.parquet")
+    meta = {
+        "data_source": "quantdb_factors",
+        "factor_source": "l1_factors",
+        "jp_data_version": version["version"],
+        "context": {"market": "JP"},
+        "train_end": "2026-09-24",
+        "target_horizon_days": 1,
+    }
+    request = QlibBacktestRequest(
+        market="JP",
+        strategy_type="jp_cash_topk",
+        model_id="jp-test",
+        start_date="2026-09-29",
+        end_date="2026-09-29",
+        initial_capital=20000,
+        benchmark="TOPIX",
+        risk_free_rate=0,
+        jp_slippage_bps=0,
+        strategy_total_position=0.95,
+    )
+    return request, model, meta
+
+
+def test_real_raw_fills_dated_settlement_and_topix_report(model_data):
+    request, model, meta = model_data
+    result = backtest.run_cash_backtest(request, model, meta)
+    assert result.market == "JP" and result.currency == "JPY"
+    assert result.total_trades == 1
+    fill = result.trades[0]
+    assert fill["symbol"] == "JP72030" and fill["quantity"] == 100
+    assert float(fill["price"]) == 50 and float(fill["fee"]) == 0
+    assert fill["settlement_date"] == "2026-10-01"
+    assert result.total_return == 0 and result.benchmark_return == 0
+    assert result.config["execution_engine"] == "jp_cash_ledger"
+    assert len(result.config["prediction_sha256"]) == 64
+    assert [row["date"] for row in result.equity_curve] == ["2026-09-28", "2026-09-29"]
+
+
+def test_no_training_split_signals_or_cn_strategy_fallback(model_data):
+    request, model, meta = model_data
+    request.strategy_type = "TopkDropout"
+    with pytest.raises(ValueError, match="jp_cash_topk"):
+        backtest.run_cash_backtest(request, model, meta)
+    request.strategy_type = "jp_cash_topk"
+    with pytest.raises(ValueError, match="availability"):
+        backtest.run_cash_backtest(request, model, {**meta, "train_end": "2026-09-28"})
+    frame = pd.read_parquet(model / "pred.parquet")
+    frame["split"] = "train"
+    frame.to_parquet(model / "pred.parquet")
+    with pytest.raises(RuleDataMissing, match="signals are missing"):
+        backtest.run_cash_backtest(request, model, meta)
+
+
+def test_prior_close_sizing_sells_first_without_using_future_open():
+    state = {
+        "cash_funds": [{"amount": "100000"}],
+        "positions": {"JP67580": {"lots": [{"quantity": 100}]}},
+    }
+    bars = {
+        "JP67580": {"close": 1000, "volume": 10000},
+        "JP72030": {"close": 500, "volume": 10000, "open": 1},
+    }
+    master = {"JP72030": {}}
+    orders = portfolio_orders(
+        state,
+        [{"symbol": "JP72030", "score": 1}],
+        bars,
+        master,
+        date(2026, 9, 28),
+        date(2026, 9, 29),
+        topk=5,
+        exposure=backtest.money("0.95"),
+    )
+    assert [(row["side"], row["symbol"], row["quantity"]) for row in orders] == [
+        ("SELL", "JP67580", 100),
+        ("BUY", "JP72030", 300),
+    ]
+    assert all(row["signal_date"] == "2026-09-28" for row in orders)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_retains_existing_market_runtime(monkeypatch):
+    async def jp_run(request, persistence):
+        assert request.market == "JP" and persistence == "store"
+        return "jp-ledger"
+
+    monkeypatch.setattr(backtest, "run_jp_backtest", jp_run)
+
+    def original_cleanup():
+        raise RuntimeError("original runtime reached")
+
+    service = SimpleNamespace(
+        _persistence="store", _cleanup_stale_runs=original_cleanup
+    )
+    assert (
+        await QlibBacktestServiceRuntimeMixin.run_backtest(
+            service, QlibBacktestRequest(market="JP")
+        )
+        == "jp-ledger"
+    )
+    with pytest.raises(RuntimeError, match="original runtime reached"):
+        await QlibBacktestServiceRuntimeMixin.run_backtest(
+            service, QlibBacktestRequest()
+        )
+
+
+@pytest.mark.asyncio
+async def test_failure_is_persisted_and_never_falls_back(monkeypatch):
+    async def resolve(**kwargs):
+        return SimpleNamespace(fallback_used=True, effective_model_id="cn-default")
+
+    monkeypatch.setattr(
+        backtest.model_registry_service, "resolve_effective_model", resolve
+    )
+    saved = []
+
+    async def save(*args, **kwargs):
+        saved.append(args[6])
+
+    with pytest.raises(LookupError, match="unavailable"):
+        await backtest.run_jp_backtest(
+            QlibBacktestRequest(market="JP", model_id="missing"),
+            SimpleNamespace(save_run=save),
+        )
+    assert saved[0].status == "failed" and saved[0].currency == "JPY"
+
+
+@pytest.mark.asyncio
+async def test_jp_pending_saved_before_fast_worker_and_not_cached(monkeypatch):
+    from backend.services.engine.qlib_app.api import backtest as api
+    from backend.services.engine.qlib_app.services import (
+        backtest_persistence as storage,
+    )
+    from backend.services.engine.qlib_app.services import (
+        backtest_service_query as query,
+    )
+    from backend.services.engine.qlib_app import tasks
+    from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestResult
+
+    saved = []
+
+    class Store:
+        async def save_run(self, **kwargs):
+            saved.append(kwargs["status"])
+
+    def enqueue(**kwargs):
+        assert saved == ["pending"]
+        payload = kwargs["args"][0]
+        assert "stamp_duty" not in payload and "min_commission" not in payload
+        worker_request = QlibBacktestRequest(**payload)
+        assert "commission" not in worker_request.model_fields_set
+        saved.append("completed-by-worker")
+        return SimpleNamespace(id="task-jp")
+
+    monkeypatch.setattr(storage, "BacktestPersistence", Store)
+    monkeypatch.setattr(tasks.run_backtest_async, "apply_async", enqueue)
+    monkeypatch.setattr(
+        api, "_identity_from_request", lambda *args, **kwargs: ("u", "default")
+    )
+    pending = await api.run_backtest(None, QlibBacktestRequest(market="JP"), None, True)
+    assert pending.task_id == "task-jp" and saved == ["pending", "completed-by-worker"]
+
+    complete = QlibBacktestResult(
+        backtest_id=pending.backtest_id,
+        market="JP",
+        config={"market": "JP"},
+        trades=[{"symbol": "JP216A0", "price": "100.5"}],
+    )
+
+    async def get_result(*args, **kwargs):
+        return complete
+
+    cache = SimpleNamespace(
+        get_backtest_result=lambda _: {"config": {"market": "JP"}, "status": "pending"},
+        set_backtest_result=lambda *args: None,
+    )
+    service = SimpleNamespace(
+        _initialized=True,
+        _cache=cache,
+        _runs={},
+        _persistence=SimpleNamespace(get_result=get_result),
+        _normalize_result_trades=lambda value: value,
+    )
+    got = await query.QlibBacktestServiceQueryMixin.get_result(
+        service, pending.backtest_id, "default", "u"
+    )
+    assert got.status == "completed" and got.trades[0]["price"] == "100.5"

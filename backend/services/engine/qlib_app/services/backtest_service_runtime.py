@@ -100,6 +100,10 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
 
     async def run_backtest(self, request: QlibBacktestRequest) -> QlibBacktestResult:
         """运行回测"""
+        if getattr(request, "market", None) == "JP" or "jp_data" in str(getattr(request, "qlib_provider_uri", None) or "").lower():
+            from backend.services.simulation.jp.backtest import run_jp_backtest
+
+            return await run_jp_backtest(request, self._persistence)
         self._cleanup_stale_runs()
         start_time = time.time()
         signal_meta: dict[str, Any] = {"source": "unknown"}

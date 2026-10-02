@@ -40,7 +40,10 @@ class QlibBacktestServiceQueryMixin:
         if self._cache and not exclude_trades:
             try:
                 cached_result = self._cache.get_backtest_result(cache_key)
-                if cached_result:
+                if cached_result and not (
+                    (cached_result.get("config") or {}).get("market") == "JP"
+                    and cached_result.get("status") in {"pending", "running"}
+                ):
                     task_logger.debug("cache_hit_result", "从缓存读取回测结果", backtest_id=backtest_id)
                     model = QlibBacktestResult(**cached_result)
                     return self._normalize_result_trades(model)
@@ -78,7 +81,10 @@ class QlibBacktestServiceQueryMixin:
         if result:
             if not exclude_trades:
                 result = self._normalize_result_trades(result)
-                if self._cache:
+                if self._cache and not (
+                    (getattr(result, "config", None) or {}).get("market") == "JP"
+                    and result.status in {"pending", "running"}
+                ):
                     try:
                         self._cache.set_backtest_result(cache_key, result.dict())
                     except Exception as e:
@@ -89,6 +95,8 @@ class QlibBacktestServiceQueryMixin:
     def _normalize_result_trades(self, result: QlibBacktestResult | None) -> QlibBacktestResult | None:
         if result is None:
             return None
+        if getattr(result, "market", None) == "JP":
+            return result
         try:
             trades = getattr(result, "trades", None)
             if isinstance(trades, list) and trades:
@@ -167,10 +175,14 @@ class QlibBacktestServiceQueryMixin:
             "message": "Backtest not found",
         }
 
-    async def list_history(self, user_id: str, tenant_id: str, limit: int = 10) -> list[QlibBacktestResult]:
+    async def list_history(self, user_id: str, tenant_id: str, limit: int = 10, market: str | None = None) -> list[QlibBacktestResult]:
         """获取用户历史（优先从缓存读取）"""
         user_id = normalize_user_id(user_id)
         history_limit = max(1, int(limit))
+        if market:
+            return await self._persistence.list_history(
+                user_id, tenant_id=tenant_id, limit=history_limit, market=market,
+            )
 
         if self._cache:
             try:

@@ -69,6 +69,8 @@ def _infer_market_from_uri(provider_uri: str, region: str | None = None) -> str:
     """从 provider_uri 路径与 region 推断市场（沿用原有的关键字判定规则）。"""
     low = str(provider_uri or "").lower()
     reg = str(region or "").lower()
+    if "jp_data" in low:
+        return "JP"
     if "hk_data" in low or reg == "hk":
         return "HK"
     if "us_data" in low or reg == "us":
