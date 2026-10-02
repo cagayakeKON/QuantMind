@@ -9,13 +9,16 @@ import { getChartOption } from '../../utils/chartOptions';
 import { useIntelligenceCharts } from '../../hooks/useIntelligenceCharts';
 import { useAppSelector } from '../../store';
 import { formatBackendTime } from '../../utils/format';
+import { selectCurrentMarket } from '../../store/slices/uiSlice';
+import { getMarketConfig } from '../../config/marketConfig';
+import { JPPortfolioChartsCard } from './JPPortfolioChartsCard';
 
 // 图表区域占位 shimmer
 const ChartShimmer: React.FC<{ className?: string }> = ({ className = '' }) => (
   <div className={`animate-pulse bg-gray-100/80 rounded-lg ${className}`} />
 );
 
-const IntelligenceChartsCard: React.FC = () => {
+const StandardIntelligenceChartsCard: React.FC = () => {
   const tradingMode = useAppSelector((state) => state.ui.tradingMode);
   const {
     data: chartData,
@@ -118,6 +121,12 @@ const IntelligenceChartsCard: React.FC = () => {
       </div>
     </Card>
   );
+};
+
+const IntelligenceChartsCard: React.FC = () => {
+  const market = useAppSelector(selectCurrentMarket);
+  return getMarketConfig(market).portfolioChartsUi === 'jp_cash'
+    ? <JPPortfolioChartsCard /> : <StandardIntelligenceChartsCard />;
 };
 
 export default IntelligenceChartsCard;

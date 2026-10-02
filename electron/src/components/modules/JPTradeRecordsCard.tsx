@@ -1,8 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React from 'react';
 import { Card } from '../common/Card';
-import { useAppSelector } from '../../store';
-import { authService } from '../../features/auth/services/authService';
-import { jpSimulationService, selectedJPSession, type JPFill, type JPSession } from '../../services/jpSimulationService';
+import { useJPSimulationAccount } from '../../hooks/useJPSimulationAccount';
+import type { JPFill } from '../../services/jpSimulationService';
 
 const jst = new Intl.DateTimeFormat('zh-CN', {
   timeZone: 'Asia/Tokyo', month: '2-digit', day: '2-digit',
@@ -14,56 +13,13 @@ const fillTime = (fill: JPFill) => {
 };
 
 export const JPTradeRecordsCard: React.FC = () => {
-  const user = useAppSelector(state => state.auth.user);
-  const userId = String(user?.id || (user as any)?.user_id || '');
-  const tenantId = String((user as any)?.tenant_id || authService.getTenantId());
-  const scope = `${tenantId}:${userId}`;
-  const [snapshot, setSnapshot] = useState<{scope: string; session: JPSession | null} | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [refresh, setRefresh] = useState(0);
-  const generation = useRef(0);
-
-  useEffect(() => {
-    let active = true;
-    const load = async () => {
-      const request = ++generation.current;
-      setError('');
-      if (!userId) {
-        setLoading(false);
-        return;
-      }
-      try {
-        const sessions = await jpSimulationService.list();
-        if (!active || request !== generation.current) return;
-        setSnapshot({scope, session: selectedJPSession(sessions, userId, tenantId)});
-      } catch (e) {
-        if (!active || request !== generation.current) return;
-        setError(e instanceof Error ? e.message : '日股成交记录读取失败');
-        setSnapshot(null);
-      } finally {
-        if (active && request === generation.current) setLoading(false);
-      }
-    };
-    setLoading(true);
-    void load();
-    const update = () => { void load(); };
-    window.addEventListener('qm:jp-session-changed', update);
-    const timer = window.setInterval(update, 30000);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-      window.removeEventListener('qm:jp-session-changed', update);
-    };
-  }, [scope, userId, tenantId, refresh]);
-
-  const session = snapshot?.scope === scope ? snapshot.session : null;
+  const {session, loading, error, userId, refresh} = useJPSimulationAccount();
   const fills = session?.state.fills.slice().reverse().slice(0, 8) || [];
   return (
     <Card title="模拟成交（日股 · JPY）" height="100%" background="trade">
       <div className="flex items-center justify-between gap-2 mb-2 text-xs text-slate-500">
         <span>{session?.name || '日股模拟账户'} · 日本时间</span>
-        <button type="button" className="text-blue-600" onClick={() => setRefresh(refresh + 1)}>刷新成交</button>
+        <button type="button" className="text-blue-600" onClick={refresh}>刷新成交</button>
       </div>
       {error ? <p role="alert" className="text-xs text-red-600">{error}</p> : null}
       {loading && !session ? <p className="text-xs text-slate-500">正在读取日股成交…</p> : null}

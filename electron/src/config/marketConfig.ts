@@ -32,6 +32,8 @@ export interface MarketConfig {
   stockTerminalUi?: 'standard' | 'daily_equity';
   backtestUi?: 'standard' | 'jp_cash';
   tradeRecordsUi?: 'standard' | 'jp_cash';
+  portfolioChartsUi?: 'standard' | 'jp_cash';
+  strategyMonitorUi?: 'standard' | 'jp_cash';
 }
 
 export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
@@ -47,6 +49,8 @@ export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
     stockTerminalUi: 'daily_equity',
     backtestUi: 'jp_cash',
     tradeRecordsUi: 'jp_cash',
+    portfolioChartsUi: 'jp_cash',
+    strategyMonitorUi: 'jp_cash',
   },
   CN: {
     label: 'A股',
