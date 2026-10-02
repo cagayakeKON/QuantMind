@@ -160,14 +160,14 @@ class _SnapshotSignal(Signal):
         return self.scores.copy()
 
 
-def build_dated_strategy(request):
+def build_dated_strategy(request, *, strategy_context=None):
     """Reuse public builder, template, code-precedence and config adaptation rules."""
     from .backtest_service import PROJECT_ROOT, QlibBacktestService
     from .strategy_builder import CustomStrategyBuilder
     from ..utils.strategy_adapter import StrategyAdapter
 
     builder = QlibBacktestService._resolve_strategy_builder(request)
-    if isinstance(builder, CustomStrategyBuilder):
+    if isinstance(builder, CustomStrategyBuilder) and strategy_context is None:
         # A configuration factory can read D.features before returning its class.
         # Do not execute it in a worker still using another market's provider.
         raise ValueError(
@@ -204,13 +204,17 @@ def build_dated_strategy(request):
         ),
         ("TopkDropoutStrategy", "qlib.contrib.strategy.signal_strategy"),
     }
-    if (
+    if strategy_context is None and (
         not isinstance(config, dict)
         or (config.get("class"), config.get("module_path")) not in supported
     ):
         raise ValueError(
             "Strategy requires a data-provider adapter beyond dated cash snapshots"
         )
+    if strategy_context is not None:
+        strategy_context.assert_reads_succeeded()
+    if not isinstance(config, dict):
+        raise ValueError("Dated execution requires a standard strategy configuration")
     kwargs = config.get("kwargs", {})
     if kwargs.get("dynamic_position") or kwargs.get("market_state_series"):
         raise ValueError("Dynamic positions require a dated market state adapter")
@@ -228,7 +232,9 @@ def build_dated_strategy(request):
 
 
 class DatedStrategyRunner:
-    def __init__(self, config, sessions, start, end, commission=0):
+    def __init__(
+        self, config, sessions, start, end, commission=0, *, strategy_context=None
+    ):
         self.calendar = _SessionCalendar(sessions, start, end)
         self.exchange = DecisionExchange(commission)
         self.signal = _SnapshotSignal()
@@ -243,11 +249,20 @@ class DatedStrategyRunner:
         self.strategy.reset(level_infra=level, common_infra=common)
         self.execute_result = []
         self.holding_since = {}
+        self.strategy_context = strategy_context
+        if strategy_context is not None:
+            strategy_context.assert_reads_succeeded()
 
     def decide(self, *, step, signal_day, scores, quotes, cash, positions):
         if not 0 <= step < self.calendar.trade_len:
             raise ValueError("Strategy step is outside the execution interval")
         self.calendar.step = step
+        if self.strategy_context is not None:
+            self.strategy_context.advance(signal_day, self.calendar.get_step_time()[0])
+            # PriceFrameMixin may otherwise retain a whole-window prefetch from
+            # an earlier clock. This affects only the new dated context.
+            if hasattr(self.strategy, "_price_frame_cache"):
+                self.strategy._price_frame_cache.clear()
         self.exchange.quotes = quotes
         self.signal.day = pd.Timestamp(signal_day)
         self.signal.scores = pd.Series(scores, dtype=float)
@@ -262,10 +277,12 @@ class DatedStrategyRunner:
                 code, "day", step - self.holding_since[code] + 1
             )
         decision = self.strategy.generate_trade_decision(self.execute_result)
+        if self.strategy_context is not None:
+            self.strategy_context.assert_reads_succeeded()
         self.orders = [order for order in decision.get_decision() if order.amount != 0]
         return self.orders
 
-    def record_fills(self, fills):
+    def record_fills(self, fills, *, post_snapshot=None):
         """Supply actual fills, including actual costs, to the strategy's next step."""
         self.execute_result = []
         for order in self.orders:
@@ -276,3 +293,23 @@ class DatedStrategyRunner:
                 self.execute_result.append(
                     (order, order.deal_amount * price, cost, price)
                 )
+        if self.strategy_context is not None:
+            if post_snapshot is None:
+                raise ValueError(
+                    "Strategy callbacks require the executed account snapshot"
+                )
+            prior_position = self.account.current_position
+            holding_counts = {
+                code: prior_position.get_stock_count(code, "day")
+                for code in prior_position.get_stock_list()
+            }
+            self.account.current_position = Position(
+                cash=post_snapshot["cash"],
+                position_dict=deepcopy(post_snapshot["positions"]),
+            )
+            for code in post_snapshot["positions"]:
+                self.account.current_position.update_stock_count(
+                    code, "day", holding_counts.get(code, 0) + 1
+                )
+            self.strategy.post_exe_step(self.execute_result)
+            self.strategy_context.assert_reads_succeeded()

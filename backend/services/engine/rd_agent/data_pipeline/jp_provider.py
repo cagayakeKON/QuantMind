@@ -43,8 +43,11 @@ def prepare_jp_rd_provider(
     data_dir: str | Path | None = None,
     *,
     publication: Path | None = None,
+    price_basis: str = "adjusted",
 ) -> Path:
     """Build once per publication; never reuse an unversioned market cache."""
+    if price_basis not in {"adjusted", "raw"}:
+        raise ValueError("JP provider price basis must be adjusted or raw")
     root = Path(data_dir or _resolve_quantjp_data_dir()).resolve()
     publication = (publication or QuantJPDataHub(root).data_dir).resolve()
     if not publication.is_relative_to(root):
@@ -63,10 +66,12 @@ def prepare_jp_rd_provider(
         "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
         "contract_version": 1,
     }
+    if price_basis == "raw":
+        identity.update(price_basis="raw", contract_version=2)
     cache = root / ".rd_cache" / publication.name
     if not cache.resolve().is_relative_to(root):
         raise ValueError("JP research cache escapes its source root")
-    output = cache / "qlib"
+    output = cache / ("qlib_raw" if price_basis == "raw" else "qlib")
     with exclusive_file_lock(cache / ".qlib.lock"):
         if not output.resolve().is_relative_to(cache.resolve()):
             raise ValueError("JP research provider escapes its cache directory")
@@ -78,7 +83,9 @@ def prepare_jp_rd_provider(
             return output
         staging = cache / (".qlib-" + uuid.uuid4().hex)
         try:
-            QlibDataBuilder(hub, staging, market="JP").build_all()
+            QlibDataBuilder(
+                hub, staging, market="JP", price_basis=price_basis
+            ).build_all()
             _validate_provider(staging, symbols)
             (staging / "research_source.json").write_text(
                 json.dumps(identity, ensure_ascii=False), encoding="utf-8"

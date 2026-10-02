@@ -86,10 +86,17 @@ class QlibDataBuilder:
         hub: QuantDBDataHub,
         qlib_dir: str | Path,
         market: str = "CN",
+        *,
+        price_basis: str = "adjusted",
     ) -> None:
         self._hub = hub
         self._qlib_dir = Path(qlib_dir)
         self._market = market.upper()
+        if price_basis not in {"adjusted", "raw"}:
+            raise ValueError("Qlib price basis must be adjusted or raw")
+        if price_basis == "raw" and self._market != "JP":
+            raise ValueError("A raw Qlib source adapter is required for this market")
+        self._price_basis = price_basis
         self._qlib_prefix = _MARKET_QLIB_PREFIX.get(self._market, "")
         self._events: EventBook | None = None  # 除权事件表（仅 CN 需要）
 
@@ -233,7 +240,9 @@ class QlibDataBuilder:
             partitions = self._hub._partition_dates("1_kline_data/daily_forward")
             if not partitions:
                 return 0
-            first, last = (pd.Timestamp(value).date() for value in (partitions[0], partitions[-1]))
+            first, last = (
+                pd.Timestamp(value).date() for value in (partitions[0], partitions[-1])
+            )
             # Keep cash sessions without prices as gaps. Deriving the calendar
             # from observed bars would slide rolling windows over such gaps.
             frame = self._hub.fetch_calendar(first, last)
@@ -654,6 +663,8 @@ class QlibDataBuilder:
         is_cn = self._market == "CN"
         is_jp = self._market == "JP"
         kline_sub = "daily_backward" if is_cn else "daily_forward"
+        if self._price_basis == "raw":
+            kline_sub = "daily_unadjusted"
         kline_glob = str(
             self._hub.data_dir / f"1_kline_data/{kline_sub}/dt=*/data.parquet"
         )
@@ -682,11 +693,16 @@ class QlibDataBuilder:
                     """
                 ).fetchdf()
             elif is_jp:
+                factors = (
+                    "1.0 AS factor, 1.0 AS volume_factor"
+                    if self._price_basis == "raw"
+                    else "price_factor AS factor, volume_factor"
+                )
                 df = con.execute(
                     f"""
                     SELECT symbol, CAST(time AS DATE) d,
                            open, high, low, close, volume, amount,
-                           price_factor AS factor, volume_factor
+                           {factors}
                     FROM read_parquet('{kline_glob}', hive_partitioning=1)
                     ORDER BY symbol, d
                     """

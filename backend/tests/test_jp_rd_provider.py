@@ -68,6 +68,31 @@ def test_new_publication_uses_a_new_research_provider(snapshot, tmp_path):
     assert prepare_jp_rd_provider(root, publication=old_publication) == old
 
 
+def test_raw_cash_view_is_separate_from_unchanged_research_provider(snapshot, tmp_path):
+    root = tmp_path / "quantjp"
+    import_jquants_snapshot(snapshot, root)
+    adjusted = prepare_jp_rd_provider(root)
+    raw = prepare_jp_rd_provider(root, price_basis="raw")
+    assert adjusted.name == "qlib" and raw.name == "qlib_raw"
+    identity = json.loads((raw / "research_source.json").read_text())
+    assert identity["price_basis"] == "raw" and identity["contract_version"] == 2
+    assert "price_basis" not in json.loads(
+        (adjusted / "research_source.json").read_text()
+    )
+    _, prices = QlibDataBuilder._read_bin_file(raw / "features/jp_72030/close.day.bin")
+    _, factors = QlibDataBuilder._read_bin_file(
+        raw / "features/jp_72030/factor.day.bin"
+    )
+    _, volumes = QlibDataBuilder._read_bin_file(
+        raw / "features/jp_72030/volume.day.bin"
+    )
+    assert prices.tolist() == [100, 50, 45]
+    assert factors.tolist() == [1, 1, 1]
+    assert volumes.tolist() == [1000, 1000, 1000]
+    assert prepare_jp_rd_provider(root, price_basis="raw") == raw
+    assert prepare_jp_rd_provider(root) == adjusted
+
+
 @pytest.mark.parametrize("damage", ["source", "features", "calendar", "benchmark"])
 def test_incomplete_or_mismatched_research_cache_is_rejected(
     snapshot, tmp_path, damage

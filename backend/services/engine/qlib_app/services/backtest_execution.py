@@ -15,6 +15,8 @@ class MarketExecution:
     currency: str
     runner: str
     legacy_provider_markers: tuple[str, ...] = ()
+    synchronous_runner: str | None = None
+    strategy_context_factory: str | None = None
 
     async def execute(self, request: QlibBacktestRequest) -> QlibBacktestResult:
         module_name, function_name = self.runner.rsplit(".", 1)
@@ -28,6 +30,8 @@ MARKET_EXECUTIONS = {
         "JPY",
         "backend.services.simulation.jp.backtest.execute_backtest",
         ("jp_data",),
+        synchronous_runner="backend.services.simulation.jp.backtest.run_cash_backtest",
+        strategy_context_factory="backend.services.simulation.jp.strategy_context.prepare_context",
     ),
 }
 

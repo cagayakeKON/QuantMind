@@ -27,7 +27,11 @@ from .model_signals import (
 )
 from .rules import RuleDataMissing
 from .service import execution_data
-from .strategy_snapshot import execution_orders, strategy_snapshot
+from .strategy_snapshot import (
+    execution_orders,
+    strategy_snapshot,
+    executed_account_snapshot,
+)
 
 
 def run_cash_backtest(
@@ -36,6 +40,7 @@ def run_cash_backtest(
     meta: dict,
     *,
     pool_snapshot: PoolSnapshot | None = None,
+    strategy_context=None,
 ) -> QlibBacktestResult:
     started = time.monotonic()
     from backend.services.engine.qlib_app.services.dated_strategy import (
@@ -105,11 +110,6 @@ def run_cash_backtest(
         raise ValueError(
             "Dynamic positions require the registered market's dated state adapter"
         )
-    strategy_config = (
-        None
-        if request.strategy_type == "jp_cash_topk"
-        else build_dated_strategy(request)
-    )
     if (request.pool_id or request.universe != "all") and pool_snapshot is None:
         raise ValueError("JP custom pools require a resolved shared pool snapshot")
     if pool_snapshot is not None:
@@ -139,6 +139,13 @@ def run_cash_backtest(
     if not index:
         raise RuleDataMissing("JP backtest needs the prior signal session")
     anchor = data.calendar.sessions[index - 1]
+    if strategy_context is not None:
+        strategy_context.advance(anchor, start)
+    strategy_config = (
+        None
+        if request.strategy_type == "jp_cash_topk"
+        else build_dated_strategy(request, strategy_context=strategy_context)
+    )
     known_after = labels_available_on(meta, data.calendar, anchor)
     pred = prediction_path(model_dir)
     scores, digest = read_test_scores(pred, anchor, end)
@@ -174,7 +181,12 @@ def run_cash_backtest(
     )
     strategy_runner = (
         DatedStrategyRunner(
-            strategy_config, data.calendar.sessions, start, end, commission
+            strategy_config,
+            data.calendar.sessions,
+            start,
+            end,
+            commission,
+            strategy_context=strategy_context,
         )
         if strategy_config is not None
         else None
@@ -236,7 +248,12 @@ def run_cash_backtest(
                     id(decision): filled[order["order_id"]]
                     for decision, order in zip(decisions, orders, strict=True)
                     if order["order_id"] in filled
-                }
+                },
+                post_snapshot=(
+                    executed_account_snapshot(account.state)
+                    if strategy_context is not None
+                    else None
+                ),
             )
         if pd.Timestamp(day) not in benchmark.index:
             raise RuleDataMissing(f"Exact TOPIX benchmark missing on {day}")
@@ -279,6 +296,14 @@ def run_cash_backtest(
             **(
                 {"strategy_decision_class": strategy_config["class"]}
                 if strategy_config is not None
+                else {}
+            ),
+            **(
+                {
+                    "strategy_data_version": strategy_context.spec.data_version,
+                    "strategy_price_basis": "raw",
+                }
+                if strategy_context is not None
                 else {}
             ),
             "pool_snapshot": pool_snapshot.model_dump(mode="json")
@@ -361,6 +386,20 @@ async def execute_backtest(request):
     _validate_pool(pool)
     request.pool_checksum = pool.checksum
     request.pool_warnings = list(pool.warnings)
+    from backend.services.engine.qlib_app.services.strategy_builder import (
+        StrategyFactory,
+        CustomStrategyBuilder,
+        StopLossBuilder,
+    )
+    from backend.services.engine.qlib_app.services.isolated_strategy_execution import (
+        execute_isolated_strategy,
+    )
+
+    builder, fallback, _ = StrategyFactory.resolve_builder(request.strategy_type)
+    if request.strategy_type != "jp_cash_topk" and (
+        fallback or isinstance(builder, (CustomStrategyBuilder, StopLossBuilder))
+    ):
+        return await execute_isolated_strategy(request, model_dir, meta, pool)
     result = await asyncio.to_thread(
         run_cash_backtest, request, model_dir, meta, pool_snapshot=pool
     )

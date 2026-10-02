@@ -51,6 +51,22 @@ def strategy_snapshot(state, scores, bars, master, signal_day):
     }
 
 
+def executed_account_snapshot(state):
+    """Expose the ledger's actual valuation, including explicitly stale marks."""
+    return {
+        "cash": float(
+            sum((money(f["amount"]) for f in state["cash_funds"]), Decimal(0))
+        ),
+        "positions": {
+            StockCodeUtil.to_qlib(symbol, market="JP"): {
+                "amount": sum(lot["quantity"] for lot in position["lots"]),
+                "price": float(money(position["last_price"])),
+            }
+            for symbol, position in state["positions"].items()
+        },
+    }
+
+
 def execution_orders(decisions, signal_day, execution_day):
     orders = []
     for index, decision in enumerate(decisions):
