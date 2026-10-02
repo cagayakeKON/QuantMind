@@ -27,6 +27,7 @@ from .model_signals import (
 )
 from .rules import RuleDataMissing
 from .service import execution_data
+from .strategy_snapshot import execution_orders, strategy_snapshot
 
 
 def run_cash_backtest(
@@ -37,10 +38,23 @@ def run_cash_backtest(
     pool_snapshot: PoolSnapshot | None = None,
 ) -> QlibBacktestResult:
     started = time.monotonic()
-    if request.strategy_type not in {"jp_cash_topk", "TopkDropout"}:
-        raise ValueError(
-            "JP cash execution requires a supported shared portfolio strategy"
-        )
+    from backend.services.engine.qlib_app.services.dated_strategy import (
+        DatedStrategyRunner,
+        build_dated_strategy,
+    )
+    from backend.services.engine.qlib_app.services.strategy_builder import (
+        extract_backtest_dates,
+    )
+
+    if request.strategy_type == "jp_cash_topk" and request.strategy_content:
+        raise ValueError("Legacy JP cash execution does not support strategy code")
+    if request.strategy_content:
+        code_dates = extract_backtest_dates(request.strategy_content)
+        if code_dates:
+            request.start_date, request.end_date = (
+                code_dates["start_date"],
+                code_dates["end_date"],
+            )
     if request.buy_cost is not None or request.sell_cost is not None:
         raise ValueError(
             "Use jp_commission_rate and jp_slippage_bps for JP execution costs"
@@ -87,10 +101,15 @@ def run_cash_backtest(
         or request.strategy_params.long_exposure > 1
     ):
         raise ValueError("JP cash backtests do not support shorting or leverage")
-    if request.dynamic_position or request.strategy_content:
+    if request.dynamic_position:
         raise ValueError(
-            "JP cash execution does not yet support dynamic positions or strategy code"
+            "Dynamic positions require the registered market's dated state adapter"
         )
+    strategy_config = (
+        None
+        if request.strategy_type == "jp_cash_topk"
+        else build_dated_strategy(request)
+    )
     if (request.pool_id or request.universe != "all") and pool_snapshot is None:
         raise ValueError("JP custom pools require a resolved shared pool snapshot")
     if pool_snapshot is not None:
@@ -152,10 +171,13 @@ def run_cash_backtest(
         max_position_pct=params.max_weight,
         enable_min_score=True,
         deterministic_buy_order=True,
-        n_drop=params.n_drop if request.strategy_type == "TopkDropout" else 0,
-        rebalance_days=params.rebalance_days
-        if request.strategy_type == "TopkDropout"
-        else 1,
+    )
+    strategy_runner = (
+        DatedStrategyRunner(
+            strategy_config, data.calendar.sessions, start, end, commission
+        )
+        if strategy_config is not None
+        else None
     )
     for day_index, day in enumerate(sessions):
         if previous not in scores:
@@ -175,24 +197,47 @@ def run_cash_backtest(
         prior_bars, prior_master = data.day(
             previous, symbols, list(account.state["positions"])
         )
-        orders = portfolio_orders(
-            account.state,
-            daily_scores,
-            prior_bars,
-            prior_master,
-            previous,
-            day,
-            topk=request.strategy_params.topk,
-            exposure=money(request.strategy_total_position),
-            min_score=request.strategy_params.min_score,
-            strategy=strategy,
-            day_index=day_index,
-        )
+        if strategy_runner is not None:
+            decisions = strategy_runner.decide(
+                step=day_index,
+                **strategy_snapshot(
+                    account.state, daily_scores, prior_bars, prior_master, previous
+                ),
+            )
+            orders = execution_orders(decisions, previous, day)
+        else:
+            # Existing JP sessions retain their old sizing until session migration.
+            orders = portfolio_orders(
+                account.state,
+                daily_scores,
+                prior_bars,
+                prior_master,
+                previous,
+                day,
+                topk=request.strategy_params.topk,
+                exposure=money(request.strategy_total_position),
+                min_score=request.strategy_params.min_score,
+                strategy=strategy,
+                day_index=day_index,
+            )
         needed = sorted(
             set(account.state["positions"]) | {order["symbol"] for order in orders}
         )
         bars, master = data.day(day, needed, list(account.state["positions"]))
         result = account.step(day, bars, master, orders)
+        if strategy_runner is not None:
+            filled = {
+                order["order_id"]: order["fill"]
+                for order in result["orders"]
+                if order["status"] == "filled"
+            }
+            strategy_runner.record_fills(
+                {
+                    id(decision): filled[order["order_id"]]
+                    for decision, order in zip(decisions, orders, strict=True)
+                    if order["order_id"] in filled
+                }
+            )
         if pd.Timestamp(day) not in benchmark.index:
             raise RuleDataMissing(f"Exact TOPIX benchmark missing on {day}")
         benchmark_close = money(benchmark.loc[pd.Timestamp(day), "close"])
@@ -231,6 +276,11 @@ def run_cash_backtest(
             "signal_source": "model_pred_test",
             "training_labels_available_on": str(known_after),
             "benchmark_entry": "first_execution_open",
+            **(
+                {"strategy_decision_class": strategy_config["class"]}
+                if strategy_config is not None
+                else {}
+            ),
             "pool_snapshot": pool_snapshot.model_dump(mode="json")
             if pool_snapshot is not None
             else None,

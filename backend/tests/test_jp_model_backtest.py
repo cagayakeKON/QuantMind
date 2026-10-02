@@ -111,22 +111,25 @@ def test_real_raw_fills_dated_settlement_and_topix_report(model_data):
     assert [row["date"] for row in result.equity_curve] == ["2026-09-28", "2026-09-29"]
 
 
-def test_standard_topk_strategy_uses_shared_calculator(model_data):
+def test_standard_topk_strategy_uses_actual_public_strategy(model_data):
     request, model, meta = model_data
     request.strategy_type = "TopkDropout"
     result = backtest.run_cash_backtest(request, model, meta)
     assert result.config["strategy_type"] == "TopkDropout"
     assert result.total_trades == 1
-    # One available score occupies one of the five slots, rather than all capital.
-    assert result.trades[0]["quantity"] == 100
+    # The actual public strategy allocates available cash across its buy list.
+    assert result.trades[0]["quantity"] == 900
+    assert result.config["strategy_decision_class"] == "RedisRecordingStrategy"
 
 
-def test_standard_topk_honors_shared_position_cap(model_data):
+def test_standard_topk_keeps_public_builder_parameter_rules(model_data):
     request, model, meta = model_data
     request.strategy_type = "TopkDropout"
     request.strategy_params.max_weight = 0.05
     result = backtest.run_cash_backtest(request, model, meta)
-    assert result.total_trades == 0
+    # The public TopK builder does not consume the weight strategy's max_weight.
+    assert result.total_trades == 1
+    assert result.trades[0]["quantity"] == 900
     assert result.equity_curve[-1]["value"] == request.initial_capital
 
 
@@ -147,7 +150,7 @@ async def test_research_jp_reads_dated_publication_without_cn_table(model_data):
 def test_no_training_split_signals_or_cn_strategy_fallback(model_data):
     request, model, meta = model_data
     request.strategy_type = "CustomStrategy"
-    with pytest.raises(ValueError, match="supported shared portfolio strategy"):
+    with pytest.raises(ValueError, match="isolated market data-provider"):
         backtest.run_cash_backtest(request, model, meta)
     request.strategy_type = "jp_cash_topk"
     with pytest.raises(ValueError, match="availability"):
