@@ -35,4 +35,5 @@ def prepare_context(request):
         data_version=request.jp_data_version,
         instrument_mapper="backend.services.simulation.jp.strategy_context.to_provider_instrument",
         environment=environment,
+        feature_snapshot_reader="backend.services.simulation.jp.feature_snapshot.create_reader",
     )

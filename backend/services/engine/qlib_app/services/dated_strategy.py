@@ -232,8 +232,11 @@ def build_dated_strategy(request, *, strategy_context=None):
         raise ValueError(
             "Dated cash execution requires the selected model's predictions"
         )
-    if any(key.startswith("f_") for key in kwargs) or any(
-        key in kwargs for key in ("pe_max", "mc_min", "mc_max", "exclude_st")
+    if (
+        any(key.startswith("f_") for key in kwargs)
+        or any(key in kwargs for key in ("pe_max", "mc_min", "mc_max", "exclude_st"))
+    ) and (
+        strategy_context is None or not strategy_context.spec.feature_snapshot_reader
     ):
         raise ValueError(
             "Fundamental constraints require a dated market feature adapter"
@@ -264,6 +267,10 @@ class DatedStrategyRunner:
         self.holding_since = {}
         self.strategy_context = strategy_context
         if strategy_context is not None:
+            if getattr(self.strategy, "use_fundamental_filter", False):
+                self.strategy._market_fundamental_aligner = (
+                    strategy_context.fundamental_aligner()
+                )
             strategy_context.assert_reads_succeeded()
 
     def decide(self, *, step, signal_day, scores, quotes, cash, positions):

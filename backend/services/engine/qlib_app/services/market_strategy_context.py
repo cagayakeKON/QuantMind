@@ -15,6 +15,7 @@ class StrategyContextSpec:
     data_version: str
     instrument_mapper: str
     environment: dict[str, str] = field(default_factory=dict)
+    feature_snapshot_reader: str | None = None
 
     def as_dict(self):
         return asdict(self)
@@ -165,6 +166,27 @@ class MarketStrategyContext:
         result = QlibBacktestService._build_market_state_kwargs(owner, request)
         self.assert_reads_succeeded()
         return result
+
+    def fundamental_aligner(self):
+        """Bind the public comparator to a registered, dated snapshot loader."""
+        from backend.shared.fundamental_aligner import FundamentalAligner
+
+        if not self.spec.feature_snapshot_reader:
+            raise ValueError("No fundamental snapshot source is registered")
+        module, function = self.spec.feature_snapshot_reader.rsplit(".", 1)
+        reader = getattr(import_module(module), function)(self.spec)
+
+        def load(current_date, symbols, columns):
+            try:
+                if self.asof is None:
+                    raise ValueError("Fundamentals require a dated strategy snapshot")
+                day = min(pd.Timestamp(current_date), self.asof)
+                return reader(day, symbols, columns)
+            except Exception as exc:
+                self.errors.append(str(exc))
+                raise
+
+        return FundamentalAligner(snapshot_loader=load)
 
     def list_instruments(self, instruments, start_time=None, end_time=None, **kwargs):
         end = self.asof if end_time is None else min(pd.Timestamp(end_time), self.asof)

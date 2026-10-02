@@ -21,7 +21,8 @@ class FundamentalAligner:
     # 分区时取最近一个有数据的日期，避免回测早期因分区缺失而清空组合）。
     LOOKBACK_DAYS = 250
 
-    def __init__(self) -> None:
+    def __init__(self, *, snapshot_loader=None) -> None:
+        self._snapshot_loader = snapshot_loader
         self._feature_snapshot_cache: dict[tuple[Any, ...], pd.DataFrame] = {}
 
     @staticmethod
@@ -57,6 +58,8 @@ class FundamentalAligner:
         needed_columns: list[str],
     ) -> pd.DataFrame:
         """经 quantdb_hub 读取交易日快照，symbol 归一化为前缀式。"""
+        if self._snapshot_loader is not None:
+            return self._snapshot_loader(current_date, symbols, needed_columns)
         from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
 
         hub = QuantDBDataHub.get_instance()

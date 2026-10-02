@@ -582,7 +582,8 @@ class FundamentalFilterMixin:
             instrument_values = pd.Index(index)
 
         instruments = [str(v) for v in instrument_values.tolist()]
-        filtered_list = fundamental_aligner.filter_instruments(
+        aligner = getattr(self, "_market_fundamental_aligner", fundamental_aligner)
+        filtered_list = aligner.filter_instruments(
             trade_date, instruments, constraints=self.fundamental_constraints
         )
         if not filtered_list:
