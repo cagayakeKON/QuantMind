@@ -8,7 +8,7 @@ export const RISK_LEVELS = ['low', 'medium', 'high'] as const;
 export type RiskLevel = typeof RISK_LEVELS[number];
 
 // 市场类型枚举
-export const MARKETS = ['CN', 'US', 'HK', 'CRYPTO', 'FUTURES', 'GLOBAL'] as const;
+export const MARKETS = ['CN', 'JP', 'US', 'HK', 'CRYPTO', 'FUTURES', 'GLOBAL'] as const;
 export type MarketType = typeof MARKETS[number];
 
 // 时间框架枚举

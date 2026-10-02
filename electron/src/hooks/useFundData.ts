@@ -32,6 +32,7 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
   } = options;
 
   const tradingMode = useAppSelector((state) => state.ui.tradingMode);
+  const currentMarket = useAppSelector((state) => state.ui.currentMarket);
   const [data, setData] = useState<FundData | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -70,7 +71,7 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
       }
       setError(null);
 
-      const result = await portfolioService.getFundOverview(resolvedUserId, tradingMode, resolvedTenantId);
+      const result = await portfolioService.getFundOverview(resolvedUserId, tradingMode, resolvedTenantId, currentMarket);
 
       // 已有更新的请求发出，丢弃本次过期响应（否则会把新数据覆盖回旧值）
       if (seq !== requestSeqRef.current) {
@@ -115,7 +116,20 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
         setLoading(false);
       }
     }
-  }, [resolvedUserId, resolvedTenantId, tradingMode]);
+  }, [resolvedUserId, resolvedTenantId, tradingMode, currentMarket]);
+
+  useEffect(() => {
+    dataRef.current = null;
+    fingerprintRef.current = null;
+    setData(null);
+    setLastUpdate(null);
+  }, [currentMarket, resolvedUserId, resolvedTenantId]);
+
+  useEffect(() => {
+    const refreshJP = () => { if (currentMarket === 'JP') void fetchData({ silent: false }); };
+    window.addEventListener('qm:jp-session-changed', refreshJP);
+    return () => window.removeEventListener('qm:jp-session-changed', refreshJP);
+  }, [currentMarket, fetchData]);
 
   const refresh = useCallback(async () => {
     await fetchData({ silent: true });

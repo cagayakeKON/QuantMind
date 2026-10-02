@@ -16,6 +16,7 @@ const MARKET_OPTIONS: MarketOption[] = (
   [
     { id: 'CN', label: 'A股', color: 'text-red-600', bgColor: 'bg-red-50', borderColor: 'border-red-200' },
     { id: 'HK', label: '港股', color: 'text-orange-600', bgColor: 'bg-orange-50', borderColor: 'border-orange-200' },
+    { id: 'JP', label: '日本市场', color: 'text-rose-600', bgColor: 'bg-rose-50', borderColor: 'border-rose-200' },
     { id: 'US', label: '美股', color: 'text-blue-600', bgColor: 'bg-blue-50', borderColor: 'border-blue-200' },
     { id: 'CRYPTO', label: '区块链', color: 'text-purple-600', bgColor: 'bg-purple-50', borderColor: 'border-purple-200' },
     { id: 'FUTURES', label: '期货', color: 'text-amber-600', bgColor: 'bg-amber-50', borderColor: 'border-amber-200' },

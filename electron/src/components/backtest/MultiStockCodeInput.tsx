@@ -6,6 +6,9 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Search, X, Plus, Info } from 'lucide-react';
 import { stockListService, Stock } from '../../services/stockListService';
 import { SERVICE_ENDPOINTS } from '../../config/services';
+import { useAppSelector } from '../../store';
+import { selectCurrentMarket } from '../../store/slices/uiSlice';
+import { getMarketConfig } from '../../config/marketConfig';
 
 interface StockOption extends Stock {
   price?: number;
@@ -33,13 +36,19 @@ export const MultiStockCodeInput: React.FC<Props> = ({
   const [dataSource, setDataSource] = useState<'local' | 'api'>('local');
   const inputRef = useRef<HTMLInputElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const currentMarket = useAppSelector(selectCurrentMarket);
+  const localSearch = getMarketConfig(currentMarket).stockSearch !== 'gateway';
+  const searchRevision = useRef(0);
 
   // 启动时加载本地数据
   useEffect(() => {
-    stockListService.load().catch(err => {
+    searchRevision.current += 1;
+    setOptions([]);
+    setLoading(false);
+    if (localSearch) stockListService.load().catch(err => {
       console.error('Failed to load stock list:', err);
     });
-  }, []);
+  }, [currentMarket, localSearch]);
 
   // 搜索本地数据
   const searchLocalStocks = (query: string): StockOption[] => {
@@ -58,7 +67,7 @@ export const MultiStockCodeInput: React.FC<Props> = ({
       if (!keyword) return [];
 
       const response = await fetch(
-        `${SERVICE_ENDPOINTS.API_GATEWAY}/stocks/search?q=${encodeURIComponent(keyword)}&limit=10`
+        `${SERVICE_ENDPOINTS.API_GATEWAY}/stocks/search?q=${encodeURIComponent(keyword)}&limit=10&market=${currentMarket}`
       );
       const payload = await response.json();
       const rawList = Array.isArray(payload?.results)
@@ -74,7 +83,7 @@ export const MultiStockCodeInput: React.FC<Props> = ({
           return {
             symbol,
             code,
-            market,
+            market: String(item?.market || market || currentMarket),
             name,
             price: undefined,
           };
@@ -95,10 +104,11 @@ export const MultiStockCodeInput: React.FC<Props> = ({
     }
 
     setLoading(true);
+    const revision = ++searchRevision.current;
     try {
       let results: StockOption[] = [];
 
-      if (stockListService.isLoaded()) {
+      if (localSearch && stockListService.isLoaded()) {
         results = searchLocalStocks(query);
         setDataSource('local');
 
@@ -114,12 +124,12 @@ export const MultiStockCodeInput: React.FC<Props> = ({
       // 过滤掉已选择的股票
       results = results.filter(r => !value.includes(r.symbol));
 
-      setOptions(results);
+      if (revision === searchRevision.current) setOptions(results);
     } catch (error) {
       console.error('Stock search failed:', error);
-      setOptions([]);
+      if (revision === searchRevision.current) setOptions([]);
     } finally {
-      setLoading(false);
+      if (revision === searchRevision.current) setLoading(false);
     }
   };
 
@@ -134,7 +144,7 @@ export const MultiStockCodeInput: React.FC<Props> = ({
     }, 300);
 
     return () => clearTimeout(timer);
-  }, [searchQuery, value]); // 添加value依赖，当选中列表变化时重新过滤
+  }, [searchQuery, value, currentMarket]); // 添加value依赖，当选中列表变化时重新过滤
 
   // 点击外部关闭下拉框
   useEffect(() => {

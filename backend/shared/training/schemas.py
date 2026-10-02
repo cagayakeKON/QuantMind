@@ -17,7 +17,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-Market = Literal["CN", "HK", "US", "CRYPTO", "FUTURES"]
+Market = Literal["CN", "JP", "HK", "US", "CRYPTO", "FUTURES"]
 ModelType = Literal[
     "lightgbm",
     "xgboost",

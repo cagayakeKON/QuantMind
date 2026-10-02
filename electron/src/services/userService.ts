@@ -52,6 +52,8 @@ export interface UserPreferences {
 }
 
 export interface FundData {
+  currency?: string;
+  accountName?: string;
   totalAsset: number;
   availableBalance: number;
   frozenBalance: number;

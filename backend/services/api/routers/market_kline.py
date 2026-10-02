@@ -35,10 +35,50 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend.services.api.user_app.middleware.auth import get_current_user
+from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/market", tags=["Market"])
+
+# Local providers are additive; the existing A/HK/US paths retain their behavior.
+_LOCAL_KLINE_PROVIDERS = LOCAL_MARKET_PROVIDERS
+
+
+def _local_provider_kline(market, symbol, start, end, days, adjust):
+    from backend.shared.stock_utils import StockCodeUtil
+
+    provider = _LOCAL_KLINE_PROVIDERS[market]
+    hub = provider.open()
+    suffix = StockCodeUtil.to_suffix(symbol, market=market)
+    frame = hub.fetch_daily_kline(suffix, start, end, adjust=adjust).tail(days)
+    items = [
+        {
+            "date": str(pd.Timestamp(row["trade_date"]).date()),
+            **{
+                key: _safe_float(row.get(key), default=None)
+                for key in ("open", "high", "low", "close", "volume", "amount")
+            },
+        }
+        for row in frame.to_dict("records")
+    ]
+    return {
+        "success": True,
+        "data": {
+            "market": market,
+            "symbol": StockCodeUtil.to_prefix(suffix, market=market),
+            "period": "daily",
+            "adjust": adjust,
+            "currency": provider.currency,
+            "frequency": "daily",
+            "source_used": provider.source,
+            "data_version": hub.data_dir.name,
+            "items": items,
+            "fallbacks_tried": [],
+            "cleaning_report": {},
+        },
+    }
+
 
 # K 线内存缓存：历史行情静态不变，按 (market, symbol, period, days 窗口) 缓存。
 # 命中即跳过 QuantDB parquet / DuckDB 读取，冷读 2s+ → 缓存命中 <5ms。
@@ -302,6 +342,16 @@ async def get_kline(
         ed = ed or date.today()
         sd = sd or (ed - timedelta(days=days * 2))
 
+    if m in _LOCAL_KLINE_PROVIDERS:
+        import asyncio
+
+        try:
+            return await asyncio.to_thread(
+                _local_provider_kline, m, sym, sd, ed, days, adj
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     # 历史行情静态不变：命中内存缓存直接返回（冷读 2s+ → 缓存命中 <5ms）
     # 缓存键含复权方式，不同口径互不污染；A 股外市场忽略 adjust（yahoo 等源不提供复权）
     cache_key = _kline_cache_key(m, sym, sd.isoformat(), ed.isoformat(), adj if m == "A" else "raw")
@@ -401,9 +451,10 @@ async def get_kline_by_path(
 
 @router.get("/index-kline")
 async def get_index_kline(
-    symbol: str = Query("000001.SH", description="指数代码，缺省上证指数"),
+    symbol: str | None = Query(None, description="指数代码，缺省使用市场基准"),
     days: int = Query(120, ge=20, le=500),
     current_user: dict = Depends(get_current_user),
+    market: str = Query("CN"),
 ):
     """上证指数(000001.SH) 日线 + MA20，用于 K 线图大盘趋势叠加。
 
@@ -411,11 +462,13 @@ async def get_index_kline(
     数据源：QuantDB index_daily。
     """
     _ = current_user
+    provider = LOCAL_MARKET_PROVIDERS.get(market.upper())
+    symbol = symbol or (provider.benchmark if provider else "000001.SH")
     try:
         from datetime import date, timedelta
         from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
 
-        hub = QuantDBDataHub()
+        hub = provider.open() if provider else QuantDBDataHub()
         end = date.today()
         start = end - timedelta(days=int(days * 1.6))
         df = hub.fetch_index_kline(symbol, start, end)
@@ -444,7 +497,7 @@ async def get_index_kline(
                 "below_ma20": below_ma20,
                 "latest_close": round(latest, 2) if latest is not None else None,
                 "latest_ma20": ma20_latest,
-                "source_used": "quantdb_index_daily",
+                "source_used": provider.source if provider else "quantdb_index_daily",
             },
         }
     except Exception as exc:  # noqa: BLE001
@@ -454,9 +507,10 @@ async def get_index_kline(
 
 @router.get("/index-ma")
 async def get_index_ma(
-    symbol: str = Query("000001.SH", description="指数代码，缺省上证指数"),
+    symbol: str | None = Query(None, description="指数代码，缺省使用市场基准"),
     asof: str | None = Query(None, description="基准日 YYYY-MM-DD，缺省最新交易日"),
     current_user: dict = Depends(get_current_user),
+    market: str = Query("CN"),
 ):
     """大盘均线过滤：上证指数 MA5/10/20/30/60 相对位置 + 可持仓判断。
 
@@ -465,10 +519,12 @@ async def get_index_ma(
     数据源：QuantDB index_daily。
     """
     _ = current_user
+    provider = LOCAL_MARKET_PROVIDERS.get(market.upper())
+    symbol = symbol or (provider.benchmark if provider else "000001.SH")
     try:
         from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
 
-        hub = QuantDBDataHub()
+        hub = provider.open() if provider else QuantDBDataHub()
         end = date.fromisoformat(asof) if asof else date.today()
         start = end - timedelta(days=160)
         df = hub.fetch_index_kline(symbol, start, end)
@@ -498,7 +554,7 @@ async def get_index_ma(
                 "ma5": ma5, "ma10": ma10, "ma20": ma20, "ma30": ma30, "ma60": ma60,
                 "above_ma20": above,
                 "status": status,
-                "source_used": "quantdb_index_daily",
+                "source_used": provider.source if provider else "quantdb_index_daily",
             },
         }
     except Exception as exc:  # noqa: BLE001
@@ -547,6 +603,7 @@ async def get_index_quotes(
 # ── 多市场指数概览 ─────────────────────────────────────────────────────────────
 # 各市场要展示的指数品种（symbol -> 名称）。优先用本地 parquet 真实行情。
 _MARKET_INDEX_META: dict[str, list[dict[str, str]]] = {
+    "JP": [{"symbol": "TOPIX", "name": "TOPIX 价格指数"}],
     "CN": [
         {"symbol": "000001.SH", "name": "上证指数"},
         {"symbol": "399001.SZ", "name": "深证成指"},
@@ -592,6 +649,7 @@ _MARKET_INDEX_META: dict[str, list[dict[str, str]]] = {
 
 # market -> (hub 模块路径, hub 类名, 读取方法)
 _MARKET_HUB_CFG: dict[str, tuple[str, str, str]] = {
+    "JP": ("backend.services.engine.data_platform.quantjp_hub", "QuantJPDataHub", "fetch_index_kline"),
     "CN": ("backend.services.engine.data_platform.quantdb_hub", "QuantDBDataHub", "fetch_index_kline"),
     "HK": ("backend.services.engine.data_platform.quanthk_hub", "QuantHKDataHub", "fetch_index_kline"),
     "US": ("backend.services.engine.data_platform.quantus_hub", "QuantUSDataHub", "fetch_index_kline"),

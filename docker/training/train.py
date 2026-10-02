@@ -1047,6 +1047,13 @@ def main() -> int:
         explain_cfg = _normalize_explain_cfg(cfg.get("explain") or {})
         context_cfg = cfg.get("context", {}) or {}
         market = str(context_cfg.get("market", "CN")).upper()
+        if market == "JP":
+            from backend.services.engine.data_platform.jp_labels import label_formula
+            label_cfg = cfg.setdefault("label", {})
+            label_cfg["label_formula"] = label_formula(
+                int(label_cfg.get("target_horizon_days") or 1),
+                str(label_cfg.get("target_mode") or "return"),
+            )
 
         df, valid_features = load_data(
             cfg["data"]["train_start"],

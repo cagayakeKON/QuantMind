@@ -10,6 +10,7 @@ import { TrendingUp, TrendingDown, Minus } from 'lucide-react';
 
 const MARKET_LABELS: Record<MarketId, string> = {
   CN: 'A股',
+  JP: '日本市场',
   HK: '港股',
   US: '美股',
   CRYPTO: '区块链',

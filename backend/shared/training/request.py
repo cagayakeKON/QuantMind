@@ -44,6 +44,7 @@ ALLOWED_TARGET_MODE = {"return", "classification"}
 ALLOWED_DEAL_PRICE = {"open", "close"}
 
 _BENCHMARK_MARKET = {
+    "TOPIX": "JP",
     "HSI": "HK",
     "HSCEI": "HK",
     "HSTECH": "HK",
@@ -95,7 +96,7 @@ def parse_date(date_str: str, field: str) -> datetime:
 def resolve_market(raw_market: Any, benchmark: str) -> str:
     """解析目标市场：显式字段优先，缺失/非法时从 benchmark 推断，回退 CN。"""
     market = str(raw_market or "").strip().upper()
-    if market in ("CN", "US", "HK", "CRYPTO", "FUTURES"):
+    if market in ("CN", "JP", "US", "HK", "CRYPTO", "FUTURES"):
         return market
     return _BENCHMARK_MARKET.get(str(benchmark or "").upper(), "CN")
 
@@ -113,7 +114,7 @@ class ContextRequest(BaseModel):
 
     initial_capital: Any = None
     initialCapital: Any = None
-    benchmark: Any = "SH000300"
+    benchmark: Any = None
     commission_rate: Any = None
     commissionRate: Any = None
     slippage: Any = None
@@ -134,12 +135,24 @@ class ContextRequest(BaseModel):
                 status_code=422, detail="context.initial_capital must be > 0"
             )
 
-        benchmark = str(self.benchmark or "SH000300").strip() or "SH000300"
+        market = resolve_market(self.market, str(self.benchmark or ""))
+        benchmark = str(
+            self.benchmark or ("TOPIX" if market == "JP" else "SH000300")
+        ).strip()
+        if market == "JP" and benchmark.upper() != "TOPIX":
+            raise HTTPException(
+                status_code=422,
+                detail="JP training benchmark must be TOPIX (price index)",
+            )
 
         commission_rate = coerce_float(self.commission_rate)
         if commission_rate is None:
             commission_rate = coerce_float(self.commissionRate)
-        commission_rate = commission_rate if commission_rate is not None else 0.00025
+        commission_rate = (
+            commission_rate
+            if commission_rate is not None
+            else (0.0 if market == "JP" else 0.00025)
+        )
         if commission_rate < 0:
             raise HTTPException(
                 status_code=422, detail="context.commission_rate must be >= 0"
@@ -150,10 +163,27 @@ class ContextRequest(BaseModel):
         if slippage < 0:
             raise HTTPException(status_code=422, detail="context.slippage must be >= 0")
 
-        deal_price = str(self.deal_price or self.dealPrice or "close").strip().lower()
+        deal_price = (
+            str(
+                self.deal_price
+                or self.dealPrice
+                or ("open" if market == "JP" else "close")
+            )
+            .strip()
+            .lower()
+        )
         if deal_price not in ALLOWED_DEAL_PRICE:
             raise HTTPException(
                 status_code=422, detail="context.deal_price must be one of: open, close"
+            )
+        if market == "JP" and deal_price != "open":
+            raise HTTPException(
+                status_code=422, detail="JP training uses next-session open execution"
+            )
+        if market == "JP" and self.industry_as_feature:
+            raise HTTPException(
+                status_code=422,
+                detail="JP industry features require dated disclosure data and are not yet supported",
             )
 
         return {
@@ -162,7 +192,7 @@ class ContextRequest(BaseModel):
             "commission_rate": commission_rate,
             "slippage": slippage,
             "deal_price": deal_price,
-            "market": resolve_market(self.market, benchmark),
+            "market": market,
             "industry_as_feature": bool(self.industry_as_feature or False),
         }
 

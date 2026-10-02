@@ -12,6 +12,7 @@ import {
   MODEL_DL_DEFAULTS,
 } from './trainingUtils';
 import type { AppMarket } from '../../store/slices/uiSlice';
+import { getMarketConfig } from '../../config/marketConfig';
 
 const MARKET_BENCHMARKS: Record<string, { label: string; value: string }[]> = {
   CN: [
@@ -86,7 +87,8 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
   wfa,
   onWfaChange,
 }) => {
-  const benchmarkOptions = MARKET_BENCHMARKS[market] || MARKET_BENCHMARKS.CN;
+  const marketConfig = getMarketConfig(market);
+  const benchmarkOptions = MARKET_BENCHMARKS[market] || [{label: marketConfig.benchmarkName, value: marketConfig.benchmark}];
   const isSingleLgb = params.model_types.length === 1 && params.model_type === 'lightgbm';
   const isReturnTarget = target.mode === 'return';
   // 分位推理：后端仅支持 A 股单 LightGBM 回归模型（train.py _validate_quantile_config）
@@ -681,7 +683,7 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
                   options={[
                     { label: '开盘价 (open)', value: 'open' },
                     { label: '收盘价 (close)', value: 'close' },
-                  ]}
+                  ].filter(option => !marketConfig.trainingCapabilities || marketConfig.trainingCapabilities.dealPrices.includes(option.value as DealPrice))}
                 />
               </div>
             </div>
@@ -699,7 +701,7 @@ export const ParameterConfig: React.FC<ParameterConfigProps> = ({
               <Tooltip title="将行业编码作为特征加入模型，仅 CatBoost 会按类别特征原生处理">
                 <Switch
                   checked={!!context.industry_as_feature}
-                  disabled={!isCatboost}
+                  disabled={!isCatboost || marketConfig.trainingCapabilities?.industryFeature === false}
                   onChange={(checked) => onContextChange({ ...context, industry_as_feature: checked })}
                 />
               </Tooltip>

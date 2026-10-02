@@ -7,14 +7,14 @@ import { FundData } from '../../services/userService';
 import { useAppSelector } from '../../store';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 
-const MARKET_LABELS: Record<string, string> = { CN: 'A股', HK: '港股', US: '美股', CRYPTO: '区块链' };
+const MARKET_LABELS: Record<string, string> = { CN: 'A股', JP: '日本市场', HK: '港股', US: '美股', CRYPTO: '区块链' };
 
 const formatMoney = (value: number): string =>
   value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-const formatSignedMoney = (value: number): string => {
+const formatSignedMoney = (value: number, currency = '￥'): string => {
   const sign = value > 0 ? '+' : value < 0 ? '-' : '';
-  return `${sign}￥${formatMoney(Math.abs(value))}`;
+  return `${sign}${currency}${formatMoney(Math.abs(value))}`;
 };
 
 export const FundOverviewCard: React.FC = () => {
@@ -26,7 +26,8 @@ export const FundOverviewCard: React.FC = () => {
 
   const marketLabel = MARKET_LABELS[currentMarket] || '';
   const modeLabel = tradingMode === 'real' ? '实盘' : '模拟';
-  const cardTitle = `资金概览 (${marketLabel}/${modeLabel})`;
+  const cardTitle = `资金概览 (${marketLabel}/${modeLabel})${currentMarket === 'JP' ? ' · JPY' : ''}`;
+  const currency = currentMarket === 'JP' ? 'JPY ' : '￥';
 
   if (loading && !data) {
     return <FundOverviewSkeleton />;
@@ -96,7 +97,7 @@ export const FundOverviewCard: React.FC = () => {
             key={`nav-${Math.round(fundInfo.totalAsset)}`}
             style={{ fontFamily: 'Outfit, sans-serif' }}
           >
-            ￥{formatMoney(fundInfo.totalAsset)}
+            {currency}{formatMoney(fundInfo.totalAsset)}
           </motion.div>
           <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-none mt-0.5">Total Net Asset Value</div>
         </div>
@@ -110,7 +111,7 @@ export const FundOverviewCard: React.FC = () => {
               {!initialCapitalAvailable ? (
                 <div className="text-lg font-black text-slate-300 font-mono leading-tight">--</div>
               ) : (
-                <div className="text-lg font-black text-slate-800 font-mono leading-tight">￥{formatMoney(fundInfo.initialCapital)}</div>
+                <div className="text-lg font-black text-slate-800 font-mono leading-tight">{currency}{formatMoney(fundInfo.initialCapital)}</div>
               )}
             </div>
             <div title="统一日账本口径，对应 daily_pnl / today_pnl。" className="bg-slate-50 border border-slate-100 rounded-2xl p-3.5 hover:bg-slate-100 transition-colors flex flex-col items-center justify-center text-center">
@@ -119,7 +120,7 @@ export const FundOverviewCard: React.FC = () => {
                 <div className="text-lg font-black text-slate-300 font-mono leading-tight">--</div>
               ) : (
                 <div className={`text-lg font-black font-mono leading-tight ${fundInfo.todayPnL >= 0 ? 'text-[var(--profit-primary)]' : 'text-[var(--loss-primary)]'}`}>
-                  {formatSignedMoney(fundInfo.todayPnL)}
+                  {formatSignedMoney(fundInfo.todayPnL, currency)}
                 </div>
               )}
             </div>
@@ -133,7 +134,7 @@ export const FundOverviewCard: React.FC = () => {
                 <div className="text-lg font-black text-slate-300 font-mono leading-tight">--</div>
               ) : (
                 <div className={`text-lg font-black font-mono leading-tight ${monthlyPnL >= 0 ? 'text-[var(--profit-primary)]' : 'text-[var(--loss-primary)]'}`}>
-                  {formatSignedMoney(monthlyPnL)}
+                  {formatSignedMoney(monthlyPnL, currency)}
                 </div>
               )}
             </div>
@@ -143,7 +144,7 @@ export const FundOverviewCard: React.FC = () => {
                 <div className="text-lg font-black text-slate-300 font-mono leading-tight">--</div>
               ) : (
                 <div className={`text-lg font-black font-mono leading-tight ${(fundInfo.totalPnL || 0) >= 0 ? 'text-[var(--profit-primary)]' : 'text-[var(--loss-primary)]'}`}>
-                  {formatSignedMoney(fundInfo.totalPnL || 0)}
+                  {formatSignedMoney(fundInfo.totalPnL || 0, currency)}
                 </div>
               )}
             </div>

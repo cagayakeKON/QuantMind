@@ -93,6 +93,7 @@ _LOCAL_DATA_MOUNT_DIR = "/tmp/feature_snapshots"
 _QUANTDB_DATA_MOUNT_DIR = "/tmp/quantdb_data"
 # 非 CN 市场的数据目录挂载（与 QUANTDB_DATA_MOUNT_DIR 语义一致）
 _MARKET_DATA_MOUNT_DIRS = {
+    "JP": "/tmp/quantjp_data",
     "CN": _QUANTDB_DATA_MOUNT_DIR,
     "HK": "/tmp/quanthk_data",
     "US": "/tmp/quantus_data",
@@ -101,6 +102,7 @@ _MARKET_DATA_MOUNT_DIRS = {
 }
 # 训练容器内环境变量名（train.py 按市场选择数据根目录）
 _MARKET_MOUNT_ENV_VARS = {
+    "JP": "QUANTJP_DATA_DIR",
     "CN": "QUANTDB_DATA_DIR",
     "HK": "QUANTHK_DATA_DIR",
     "US": "QUANTUS_DATA_DIR",
@@ -492,6 +494,10 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
         requested_features = payload.get("features", [])
         market = normalize_market(context.get("market") or "CN")
         _, market_mount_dir = _market_data_mount(market)
+        training_data_dir = market_mount_dir
+        factor_coverage = dict(payload.get("factor_coverage") or {})
+        if market == "JP" and factor_source != "l1_factors":
+            raise RuntimeError("JP training requires published l1_factors")
         if factor_source:
             try:
                 from backend.services.engine.data_platform.quantdb_factor_reader import QuantDBFactorReader
@@ -500,11 +506,19 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                 source_end = payload.get("test_end") or payload.get("valid_end") or payload.get("train_end") or ""
                 # 容器内数据根目录（api 容器 /data 挂载可见），与训练容器
                 # 挂载的 market_mount_dir 同源。
-                source_status = QuantDBFactorReader(market=market).assert_ready(
+                reader = QuantDBFactorReader(market=market)
+                source_status = reader.assert_ready(
                     factor_source,
                     start=str(source_start) or None,
                     end=str(source_end) or None,
                 )
+                if market == "JP":
+                    # Keep this task on the immutable price/feature publication
+                    # selected here even if current.json changes before launch.
+                    mount_source = Path(os.getenv(_MARKET_DATA_DIR_ENV[market], "").strip() or _MARKET_DATA_DIR_DEFAULT[market]).resolve()
+                    relative = reader.data_dir.resolve().relative_to(mount_source)
+                    training_data_dir = str(Path(market_mount_dir) / relative)
+                    factor_coverage["jp_data_version"] = reader.data_dir.name
                 available = set(source_status.columns)
                 field_sources = dict(payload.get("factor_field_sources") or {})
                 valid_features = [
@@ -590,8 +604,8 @@ class LocalDockerOrchestrator(TrainingOrchestrator):
                     factor_schema_hash=source_status.schema_hash if factor_source else None,
                     factor_field_sources=dict(payload.get("factor_field_sources") or {}),
                     factor_catalog_published_at=str(payload.get("factor_catalog_published_at") or "") or None,
-                    factor_coverage=dict(payload.get("factor_coverage") or {}),
-                    quantdb_dir=market_mount_dir if factor_source else None,
+                    factor_coverage=factor_coverage,
+                    quantdb_dir=training_data_dir if factor_source else None,
                     # 全局股票池（P3）：容器无 DB，池成分在这里解析后传入
                     **_training_pool_fields(payload),
                 ),

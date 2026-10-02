@@ -39,6 +39,23 @@ _FEATURE_CATALOG_FALLBACK = Path(os.getcwd()) / "config" / "features" / "model_t
 _MARKET_TO_XCAL = {"CN": "XSHG", "US": "XNYS", "HK": "XHKG"}
 
 
+def _jp_next_split_start(anchor: datetime, horizon: int) -> datetime:
+    from backend.services.engine.data_platform.jp_labels import last_label_session
+    from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+
+    sessions = QuantJPDataHub().fetch_calendar()["trade_date"]
+    exit_day = last_label_session(anchor, sessions, horizon)
+    following = sorted(
+        day for day in sessions if exit_day is not None and day > exit_day
+    )
+    if not following:
+        raise HTTPException(
+            status_code=422,
+            detail="JP calendar does not cover the training split embargo",
+        )
+    return datetime.combine(following[0].date(), datetime.min.time())
+
+
 # _clamp_int 下沉至 backend.shared.training.request（单源），此处 import 复用。
 
 
@@ -49,6 +66,19 @@ def _shift_trading_days_back(anchor: datetime, n_days: int, market: str) -> tupl
     10 个日历日只夹约 6 个交易日，会让 train 尾部的 label 窗口伸进 valid 区间。
     CRYPTO 或日历不可用时退化为日历日（返回 False，调用方据此提示用户）。
     """
+    if str(market or "CN").upper() == "JP":
+        from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+        days = [
+            day.date() if hasattr(day, "date") else day
+            for day in QuantJPDataHub().fetch_calendar()["trade_date"]
+        ]
+        prior = sorted(day for day in days if day < anchor.date())
+        if len(prior) < n_days:
+            raise HTTPException(
+                status_code=422,
+                detail="JP calendar does not cover the training split embargo",
+            )
+        return datetime.combine(prior[-n_days], datetime.min.time()), True
     cal_name = _MARKET_TO_XCAL.get(str(market or "CN").upper())
     if not cal_name:
         return anchor - timedelta(days=n_days), False
@@ -312,6 +342,9 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
                 feature_categories.append(val)
 
     context = req.context
+    if context.get("market") == "JP":
+        from backend.services.engine.data_platform.jp_labels import label_formula
+        req.label_formula = label_formula(target_horizon_days, target_mode)
     explain = normalize_explain(payload.get("explain"))
 
     normalized: dict[str, Any] = {
@@ -435,6 +468,8 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
         adjustment_notices = []
 
         earliest_valid_start = dt_train_end + timedelta(days=gap_days)
+        if context.get("market") == "JP":
+            earliest_valid_start = _jp_next_split_start(dt_train_end, target_horizon_days)
         if dt_valid_start < earliest_valid_start:
             old_val = valid_start
             dt_valid_start = earliest_valid_start
@@ -442,6 +477,8 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
             adjustment_notices.append(f"valid_start 从 {old_val} 自动修正为 {valid_start} (由于预测跨度 {gap_days}d)")
 
         earliest_test_start = dt_valid_end + timedelta(days=gap_days)
+        if context.get("market") == "JP":
+            earliest_test_start = _jp_next_split_start(dt_valid_end, target_horizon_days)
         if dt_test_start < earliest_test_start:
             old_val = test_start
             dt_test_start = earliest_test_start
@@ -462,6 +499,18 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
                 "test_end": test_end,
                 "system_notices": adjustment_notices,
             }
+        )
+
+    if context.get("market") == "JP" and normalized.get("test_start"):
+        from backend.services.engine.data_platform.jp_labels import last_label_session
+        from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+
+        calendar = QuantJPDataHub().fetch_calendar()
+        effective = last_label_session(
+            normalized["test_start"], calendar["trade_date"], target_horizon_days
+        )
+        normalized["effective_trade_date"] = (
+            effective.strftime("%Y-%m-%d") if effective is not None else ""
         )
 
     required_artifacts = payload.get(

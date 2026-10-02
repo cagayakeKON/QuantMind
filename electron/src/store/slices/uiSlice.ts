@@ -1,7 +1,7 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
 import { isMarketEnabled } from '../../config/marketFlags';
 
-export type AppMarket = 'CN' | 'US' | 'HK' | 'CRYPTO' | 'FUTURES';
+export type AppMarket = 'CN' | 'JP' | 'US' | 'HK' | 'CRYPTO' | 'FUTURES';
 
 export interface UIState {
   theme: 'light' | 'dark';
@@ -20,7 +20,7 @@ const MARKET_PREF_KEY = 'qm:current_market';
 const initialTradingMode: 'real' | 'simulation' = 'simulation';
 
 const savedMarket = localStorage.getItem(MARKET_PREF_KEY);
-const validMarkets: AppMarket[] = (['CN', 'US', 'HK', 'CRYPTO', 'FUTURES'] as AppMarket[]).filter((m) => isMarketEnabled(m));
+const validMarkets: AppMarket[] = (['CN', 'JP', 'US', 'HK', 'CRYPTO', 'FUTURES'] as AppMarket[]).filter((m) => isMarketEnabled(m));
 const initialMarket: AppMarket =
   validMarkets.includes(savedMarket as AppMarket) ? (savedMarket as AppMarket) : 'CN';
 

@@ -779,8 +779,8 @@ async def seed_draft_mappings(version_id: str, current_user: dict = Depends(requ
     """Convenience endpoint: add all discovered factor columns to a draft as mappings.
 
     新建草稿后：全部发现字段默认启用（enabled=True）。
-    default_selected 默认勾选仅适用于 CN 市场（48 核心集基于 CN l1_l2
-    实际字段挑选）；HK/CUSTOM 等市场默认全不勾选，由管理员按实际
+    CN 默认勾选 48 核心集；JP 默认勾选已发布 manifest 的 feature_names。
+    HK/CUSTOM 等市场默认全不勾选，由管理员按实际
     发现字段手动勾选，避免把不存在的 CN 因子带入训练。
     """
     _ = current_user
@@ -803,6 +803,14 @@ async def seed_draft_mappings(version_id: str, current_user: dict = Depends(requ
         market_defaults = (
             DEFAULT_SELECTED_FACTORS if str(version["market"]).upper() == "CN" else frozenset()
         )
+        if str(version["market"]).upper() == "JP":
+            root = QuantDBFactorReader(market="JP").data_dir
+            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+            market_defaults = frozenset(
+                manifest.get("datasets", {})
+                .get(version["source_dataset"], {})
+                .get("feature_names", [])
+            )
         for column in fields:
             if column in KEY_COLUMNS or column in REQUIRED_COLUMNS:
                 continue

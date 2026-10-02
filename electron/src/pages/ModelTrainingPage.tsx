@@ -15,6 +15,7 @@ import { modelTrainingService, type DataWindowResult } from '../services/modelTr
 import { useAppDispatch, useAppSelector } from '../store';
 import { selectCurrentMarket, AppMarket, setMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
+import { switchMarketTrainingContext } from './training/marketTrainingContext';
 import { TrainingTarget, TrainingParams, TrainingContext, TrainingStatus, TrainingDraft, SplitKey, TimePeriodMap, FeatureCategory, STORAGE_KEY, DEFAULT_FEATURE_CATEGORIES, getDefaultFeaturesForMarket, resolveDefaultSelectedFeatures, DEFAULT_TIME_PERIODS, DEFAULT_TARGET, DEFAULT_PARAMS, DEFAULT_CONTEXT, buildAutoDisplayName, buildLabelFormula, buildEffectiveTradeDate, daysBetween, toISOStringRange, restoreRange, shouldMigrateLegacyDraftPeriods, buildTrainingRequest, formatRange, toDynamicCategories, TrainingResult, buildBackendTrainingPayload, parseTrainingResult, parseSuggestedTimePeriods, MODEL_DL_DEFAULTS, WfaConfig, ImportedTrainingConfig, buildTrainingConfigFile, parseTrainingConfig, serializeTrainingConfig, TrainingFactorFilterConfig, DEFAULT_FACTOR_FILTER } from './training/trainingUtils';
 import { AdminModelFeatureDataCoverage, QuantDBTrainingSource } from '../features/admin/types';
 import { adminService } from '../features/admin/services/adminService';
@@ -41,7 +42,7 @@ const TRAINING_MODULES = [
 const TRAINING_PAGE_BOTTOM_SAFE_CLASS = 'pb-[30px]';
 // 直读 ML 数据集训练的市场（数据源选择 + 目录版本门禁），与后端
 // quantdb_factor_reader.MARKET_FACTOR_SOURCES 保持一致。
-const QUANTDB_DIRECT_MARKETS = ['CN', 'HK', 'US', 'FUTURES', 'CRYPTO', 'CUSTOM'];
+const QUANTDB_DIRECT_MARKETS = ['CN', 'JP', 'HK', 'US', 'FUTURES', 'CRYPTO', 'CUSTOM'];
 const isQuantDBMarket = (market: string) => QUANTDB_DIRECT_MARKETS.includes(market);
 let draftRestoreNoticeShown = false;
 
@@ -69,6 +70,7 @@ interface FormState {
   target: TrainingTarget;
   params: TrainingParams;
   context: TrainingContext;
+  marketContexts?: Partial<Record<AppMarket, TrainingContext>>;
   displayName: string;
   displayNameMode: 'auto' | 'manual';
   draftHydrated: boolean;
@@ -96,7 +98,7 @@ type FormAction =
   | { type: 'SET_WFA'; payload: WfaConfig }
   | { type: 'SET_POOL'; payload: { ref: string | null; name: string | null; id: string | null } }
   | { type: 'SET_FEATURE_CATEGORIES'; payload: FeatureCategory[] }
-  | { type: 'SET_MARKET_CONTEXT'; payload: { market: AppMarket; benchmark: string } };
+  | { type: 'SET_MARKET_CONTEXT'; payload: { market: AppMarket; benchmark: string } & Partial<TrainingContext> };
 
 function formReducer(state: FormState, action: FormAction): FormState {
   switch (action.type) {
@@ -158,8 +160,9 @@ function formReducer(state: FormState, action: FormAction): FormState {
       return { ...state, wfaConfig: action.payload };
     case 'SET_FEATURE_CATEGORIES':
       return { ...state };
-    case 'SET_MARKET_CONTEXT':
-      return { ...state, context: { ...state.context, ...action.payload } };
+    case 'SET_MARKET_CONTEXT': {
+      return { ...state, ...switchMarketTrainingContext(state.context, action.payload, DEFAULT_CONTEXT, state.marketContexts) };
+    }
     default:
       return state;
   }
@@ -242,8 +245,8 @@ export const ModelTrainingPage: React.FC = () => {
   // Derive individual fields from formState for inline use
   const { selectedFeatures, timePeriods, wfaConfig, target, params, context, displayName, displayNameMode } = formState;
 
-  const labelFormula = useMemo(() => buildLabelFormula(target), [target]);
-  const effectiveTradeDate = useMemo(() => buildEffectiveTradeDate(target, timePeriods.test[0]), [target, timePeriods.test]);
+  const labelFormula = useMemo(() => buildLabelFormula(target, currentMarket), [target, currentMarket]);
+  const effectiveTradeDate = useMemo(() => buildEffectiveTradeDate(target, timePeriods.test[0], currentMarket), [target, timePeriods.test, currentMarket]);
 
   // 市场切换
   useEffect(() => {
@@ -1084,7 +1087,7 @@ export const ModelTrainingPage: React.FC = () => {
                         <FeatureSelector categories={featureCategories} selectedFeatures={selectedFeatures} onChange={(f) => dispatch({ type: 'SET_FEATURES', payload: f })} loading={featureCatalogLoading} onGuide={() => navigate('/admin/training-datasets')} />
                       </>
                     )}
-                    {currentStep === 1 && <TrainingTargetConfig target={target} timePeriods={timePeriods} onTargetChange={(t) => dispatch({ type: 'SET_TARGET', payload: t })} onTimeChange={(k, v) => dispatch({ type: 'SET_TIME', key: k, value: v })} dataCoverage={dataCoverage} factorFilter={factorFilter} onFactorFilterChange={setFactorFilter} />}
+                    {currentStep === 1 && <TrainingTargetConfig market={currentMarket} target={target} timePeriods={timePeriods} onTargetChange={(t) => dispatch({ type: 'SET_TARGET', payload: t })} onTimeChange={(k, v) => dispatch({ type: 'SET_TIME', key: k, value: v })} dataCoverage={dataCoverage} factorFilter={factorFilter} onFactorFilterChange={setFactorFilter} />}
                     {currentStep === 2 && <ParameterConfig params={params} context={context} onParamsChange={(p) => dispatch({ type: 'SET_PARAMS', payload: p })} onContextChange={(c) => dispatch({ type: 'SET_CONTEXT', payload: c })} displayName={displayName} onDisplayNameChange={(n, m) => dispatch({ type: 'SET_DISPLAY_NAME', payload: { name: n, mode: m } })} autoDisplayName={autoDisplayName} market={currentMarket} target={target} onTargetChange={(t) => dispatch({ type: 'SET_TARGET', payload: t })} wfa={wfaConfig} onWfaChange={(w) => dispatch({ type: 'SET_WFA', payload: w })} />}
                     {currentStep === 3 && <TrainingConsole trainingStatus={trainingStatus} executionStage={executionStage} progress={progress} logs={logs} backendRunStatus={backendRunStatus} result={result} requestPreview={requestPreview} totalDays={totalDays} trainDays={trainDays} valDays={valDays} testDays={testDays} target={target} factorFilter={factorFilter} onGoToResult={() => setCurrentStep(4)} />}
                     {currentStep === 4 && <TrainingResultView result={result} resultError={resultError} settingDefaultModel={settingDefaultModel} onSetDefaultModel={handleSetDefaultModel} onExportConfig={handleExportConfig} trainingStatus={trainingStatus} />}

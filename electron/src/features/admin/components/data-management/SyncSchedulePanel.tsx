@@ -37,6 +37,7 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
     // 的同步脚本仍消费该字段：读回原值后原样回存，避免保存时被静默重置成默认值。
     const [days, setDays] = useState(defaultDays);
     const [datasets, setDatasets] = useState<string[]>([]);
+    const [withQlib, setWithQlib] = useState(false);
 
     useEffect(() => {
         loadSchedule();
@@ -50,6 +51,7 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
             if (resp?.data) {
                 const s = resp.data;
                 setEnabled(!!s.enabled);
+                setWithQlib(!!s.with_qlib);
                 setTime(dayjs(s.time, 'HH:mm').isValid() ? dayjs(s.time, 'HH:mm') : dayjs('01:00', 'HH:mm'));
                 setDays(s.days ?? defaultDays);
                 setDatasets(s.datasets?.length ? s.datasets : [...selectedDatasets]);
@@ -70,6 +72,7 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                 time: time.format('HH:mm'),
                 days,
                 datasets,
+                with_qlib: withQlib,
             });
             message.success('定时同步配置已保存');
         } catch (err: unknown) {
@@ -152,6 +155,12 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                             ? `将同步：${datasets.join(', ')}（跟随下方勾选）`
                             : '未指定时按该市场默认全量同步'}
                     </div>
+                    {market === 'JP' && (
+                        <div className="flex items-center justify-between text-xs text-slate-600 px-1">
+                            <span>同步后更新日股 Alpha158 训练特征与 Qlib 缓存</span>
+                            <Switch size="small" checked={withQlib} onChange={setWithQlib} />
+                        </div>
+                    )}
                     <div className="text-[11px] text-slate-400 bg-white rounded-lg border border-slate-100 px-3 py-2">
                         后台 Celery 到点自动触发，时区 Asia/Shanghai；触发时间在 01:00-06:00 内随机错峰，保存后固定。
                     </div>

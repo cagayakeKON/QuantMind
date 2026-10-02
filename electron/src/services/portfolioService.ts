@@ -338,7 +338,14 @@ class PortfolioService {
         userId: string,
         mode: 'real' | 'simulation' = 'simulation',
         tenantId = 'default',
+        market = 'CN',
     ): Promise<{ data: FundData; isSimulated: boolean }> {
+        if (market === 'JP') {
+            const { jpSimulationService, selectedJPSession, jpFundOverview } = await import('./jpSimulationService');
+            const account = selectedJPSession(await jpSimulationService.list(), userId, tenantId);
+            if (!account) throw new Error('请在日本市场模拟交易页创建 JPY 账户');
+            return { data: jpFundOverview(account), isSimulated: true };
+        }
         try {
             const { realTradingService } = await import('./realTradingService');
             let account: any = null;

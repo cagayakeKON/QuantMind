@@ -932,8 +932,15 @@ def make_market_router(
                         "FUTURES": "FUTURES",
                     }
                     qlib_market = market_map.get(market, market)
+                    features = None
+                    if market == "JP":
+                        from backend.services.engine.data_platform.jp_features import build_jp_features_in_process
+                        _job_update(job_id, stage="jp_features")
+                        features = build_jp_features_in_process(_root())
                     provider_uri = ensure_qlib_cache(market=qlib_market)
                     qlib_cache = {"status": "ok", "provider_uri": provider_uri}
+                    if features:
+                        qlib_cache["features"] = features
                 except Exception as exc:  # noqa: BLE001
                     logger.error(
                         "%s sync job %s: qlib cache failed: %s",

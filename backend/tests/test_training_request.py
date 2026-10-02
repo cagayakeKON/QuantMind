@@ -128,3 +128,20 @@ def test_context_request_direct():
     with pytest.raises(HTTPException) as exc_info:
         ContextRequest.model_validate({"commission_rate": -1}).cleaned()
     assert "context.commission_rate must be >= 0" in exc_info.value.detail
+
+
+def test_jp_context_uses_price_topix_jpy_cash_and_next_open():
+    for raw in ({"market": "JP"}, {"benchmark": "TOPIX"}):
+        ctx = ContextRequest.model_validate(raw).cleaned()
+        assert ctx["market"] == "JP"
+        assert ctx["benchmark"] == "TOPIX"
+        assert ctx["commission_rate"] == 0
+        assert ctx["deal_price"] == "open"
+    for bad in (
+        {"deal_price": "close"},
+        {"benchmark": "SH000300"},
+        {"industry_as_feature": True},
+    ):
+        with pytest.raises(HTTPException) as exc:
+            ContextRequest.model_validate({"market": "JP", **bad}).cleaned()
+        assert exc.value.status_code == 422

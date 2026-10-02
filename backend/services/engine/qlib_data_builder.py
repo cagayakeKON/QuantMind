@@ -230,7 +230,14 @@ class QlibDataBuilder:
 
         if self._market == "JP":
             # The source calendar includes dates before/after available prices.
-            dates = self._dates_from_parquet()
+            partitions = self._hub._partition_dates("1_kline_data/daily_forward")
+            if not partitions:
+                return 0
+            first, last = (pd.Timestamp(value).date() for value in (partitions[0], partitions[-1]))
+            # Keep cash sessions without prices as gaps. Deriving the calendar
+            # from observed bars would slide rolling windows over such gaps.
+            frame = self._hub.fetch_calendar(first, last)
+            dates = self._extract_dates(frame) or []
             with cal_file.open("w", encoding="utf-8") as handle:
                 handle.write("".join(f"{day}\n" for day in dates))
             return len(dates)

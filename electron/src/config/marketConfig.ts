@@ -25,9 +25,25 @@ export interface MarketConfig {
   calendar: string;
   /** 后端 market adapter ID */
   adapterId: string;
+  trainingDefaults?: { commissionRate: number; dealPrice: 'open' | 'close' };
+  trainingCapabilities?: {dealPrices: ('open' | 'close')[]; industryFeature: boolean};
+  simulationUi?: 'standard' | 'jp_cash';
+  stockSearch?: 'local' | 'gateway';
+  stockTerminalUi?: 'standard' | 'daily_equity';
 }
 
 export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
+  JP: {
+    label: '日本市场', qlibRegion: 'us',
+    qlibProviderUri: '/data/quantjp/.qlib_cache/jp_data',
+    defaultUniverse: 'all', benchmark: 'TOPIX', benchmarkName: 'TOPIX 价格指数',
+    currency: 'JPY', calendar: 'JPX', adapterId: 'japan',
+    trainingDefaults: { commissionRate: 0, dealPrice: 'open' },
+    trainingCapabilities: {dealPrices: ['open'], industryFeature: false},
+    simulationUi: 'jp_cash',
+    stockSearch: 'gateway',
+    stockTerminalUi: 'daily_equity',
+  },
   CN: {
     label: 'A股',
     qlibRegion: 'cn',

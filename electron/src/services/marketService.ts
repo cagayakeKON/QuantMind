@@ -1,6 +1,7 @@
 // 简化版本：仅使用腾讯财经API
 import { SERVICE_URLS } from '../config/services';
 import { isMarketEnabled } from '../config/marketFlags';
+import type { AppMarket } from '../store/slices/uiSlice';
 
 export interface ApiResponse<T> {
   success: boolean;
@@ -62,9 +63,10 @@ const SUPPORTED_INDICES = {
 };
 
 // 多市场指数配置
-export type MarketId = 'CN' | 'HK' | 'US' | 'CRYPTO' | 'FUTURES';
+export type MarketId = AppMarket;
 
 export const MARKET_INDICES: Record<MarketId, { symbol: string; name: string; basePrice: number }[]> = {
+  JP: [{ symbol: 'TOPIX', name: 'TOPIX 价格指数', basePrice: 0 }],
   CN: [
     { symbol: 'sh000001', name: '上证指数', basePrice: 3200 },
     { symbol: 'sz399001', name: '深成指数', basePrice: 12000 },

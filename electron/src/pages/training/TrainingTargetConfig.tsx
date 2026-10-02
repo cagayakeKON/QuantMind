@@ -22,6 +22,7 @@ import { AdminModelFeatureDataCoverage } from '../../features/admin/types';
 const { RangePicker } = DatePicker;
 
 interface TrainingTargetConfigProps {
+  market?: string;
   target: TrainingTarget;
   timePeriods: TimePeriodMap;
   onTargetChange: (target: TrainingTarget) => void;
@@ -49,6 +50,7 @@ const SectionHeader: React.FC<{ title: string; desc: string; icon?: React.ReactN
 );
 
 export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
+  market,
   target,
   timePeriods,
   onTargetChange,
@@ -57,8 +59,8 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
   factorFilter,
   onFactorFilterChange,
 }) => {
-  const labelFormula = buildLabelFormula(target);
-  const effectiveTradeDate = buildEffectiveTradeDate(target, timePeriods.test[0]);
+  const labelFormula = buildLabelFormula(target, market);
+  const effectiveTradeDate = buildEffectiveTradeDate(target, timePeriods.test[0], market);
 
   const trainDays = daysBetween(timePeriods.train);
   const valDays = daysBetween(timePeriods.val);
@@ -222,7 +224,7 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
             <div className="flex items-center justify-between">
               <div>
                 <div className="text-[10px] font-black uppercase tracking-[0.22em] text-slate-400">生效日期预览</div>
-                <div className="mt-1 text-sm font-semibold text-slate-900">{effectiveTradeDate}</div>
+                <div className="mt-1 text-sm font-semibold text-slate-900">{effectiveTradeDate || '按日本现金交易日历计算'}</div>
               </div>
               <div className="rounded-2xl bg-indigo-50 px-3 py-2 text-xs text-indigo-700">
                 按交易日历校正时将由后端覆盖

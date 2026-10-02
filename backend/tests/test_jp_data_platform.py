@@ -5,6 +5,7 @@ import hashlib
 import json
 
 import duckdb
+import pandas as pd
 import pytest
 
 from backend.services.engine.data_platform.jquants_import import import_jquants_snapshot
@@ -208,6 +209,20 @@ def test_qlib_preserves_factors_and_delisted_instruments(snapshot, tmp_path):
     assert volume_factor.tolist() == pytest.approx([0.5, 1, 1])
     assert (builder.qlib_dir / "features/jp_topix/close.day.bin").is_file()
     assert builder._to_qdb_symbol("jp_216a0") == "216A0.JP"
+
+
+def test_jp_qlib_retains_cash_calendar_gap_without_market_bars(snapshot, tmp_path):
+    with duckdb.connect(str(snapshot)) as conn:
+        conn.execute("DELETE FROM research.daily_prices WHERE Date='2026-09-29'")
+    destination = tmp_path / "quantjp"
+    import_jquants_snapshot(snapshot, destination)
+    builder = QlibDataBuilder.for_market("JP", destination, tmp_path / "qlib")
+    report = builder.build_all()
+    assert report["calendar"] == 3
+    _, opens = builder._read_bin_file(
+        builder.qlib_dir / "features/jp_72030/open.day.bin"
+    )
+    assert len(opens) == 3 and pd.isna(opens[1])
 
 
 def test_publication_path_cannot_escape(tmp_path):

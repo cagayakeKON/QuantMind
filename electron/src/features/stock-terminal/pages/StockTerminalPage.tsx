@@ -13,6 +13,10 @@ import { OverviewTab } from '../components/OverviewTab';
 import { FinancialsTab, ValuationTab, ChipFlowTab, MarginTab, SentimentTab, HoldersTab } from '../components/tabs/P2Tabs';
 import { NewsTab } from '../components/tabs/NewsTab';
 import { L2FeatureCard } from '../components/L2FeatureCard';
+import { useAppSelector } from '../../../store';
+import { selectCurrentMarket } from '../../../store/slices/uiSlice';
+import { getMarketConfig } from '../../../config/marketConfig';
+import DailyEquityTerminal from './DailyEquityTerminal';
 
 type DetailTab = 'overview' | 'financials' | 'valuation' | 'chipflow' | 'margin' | 'sentiment' | 'holders' | 'news' | 'l2';
 
@@ -68,7 +72,7 @@ function weekKey(date: string): string {
   return d.toISOString().slice(0, 10);
 }
 
-export default function StockTerminalPage() {
+function StandardStockTerminalPage() {
   const [selected, setSelected] = useState<StockListItem | null>(null);
   const [profile, setProfile] = useState<StockProfile | null>(null);
   const [bars, setBars] = useState<KlineBar[]>([]);
@@ -484,4 +488,11 @@ export default function StockTerminalPage() {
       </div>
     </div>
   );
+}
+
+const TERMINAL_PAGES = {standard: StandardStockTerminalPage, daily_equity: DailyEquityTerminal};
+export default function StockTerminalPage() {
+  const market = useAppSelector(selectCurrentMarket);
+  const Page = TERMINAL_PAGES[getMarketConfig(market).stockTerminalUi || 'standard'];
+  return <Page />;
 }

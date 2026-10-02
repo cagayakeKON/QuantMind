@@ -11,17 +11,53 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from functools import lru_cache
 from threading import RLock
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, HTTPException, Query
 
+from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
 from backend.shared.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/stocks", tags=["Stocks"])
+
+
+_LOCAL_STOCK_PROVIDERS = LOCAL_MARKET_PROVIDERS
+
+
+@lru_cache(maxsize=32)
+def _local_stock_items(market: str, version: str, asof: date | None):
+    import importlib
+    from backend.shared.stock_utils import StockCodeUtil
+
+    provider = _LOCAL_STOCK_PROVIDERS[market]
+    hub = getattr(importlib.import_module(provider.module), provider.hub_class)(version)
+    frame = hub.fetch_stock_list(as_of=asof)
+    items = []
+    for row in frame.to_dict("records"):
+        symbol = StockCodeUtil.to_prefix(row["symbol"], market=market)
+        items.append(
+            {
+                "symbol": symbol,
+                "code": symbol,
+                "market": market,
+                "exchange": market,
+                "name": str(row.get("stock_name") or ""),
+                "name_en": str(row.get("name_en") or ""),
+                "board": str(row.get("exchange_name") or ""),
+                "currency": provider.currency,
+            }
+        )
+    return tuple(items)
+
+
+def _local_stocks(market, asof=None):
+    hub = _LOCAL_STOCK_PROVIDERS[market].open()
+    return list(_local_stock_items(market, str(hub.data_dir), asof))
 
 
 def _now_iso() -> str:
@@ -171,7 +207,39 @@ stock_index_store = StockIndexStore()
 async def search_stocks(
     q: str = Query(..., description="搜索关键词"),
     limit: int = Query(20, ge=1, le=200, description="最大返回数量"),
+    market: str = Query("CN", description="市场代码"),
+    asof: date | None = Query(None, description="历史标的快照日期"),
 ):
+    market = market.upper()
+    if market in _LOCAL_STOCK_PROVIDERS:
+        import asyncio
+        from backend.shared.stock_utils import StockCodeUtil
+
+        items = await asyncio.to_thread(_local_stocks, market, asof)
+        keyword = q.strip().casefold()
+        try:
+            canonical = StockCodeUtil.to_prefix(q, market=market).casefold()
+        except ValueError:
+            canonical = keyword
+        matches = [
+            item
+            for item in items
+            if keyword
+            and (
+                canonical in item["symbol"].casefold()
+                or keyword in (item["name"] + " " + item["name_en"]).casefold()
+            )
+        ]
+        results = sorted(
+            matches, key=lambda item: item["symbol"].casefold() != canonical
+        )[:limit]
+        return {
+            "query": q,
+            "results": results,
+            "total": len(results),
+            "timestamp": _now_iso(),
+            "source": "local_market_parquet",
+        }
     try:
         results = stock_index_store.search(keyword=q, limit=limit)
     except FileNotFoundError as exc:
@@ -278,6 +346,7 @@ def _convert_symbol(raw: str) -> tuple[str, str]:
 async def list_all_stocks(
     market: str = Query("A", description="市场代码：A/CN=全部A股, HK=港股, US=美股, CRYPTO=加密货币"),
     enrich: bool = Query(True, description="是否带最新交易日的核心字段：close/pe/pb/total_mv/float_mv/pct_change/turnover_rate/is_st"),
+    asof: date | None = Query(None, description="历史标的快照日期"),
 ):
     """返回全市场标的列表（来自 stock_daily_latest* 最新交易日）。
 
@@ -288,6 +357,17 @@ async def list_all_stocks(
     from sqlalchemy import text as sql_text
 
     market_key = (market or "A").strip().upper()
+    if market_key in _LOCAL_STOCK_PROVIDERS:
+        import asyncio
+
+        items = await asyncio.to_thread(_local_stocks, market_key, asof)
+        return {
+            "market": market_key,
+            "count": len(items),
+            "items": items,
+            "source": "local_market_parquet",
+            "asof": str(asof) if asof else None,
+        }
     table_name = _MARKET_TABLE_MAP.get(market_key, "stock_daily_latest")
     name_col = _MARKET_NAME_COL.get(market_key, "stock_name")
     is_cn = market_key in ("A", "CN")

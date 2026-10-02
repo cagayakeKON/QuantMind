@@ -245,7 +245,7 @@ export class TemplateEngine {
     }
 
     // 市场兼容性检查
-    const compatibility: Record<MarketType, Record<MarketType, number>> = {
+    const compatibility: Partial<Record<MarketType, Partial<Record<MarketType, number>>>> = {
       CN: { CN: 1.0, US: 0.3, HK: 0.5, CRYPTO: 0.1, FUTURES: 0.2, GLOBAL: 0.2 },
       US: { CN: 0.3, US: 1.0, HK: 0.6, CRYPTO: 0.2, FUTURES: 0.3, GLOBAL: 0.4 },
       HK: { CN: 0.5, US: 0.6, HK: 1.0, CRYPTO: 0.1, FUTURES: 0.2, GLOBAL: 0.3 },

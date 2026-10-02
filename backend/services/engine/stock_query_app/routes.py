@@ -4,6 +4,8 @@
 """
 
 import logging
+import asyncio
+from datetime import date
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -11,6 +13,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 
 from .services import StockQueryService, StockSearchService
+from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
 
@@ -182,9 +185,19 @@ async def get_all_stocks(
 
 
 @router.get("/stocks/{symbol}")
-async def get_stock_info(symbol: str):
+async def get_stock_info(symbol: str, market: str | None = Query(None), asof: date | None = Query(None)):
     """获取股票详细信息"""
     logger.info("Fetching stock info", extra={"symbol": symbol})
+
+    if str(market or "").upper() == "JP" or StockCodeUtil.is_jp_symbol(symbol):
+        from backend.services.engine.data_platform.local_stock_snapshot import local_stock_snapshot
+        try:
+            snapshot = await asyncio.to_thread(local_stock_snapshot, symbol, "JP", asof)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="No dated JP ordinary-stock snapshot")
+        return {"success": True, "data": snapshot, "source": snapshot["source"]}
 
     try:
         query_service = get_query_service()
@@ -215,9 +228,13 @@ async def get_stock_info(symbol: str):
 
 
 @router.get("/stocks/{symbol}/quote")
-async def get_stock_quote(symbol: str):
+async def get_stock_quote(symbol: str, market: str | None = Query(None), asof: date | None = Query(None)):
     """获取股票实时报价"""
     logger.info("Fetching stock quote", extra={"symbol": symbol})
+
+    if str(market or "").upper() == "JP" or StockCodeUtil.is_jp_symbol(symbol):
+        response = await get_stock_info(symbol, "JP", asof)
+        return response["data"]
 
     try:
         query_service = get_query_service()

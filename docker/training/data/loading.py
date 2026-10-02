@@ -84,6 +84,7 @@ _MARKET_PARQUET_FILES: dict[str, str] = {
 }
 # 各市场 6_ml_datasets 数据根目录（训练容器内环境变量，由编排器挂载设置）
 _MARKET_DATA_DIR_ENV: dict[str, str] = {
+    "JP": "QUANTJP_DATA_DIR",
     "CN": "QUANTDB_DATA_DIR",
     "HK": "QUANTHK_DATA_DIR",
     "US": "QUANTUS_DATA_DIR",
@@ -155,6 +156,8 @@ def load_data(
     range_end = pd.Timestamp(upper_bound) + pd.Timedelta(days=max(7, horizon + 3))
 
     direct_factor_source = str(factor_source or "").strip()
+    if market_upper == "JP" and direct_factor_source != "l1_factors":
+        raise ValueError("JP training requires the published l1_factors dataset")
     if direct_factor_source and market_upper in _MARKET_DATA_DIR_ENV:
         # Direct QuantDB mode: one factor source only, never materialise or merge snapshots.
         # 与 A 股一致：直接读该市场 6_ml_datasets 下的因子分区
@@ -165,6 +168,15 @@ def load_data(
             quantdb_dir or os.getenv(_MARKET_DATA_DIR_ENV[market_upper]) or None,
             market=market_upper,
         )
+        if market_upper == "JP":
+            from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+            from backend.services.engine.data_platform.jp_labels import last_label_session
+            jp_sessions = QuantJPDataHub(reader.data_dir).fetch_calendar().trade_date.tolist()
+            last_exit = last_label_session(upper_bound, jp_sessions, horizon, _EXECUTION_LAG_DAYS)
+            if last_exit is not None:
+                # Calendar-day padding is too short across Japanese holidays
+                # or for H=30. Read through the exact last exit session.
+                range_end = max(range_end, last_exit)
         _status = reader.describe(direct_factor_source)
         # 训练窗口的钳制基准是编排器 pin 的 factor_coverage（中心数据口径），
         # 不是本机/远端数据的 min/max。远端数据常由魔搭数据集独立初始化，
@@ -239,6 +251,13 @@ def load_data(
             start=range_start.date(),
             end=range_end.date(),
         )
+        if market_upper == "JP":
+            if pool_symbols:
+                from backend.shared.stock_utils import StockCodeUtil
+                wanted = {StockCodeUtil.to_prefix(s, market="JP") for s in pool_symbols}
+                df = df[df["symbol"].isin(wanted)].copy()
+                if df.empty:
+                    raise ValueError("JP training pool has no observations in the requested window")
         logger.info(
             "Direct QuantDB factor source %s: %d rows, %s to %s",
             direct_factor_source,
@@ -515,7 +534,7 @@ def load_data(
             )
 
     # 如果仍缺 mom_ret_1d，尝试从 pct_change 或 close 构建
-    if "mom_ret_1d" not in df.columns:
+    if "mom_ret_1d" not in df.columns and market_upper != "JP":
         if "pct_change" in df.columns:
             df["mom_ret_1d"] = pd.to_numeric(df["pct_change"], errors="coerce") / 100.0
             logger.info("Built mom_ret_1d from pct_change column")
@@ -555,7 +574,11 @@ def load_data(
 
     df = df.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
     _mom_col = f"mom_ret_{_horizon}d"
-    if direct_factor_source:
+    if market_upper == "JP":
+        from backend.services.engine.data_platform.jp_labels import forward_open_labels
+        df["label"] = forward_open_labels(df, jp_sessions, _horizon, _EXECUTION_LAG_DAYS)
+        df = df[(df["volume"] > 0) & (df["close"] > 0)].copy()
+    elif direct_factor_source:
         # Raw factor sources carry close, so labels are always true forward returns.
         _lag = _EXECUTION_LAG_DAYS
         execution_close = df.groupby("symbol")["close"].shift(-_lag)
@@ -577,7 +600,7 @@ def load_data(
     logger.info(
         "Label built with target_horizon_days=%s (%s)",
         _horizon,
-        "direct close" if direct_factor_source else _mom_col if _mom_col in df.columns else "rolling",
+        "JP exact cash-session open" if market_upper == "JP" else "direct close" if direct_factor_source else _mom_col if _mom_col in df.columns else "rolling",
     )
 
     valid_count_before = len(df)

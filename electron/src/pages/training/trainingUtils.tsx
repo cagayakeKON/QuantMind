@@ -137,7 +137,7 @@ export interface TrainingContext {
   commissionRate: number;
   slippage: number;
   dealPrice: DealPrice;
-  market?: 'CN' | 'US' | 'HK' | 'CRYPTO' | 'FUTURES';
+  market?: 'CN' | 'JP' | 'US' | 'HK' | 'CRYPTO' | 'FUTURES';
   industry_as_feature?: boolean;
 }
 
@@ -735,7 +735,7 @@ export const restoreRange = (range: [string, string] | undefined, fallback: [Day
   return [start, end];
 };
 
-const CONFIG_MARKETS: NonNullable<TrainingContext['market']>[] = ['CN', 'US', 'HK', 'CRYPTO', 'FUTURES'];
+const CONFIG_MARKETS: NonNullable<TrainingContext['market']>[] = ['CN', 'JP', 'US', 'HK', 'CRYPTO', 'FUTURES'];
 
 const isRecord = (value: unknown): value is Record<string, unknown> => (
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -933,14 +933,20 @@ export const parseSuggestedTimePeriods = (
   return { train, val, test };
 };
 
-export const buildLabelFormula = (target: TrainingTarget) => {
+export const buildLabelFormula = (target: TrainingTarget, market?: string) => {
+  if (market === 'JP') {
+    const raw = `adjusted_open(T+${1 + target.horizonDays}) / adjusted_open(T+1) - 1; JP cash sessions; price-only`;
+    return raw + (target.mode === 'classification' ? '; binary(return>0)' : '; daily cross-sectional rank(pct=True)-0.5');
+  }
   if (target.mode === 'classification') {
     return `label = 1[ future_return(T, T+${target.horizonDays}) > 0 ]`;
   }
   return `label = future_return(T, T+${target.horizonDays}) = close(T+${target.horizonDays}) / close(T) - 1`;
 };
 
-export const buildEffectiveTradeDate = (target: TrainingTarget, referenceDate: Dayjs) => {
+export const buildEffectiveTradeDate = (target: TrainingTarget, referenceDate: Dayjs, market?: string) => {
+  // JP holidays must be resolved against the published cash calendar by the backend.
+  if (market === 'JP') return '';
   return referenceDate.add(target.horizonDays, 'day').format('YYYY-MM-DD');
 };
 
@@ -1075,8 +1081,8 @@ export const buildTrainingRequest = (
   poolId?: string | null,
 ): TrainingRequestPayload => {
   const finalFeatures = Array.from(new Set(selectedFeatures));
-  const labelFormula = buildLabelFormula(target);
-  const effectiveTradeDate = buildEffectiveTradeDate(target, timePeriods.test[0]);
+  const labelFormula = buildLabelFormula(target, market || context.market);
+  const effectiveTradeDate = buildEffectiveTradeDate(target, timePeriods.test[0], market || context.market);
   const trainingWindow = `${formatRange(timePeriods.train)} | ${formatRange(timePeriods.val)} | ${formatRange(timePeriods.test)}`;
   const resolvedContext = market ? { ...context, market: market as TrainingContext['market'] } : context;
   return {

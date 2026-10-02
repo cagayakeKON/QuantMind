@@ -181,6 +181,14 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
             try:
                 from backend.services.engine.qlib_data_builder import ensure_qlib_cache
 
+                features = None
+                if market == "JP":
+                    from backend.services.engine.data_platform.jp_features import build_jp_features_in_process
+                    from backend.services.engine.data_platform.quantjp_hub import _resolve_quantjp_data_dir
+                    features = build_jp_features_in_process(
+                        _resolve_quantjp_data_dir(), timeout=max(1, int(budget - elapsed - 15))
+                    )
+
                 qlib_market = {
                     "US": "US",
                     "HK": "HK",
@@ -192,6 +200,8 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
                     "status": "ok",
                     "provider_uri": ensure_qlib_cache(market=qlib_market),
                 }
+                if features:
+                    result["qlib"]["features"] = features
             except Exception as exc:  # noqa: BLE001
                 logger.error("%s 定时同步 qlib 缓存失败: %s", market, exc, exc_info=True)
                 result["qlib"] = {"status": "error", "reason": str(exc)}

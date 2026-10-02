@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, Button, Card, DatePicker, Empty, Form, Input, InputNumber, Select, Space, Statistic, Table, Tag, message } from 'antd';
 import dayjs from 'dayjs';
-import { jpSimulationService, type JPFill, type JPOrder, type JPReadiness, type JPSession } from '../../../services/jpSimulationService';
+import { jpSimulationService, selectJPSession, selectedJPSession, type JPFill, type JPOrder, type JPReadiness, type JPSession } from '../../../services/jpSimulationService';
 import { normalizeStockCode } from '../../../utils/portfolioUtils';
+import { authService } from '../../../features/auth/services/authService';
 
 const yen = (value: string | number) => new Intl.NumberFormat('ja-JP', {
   style: 'currency', currency: 'JPY', currencyDisplay: 'code', maximumFractionDigits: 1,
@@ -13,6 +14,9 @@ const errorText = (error: unknown) => {
 };
 
 export default function JPSimulationPage() {
+  const user = authService.getStoredUser() as {id?: string; user_id?: string; tenant_id?: string} | null;
+  const userId = String(user?.user_id || user?.id || '');
+  const tenantId = user?.tenant_id || localStorage.getItem('tenant_id') || 'default';
   const [sessions, setSessions] = useState<JPSession[]>([]);
   const [current, setCurrent] = useState<JPSession | null>(null);
   const [ready, setReady] = useState<JPReadiness | null>(null);
@@ -30,9 +34,14 @@ export default function JPSimulationPage() {
       const [readiness, accounts] = await Promise.all([jpSimulationService.readiness(), jpSimulationService.list()]);
       if (request !== generation.current) return;
       setReady(readiness); setSessions(accounts); setError('');
-      setCurrent(accounts.find(s => s.session_id === selectedId.current) || accounts[0] || null);
+      setCurrent(accounts.find(s => s.session_id === selectedId.current) || selectedJPSession(accounts, userId, tenantId));
     } catch (failure) { if (request === generation.current) setError(errorText(failure)); }
-  }, []);
+  }, [userId, tenantId]);
+  useEffect(() => {
+    if (ready?.latest_date && !createForm.getFieldValue('start')) {
+      createForm.setFieldsValue({start: dayjs(ready.latest_date)});
+    }
+  }, [ready, createForm]);
   useEffect(() => { void reload(); return () => { generation.current++; }; }, [reload]);
   const apply = async (action: () => Promise<JPSession>) => {
     setBusy(true); setError('');
@@ -41,6 +50,7 @@ export default function JPSimulationPage() {
       const result = await action();
       if (request !== generation.current) return;
       setCurrent(result);
+      selectJPSession(result.session_id, userId, tenantId);
       setSessions([result, ...sessions.filter(s => s.session_id !== result.session_id)]);
     } catch (failure) { if (request === generation.current) setError(errorText(failure)); }
     finally { if (request === generation.current) setBusy(false); }
@@ -77,9 +87,9 @@ export default function JPSimulationPage() {
       {!ready.historical_units_configured && <Tag color="warning">2018-10-01 前成交需补齐历史交易单位</Tag>}</Space>}
     <Card title="选择或创建账户" size="small">
       <Space wrap className="mb-4"><Select style={{width: 300}} placeholder="选择账户" value={current?.session_id}
-        disabled={busy} onChange={id => setCurrent(sessions.find(s => s.session_id === id) || null)}
+        disabled={busy} onChange={id => { setCurrent(sessions.find(s => s.session_id === id) || null); selectJPSession(id, userId, tenantId); }}
         options={sessions.map(s => ({value: s.session_id, label: `${s.name} · ${s.mode === 'daily' ? '日常' : '历史回放'} · JPY`}))} /></Space>
-      <Form form={createForm} layout="inline" initialValues={{name: '日股模拟账户', cash: 1000000, start: dayjs('2026-09-25')}}>
+      <Form form={createForm} layout="inline" initialValues={{name: '日股模拟账户', cash: 1000000}}>
         <Form.Item><Select value={mode} onChange={setMode} style={{width: 130}} disabled={busy}
           options={[{value: 'replay', label: '历史回放'}, {value: 'daily', label: '日常模拟'}]} /></Form.Item>
         <Form.Item name="name" rules={[{required: true}]}><Input placeholder="账户名称" /></Form.Item>

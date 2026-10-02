@@ -199,6 +199,15 @@ class QuantDBFactorReader:
 
     def _files(self, source: str) -> list[Path]:
         root = self.source_path(source)
+        if self.market == "JP" and (self.data_dir / "manifest.json").is_file():
+            from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+
+            # JP publications guarantee one data.parquet per daily partition.
+            # Avoid thousands of per-directory glob/stat calls on Windows.
+            days = QuantJPDataHub(self.data_dir)._partition_dates(
+                FACTOR_SOURCE_DIRS[self.validate_source(source)]
+            )
+            return [root / f"dt={day}" / "data.parquet" for day in days]
         # 只统计已发布的 dt= 分区文件，排除 _stage 等非分区暂存目录，
         # 否则暂存 parquet 会被计入分区文件数，与实际可读数据不一致。
         return sorted(root.glob("dt=*/*.parquet")) if root.is_dir() else []
@@ -267,10 +276,26 @@ class QuantDBFactorReader:
             ) from exc
         return duckdb
 
-    def _relation(self, source: str) -> str:
+    def _relation(self, source: str, *, start=None, end=None) -> str:
         root = self.source_path(source)
         if not root.is_dir():
             raise QuantDBFactorError(f"QuantDB factor directory does not exist: {root}")
+        if self.market == "JP" and (self.data_dir / "manifest.json").is_file():
+            first = pd.Timestamp(start).strftime("%Y%m%d") if start else ""
+            last = pd.Timestamp(end).strftime("%Y%m%d") if end else "99999999"
+            files = [
+                file
+                for file in self._files(source)
+                if first <= file.parent.name[3:] <= last
+            ]
+            if not files:
+                raise QuantDBFactorError(
+                    "No JP factor partitions in the requested window"
+                )
+            paths = ",".join("'" + str(file).replace("'", "''") + "'" for file in files)
+            return (
+                f"read_parquet([{paths}], hive_partitioning=true, union_by_name=true)"
+            )
         # 只读取已发布分区 dt=YYYYMMDD/*.parquet（hive 分区）。若用 **/*.parquet 把
         # _stage 等暂存目录一并 glob，暂存文件 schema 与分区不一致会抛
         # "Hive partition mismatch"，导致整个因子源无法直读训练。
@@ -335,7 +360,13 @@ class QuantDBFactorReader:
             )
 
         # 快路径：min/max 先走分区目录名（<0.2s），避免 SELECT 全表扫描 50s+
-        part_min, part_max = self._partition_date_range(root)
+        if self.market == "JP" and (self.data_dir / "manifest.json").is_file():
+            part_min, part_max = [
+                str(pd.Timestamp(file.parent.name[3:]).date())
+                for file in (files[0], files[-1])
+            ]
+        else:
+            part_min, part_max = self._partition_date_range(root)
 
         duckdb = self._duckdb()
         con = duckdb.connect(config={"memory_limit": "2GB", "threads": "2"})
@@ -492,7 +523,7 @@ class QuantDBFactorReader:
                 f"{source} is missing mapped fields: {', '.join(missing[:10])}"
             )
 
-        factor_relation = self._relation(source)
+        factor_relation = self._relation(source, start=start, end=end)
         factor_date = self._qualified_date_expression(status.columns, "f")
         selected = [
             'f."symbol"',
@@ -547,7 +578,9 @@ class QuantDBFactorReader:
                 f"SELECT {', '.join(selected)} FROM {from_clause} "
                 f"WHERE {date_expr} BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)"
             )
-            logger.info("QuantDB DuckDB scanning %s from %s to %s", source, start_s, end_s)
+            logger.info(
+                "QuantDB DuckDB scanning %s from %s to %s", source, start_s, end_s
+            )
             frame = con.execute(sql, [start_s, end_s]).fetchdf()
             logger.info("QuantDB DuckDB returned %d rows for %s", len(frame), source)
         finally:
@@ -631,6 +664,10 @@ class QuantDBFactorReader:
         frame: pd.DataFrame, *, horizon: int, signal_lag_days: int = 1
     ) -> pd.DataFrame:
         """Build labels from the source close column without persisting a derived dataset."""
+        if "symbol" in frame and frame["symbol"].map(StockCodeUtil.is_jp_symbol).any():
+            raise QuantDBFactorError(
+                "JP labels require the exact cash calendar and forward_open_labels"
+            )
         if "close" not in frame.columns:
             raise QuantDBFactorError(
                 "close is required to construct direct-training labels"

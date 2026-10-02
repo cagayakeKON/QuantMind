@@ -11,6 +11,7 @@ import TradingHistory from './tabs/TradingHistory';
 import SettingsCenter from './tabs/SettingsCenter';
 import ReplayPage from './tabs/ReplayPage';
 import JPSimulationPage from './tabs/JPSimulationPage';
+import { getMarketConfig } from '../../config/marketConfig';
 import type { RealTradingStatus, AccountInfo, PreflightCheckResponse, PreflightCheckItem } from '../../services/realTradingService';
 import { authService } from '../../features/auth/services/authService';
 import type { StrategyFile } from '../../types/backtest/strategy';
@@ -72,7 +73,7 @@ const getErrorHttpStatus = (err: unknown): number | undefined => {
 
 // 实盘通道文案已随模拟专用化移除（恢复见 git 历史）。
 
-const RealTradingPage: React.FC = () => {
+const StandardTradingPage: React.FC = () => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     const [activeTab, setActiveTab] = useState<ActiveTab>('manage');
 
@@ -833,6 +834,14 @@ const RealTradingPage: React.FC = () => {
             />
         </div>
     );
+};
+
+const SIMULATION_PAGES = { standard: StandardTradingPage, jp_cash: JPSimulationPage };
+
+const RealTradingPage: React.FC = () => {
+    const market = useAppSelector(selectCurrentMarket);
+    const Page = SIMULATION_PAGES[getMarketConfig(market).simulationUi ?? 'standard'];
+    return <Page />;
 };
 
 export default RealTradingPage;

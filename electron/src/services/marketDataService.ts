@@ -1,5 +1,7 @@
 // 市场数据服务API接口 - 增强版股票搜索
 import axios from 'axios';
+import store from '../store';
+import { normalizeStockCode } from '../utils/portfolioUtils';
 
 // 基础配置 - 使用统一端口配置
 import { SERVICE_URLS } from '../config/services';
@@ -149,6 +151,7 @@ class MarketDataService {
       const response = await apiClient.get('/api/v1/stocks/search', {
         params: {
           q: keyword.trim(),
+          market: store.getState().ui.currentMarket,
           keyword: keyword.trim(),
           limit: Math.min(Math.max(limit, 1), 100), // 限制在1-100之间
           offset: 0,
@@ -232,7 +235,9 @@ class MarketDataService {
     try {
       const normalized = this.normalizeStockSymbol(code);
       const normalizedCode = encodeURIComponent(normalized);
-      const response = await apiClient.get(`/api/v1/stocks/${normalizedCode}`);
+      const response = await apiClient.get(`/api/v1/stocks/${normalizedCode}`, {
+        params: {market: store.getState().ui.currentMarket},
+      });
       const raw = response.data || {};
       const payload = (raw?.data && typeof raw.data === 'object') ? raw.data : raw;
       const name = String(
@@ -520,6 +525,7 @@ class MarketDataService {
 
   // 自动补全/规范化股票代码格式 (转换为 600000.SH 格式)
   normalizeStockSymbol(input: string): string {
+    if (store.getState().ui.currentMarket === 'JP') return normalizeStockCode(input, 'JP');
     const cleaned = input.trim().toUpperCase();
 
     // 1. 如果包含点且格式正确 (000001.SZ), 直接返回

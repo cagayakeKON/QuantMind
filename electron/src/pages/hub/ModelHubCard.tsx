@@ -76,7 +76,7 @@ export const ModelHubCard: React.FC<ModelHubCardProps> = ({
     }
   };
   const getMarketColor: Record<string, string> = {
-    CN: 'blue', HK: 'volcano', US: 'purple', CRYPTO: 'magenta', FUTURES: 'gold', CUSTOM: 'default',
+    CN: 'blue', JP: 'red', HK: 'volcano', US: 'purple', CRYPTO: 'magenta', FUTURES: 'gold', CUSTOM: 'default',
   };
 
   return (
