@@ -214,6 +214,7 @@ def run_cash_backtest(
         if strategy_config is not None
         else None
     )
+    position_history, position_info = {}, {}
     for day_index, day in enumerate(sessions):
         daily_scores = []
         if metric is None:
@@ -273,6 +274,22 @@ def run_cash_backtest(
         )
         bars, master = data.day(day, needed, list(account.state["positions"]))
         result = account.step(day, bars, master, orders)
+        if request.strategy_type != "jp_cash_topk":
+            from .analysis_data import cash_position_snapshot
+
+            position_history[pd.Timestamp(day)] = cash_position_snapshot(account.state)
+            position_info[str(day)] = {
+                symbol: {
+                    key: value
+                    for key, value in {
+                        "name": master[symbol].get("stock_name"),
+                        "industry": master[symbol].get("industry_name"),
+                    }.items()
+                    if pd.notna(value)
+                }
+                for symbol, position in account.state["positions"].items()
+                if position["lots"]
+            }
         if strategy_runner is not None:
             filled = {
                 order["order_id"]: order["fill"]
@@ -385,12 +402,17 @@ def run_cash_backtest(
     # old cash entry's report unchanged until its sessions are migrated.
     common_drawdowns = None
     trades = account.state["fills"]
+    positions = [
+        {"symbol": symbol, **position}
+        for symbol, position in account.state["positions"].items()
+    ]
     if request.strategy_type != "jp_cash_topk":
         from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
-        from .analysis_data import public_trades
+        from .analysis_data import public_positions, public_trades
 
         common_drawdowns = RiskAnalyzer._build_drawdown_curve(equity_curve)
         trades = public_trades(trades)
+        positions = public_positions(position_history)
     report = QlibBacktestResult(
         backtest_id=request.backtest_id or uuid4().hex,
         user_id=request.user_id,
@@ -418,15 +440,22 @@ def run_cash_backtest(
             for row, value in zip(equity_curve, drawdowns, strict=True)
         ],
         trades=trades,
-        positions=[
-            {"symbol": symbol, **position}
-            for symbol, position in account.state["positions"].items()
-        ],
+        positions=positions,
         advanced_stats={
             "orders": account.state["orders"],
             "settled_cash": account.state["settled_cash"],
             "cash_funds": account.state["cash_funds"],
             "price_only": True,
+            **(
+                {
+                    "position_info": {
+                        "data_version": execution_version,
+                        "by_date": position_info,
+                    }
+                }
+                if request.strategy_type != "jp_cash_topk"
+                else {}
+            ),
         },
         execution_time=time.monotonic() - started,
     )

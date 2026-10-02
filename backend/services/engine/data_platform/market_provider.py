@@ -13,6 +13,7 @@ class LocalMarketProvider:
     benchmark: str
     daily_partition_dir: str = "1_kline_data/daily_unadjusted"
     benchmark_price_loader: str | None = None
+    position_info_loader: str | None = None
 
     def open(self):
         cls = getattr(importlib.import_module(self.module), self.hub_class)
@@ -27,5 +28,6 @@ LOCAL_MARKET_PROVIDERS = {
         "quantjp_parquet",
         "TOPIX",
         benchmark_price_loader="backend.services.simulation.jp.analysis_data.read_benchmark_prices",
+        position_info_loader="backend.services.simulation.jp.analysis_data.read_position_info",
     ),
 }

@@ -8,17 +8,11 @@ import pandas as pd
 from backend.shared.stock_utils import StockCodeUtil
 
 
-def read_benchmark_prices(result, benchmark_id, start_date, end_date):
-    """Expose saved TOPIX levels to the shared price-return calculation.
-
-    benchmark_value is initial capital times the TOPIX price-index ratio,
-    rather than a raw closing price. Its constant scale preserves pct_change.
-    """
+def recorded_version(result):
+    """Validate one recorded publication without reading CURRENT or global data."""
     config = result.config or {}
     if (result.market or config.get("market")) != "JP":
-        raise ValueError("TOPIX analysis requires a Japanese-market backtest")
-    if str(benchmark_id).upper() != "TOPIX" or result.benchmark_symbol != "TOPIX":
-        raise ValueError("Requested benchmark does not match the recorded JP result")
+        raise ValueError("Analysis requires a Japanese-market backtest")
     versions = {
         value
         for value in (
@@ -32,6 +26,18 @@ def read_benchmark_prices(result, benchmark_id, start_date, end_date):
         raise ValueError("Recorded JP benchmark data version is unavailable")
     if len(versions) != 1:
         raise ValueError("Recorded JP benchmark data versions do not match")
+    return versions.pop()
+
+
+def read_benchmark_prices(result, benchmark_id, start_date, end_date):
+    """Expose saved TOPIX levels to the shared price-return calculation.
+
+    benchmark_value is initial capital times the TOPIX price-index ratio,
+    rather than a raw closing price. Its constant scale preserves pct_change.
+    """
+    recorded_version(result)
+    if str(benchmark_id).upper() != "TOPIX" or result.benchmark_symbol != "TOPIX":
+        raise ValueError("Requested benchmark does not match the recorded JP result")
     frame = pd.DataFrame(result.equity_curve or [])
     if frame.empty or not {"date", "benchmark_value"}.issubset(frame.columns):
         raise ValueError("Recorded JP benchmark prices are unavailable")
@@ -48,6 +54,39 @@ def read_benchmark_prices(result, benchmark_id, start_date, end_date):
     return frame.set_index(["instrument", "date"])[["$close"]].rename_axis(
         index={"date": "datetime"}
     )
+
+
+def read_position_info(result, position):
+    """The standard holdings analysis reads names/sectors from the saved report."""
+    version = recorded_version(result)
+    saved = (result.advanced_stats or {}).get("position_info") or {}
+    if saved.get("data_version") != version:
+        raise ValueError("Recorded JP position information version is unavailable")
+    symbol = StockCodeUtil.to_prefix(position["symbol"], market="JP")
+    info = saved.get("by_date", {}).get(position.get("date"), {}).get(symbol)
+    if info is None:
+        raise ValueError("Recorded JP position information is unavailable")
+    return info
+
+
+def cash_position_snapshot(state):
+    """A real Qlib Position uses actual raw shares, marks and cash from the ledger."""
+    from qlib.backtest.position import Position
+    from .strategy_snapshot import executed_account_snapshot
+
+    snapshot = executed_account_snapshot(state)
+    return Position(cash=snapshot["cash"], position_dict=snapshot["positions"])
+
+
+def public_positions(history):
+    """Use the public position extraction/weight algorithm; normalize at the boundary."""
+    from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
+
+    positions = RiskAnalyzer._build_positions_list({"1day": (None, history)})
+    return [
+        {**row, "symbol": StockCodeUtil.to_prefix(row["symbol"], market="JP")}
+        for row in positions
+    ]
 
 
 def public_trades(fills):
@@ -110,9 +149,25 @@ def public_report_metrics(result, request):
     advanced = RiskAnalyzer._calculate_advanced_trade_stats(
         result.trades, daily_returns
     )
+    from backend.services.engine.qlib_app.services.order_generation_service import (
+        OrderGenerationService,
+    )
+
+    last_date = max(
+        (row["date"] for row in result.positions or [] if "date" in row), default=None
+    )
+    targets = [row for row in result.positions or [] if row.get("date") == last_date]
+    rebalance = (
+        OrderGenerationService.generate_rebalance_instructions(
+            target_positions=targets, total_assets=float(equity["value"].iloc[-1])
+        )
+        if targets
+        else None
+    )
     return {
         **performance,
         **risk,
         **trade,
+        "rebalance_suggestions": rebalance,
         "advanced_stats": {**result.advanced_stats, **advanced},
     }

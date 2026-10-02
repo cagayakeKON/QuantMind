@@ -5,6 +5,8 @@
 """
 
 import logging
+from functools import partial
+from importlib import import_module
 from typing import Any, Dict, List
 
 from backend.services.engine.qlib_app.schemas.analysis import (
@@ -15,6 +17,7 @@ from backend.services.engine.qlib_app.schemas.analysis import (
 from backend.services.engine.qlib_app.services.backtest_persistence import (
     BacktestPersistence,
 )
+from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
 from backend.shared.market_data.service import get_stock_info
 from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
 
@@ -41,7 +44,18 @@ class BacktestPositionService:
 
             # 优先使用提取的 positions 字段
             if hasattr(result, "positions") and result.positions:
-                holdings = await self._parse_positions(result.positions)
+                market = getattr(result, "market", None) or (result.config or {}).get("market")
+                provider = LOCAL_MARKET_PROVIDERS.get(market)
+                if provider and provider.position_info_loader:
+                    module, function = provider.position_info_loader.rsplit(".", 1)
+                    info_loader = partial(
+                        getattr(import_module(module), function), result
+                    )
+                    holdings = await self._parse_positions(
+                        result.positions, info_loader=info_loader
+                    )
+                else:
+                    holdings = await self._parse_positions(result.positions)
 
             # 如果为空，尝试从 report 的最后一天推导（如果可能）
             if not holdings and result.config:
@@ -72,7 +86,9 @@ class BacktestPositionService:
             task_logger.exception("analyze_failed", "持仓分析失败", backtest_id=backtest_id, tenant_id=tenant_id, error=str(exc))
             raise
 
-    async def _parse_positions(self, raw_positions: list[dict[str, Any]]) -> list[PositionSummary]:
+    async def _parse_positions(
+        self, raw_positions: list[dict[str, Any]], *, info_loader=None
+    ) -> list[PositionSummary]:
         """解析持仓列表并补充股票信息"""
         holdings = []
         sum(float(p.get("weight", 0)) for p in raw_positions)
@@ -82,7 +98,9 @@ class BacktestPositionService:
             weight = float(p.get("weight", 0))
 
             # 获取股票信息
-            stock_info = await get_stock_info(symbol)
+            stock_info = (
+                info_loader(p) if info_loader is not None else await get_stock_info(symbol)
+            )
 
             holdings.append(
                 PositionSummary(
