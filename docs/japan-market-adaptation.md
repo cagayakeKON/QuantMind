@@ -149,6 +149,21 @@ Remove-Item Env:QM_JP_TEST_PG
 
 前端提交前运行 `npm run typecheck`。
 
+2026-10-02 本机正式链路验证：通过 `POST /api/v1/models/run-training` 提交 JP LightGBM
+任务，使用已发布目录中的 `KMID/ROC5/VMA5`，完成训练并通过既有质量门槛注册为
+`ready`。使用该模型的真实 test 分段预测，模拟账户先预览、保存委托，再按
+2026-09-28 原始开盘价成交；独立提交的 Celery 回测产生相同的 5 笔成交，价格和
+数量逐笔一致，PG 重新读取后保持一致。验证模型仅用于链路检查。
+
+标准训练器的版本凭证位于 `factor_coverage.jp_data_version`；模型执行桥接同时支持
+该字段和既有顶层 `jp_data_version`。两者冲突或均缺失时阻断，不猜测训练时的数据版本。
+真实 parquet 的 `datetime.date` 交易日与标签计算的 pandas Timestamp 在日股训练
+分段边界处统一类型，保证 embargo 校验可执行。
+
+浏览器兼容层使用显式标识区分原生 Electron；认证服务随运行时服务器设置解析
+`/api/v1`，避免丢失或重复前缀。本机已验证后端直连和 Vite 代理登录均返回 200，
+前端 20 项相关检查及类型检查通过。
+
 ## 后续适配
 
 1. 补齐 2016～2018 历史单位和权利/退市事件处理，开放完整历史严格模拟。
