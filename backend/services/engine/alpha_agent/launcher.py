@@ -99,6 +99,7 @@ class AlphaAgentLauncher:
         direction: str | None = None,
         data_source: str | None = None,
         llm_overrides: dict[str, str] | None = None,
+        research_config: dict | None = None,
     ) -> str:
         """Start a factor evolution task. Returns task_id.
 
@@ -126,7 +127,7 @@ class AlphaAgentLauncher:
                 provider_uri = os.getenv("QLIB_PROVIDER_URI", "/data/qlib/cn_data")
 
         # Override provider URI based on data_source
-        if data_source:
+        if data_source and research_config is None:
             ds = data_source.lower().strip()
             if ds == "parquet":
                 from backend.services.engine.rd_agent.rd_loop_wrapper import RDLoopWrapper
@@ -149,6 +150,7 @@ class AlphaAgentLauncher:
                 loop_n=loop_n,
                 seed=seed_path,
                 provider_uri=provider_uri,
+                research_config=research_config,
                 direction=direction or "",
                 llm_overrides=llm_overrides,
             )
@@ -330,6 +332,7 @@ class AlphaAgentLauncher:
         task_log_dir: Path,
         provider_uri: str,
         llm_overrides: dict[str, str] | None = None,
+        research_config: dict | None = None,
     ) -> dict[str, Any]:
         """构建 RD-Agent 子进程环境变量。
 
@@ -383,6 +386,12 @@ class AlphaAgentLauncher:
             adapter = get_adapter(task.market)
             adapter_env = adapter.get_env_overrides()
             env.update(adapter_env)
+            research = research_config or adapter.get_research_config(
+                task.universe, user_id=task.user_id
+            )
+            if research is not None:
+                env["QUANTMIND_RD_EXPERIMENT"] = json.dumps(research)
+                env["QLIB_PROVIDER_URI"] = research["data"]["provider_uri"]
         except Exception as e:
             logger.warning("Failed to get market adapter env: %s", e)
 
@@ -416,6 +425,7 @@ class AlphaAgentLauncher:
         provider_uri: str,
         direction: str = "",
         llm_overrides: dict[str, str] | None = None,
+        research_config: dict | None = None,
     ) -> None:
         task.status = TaskStatus.RUNNING
         task.phase = "starting"
@@ -430,6 +440,7 @@ class AlphaAgentLauncher:
             task=task,
             task_log_dir=task_log_dir,
             provider_uri=provider_uri,
+            research_config=research_config,
             llm_overrides=llm_overrides,
         )
 

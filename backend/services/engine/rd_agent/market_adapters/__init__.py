@@ -48,7 +48,7 @@ def _crypto_enabled() -> bool:
 
 
 # 导入适配器以触发注册（crypto 按开关注册）
-from . import a_share, futures, hong_kong, us_stock  # noqa: F401, E402
+from . import a_share, futures, hong_kong, japan, us_stock  # noqa: F401, E402
 
 if _crypto_enabled():
     from . import crypto  # noqa: F401, E402

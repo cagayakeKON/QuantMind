@@ -460,11 +460,11 @@ export async function getFactorCategories(): Promise<
 }
 
 /** Available stock universes with constituent counts */
-export async function getUniverses(): Promise<
+export async function getUniverses(market?: string): Promise<
   ApiResponse<{ universes: UniverseInfo[] }>
 > {
   try {
-    const res = await apiClient.get(`/alpha-agent/universes`);
+    const res = await apiClient.get(`/alpha-agent/universes`, market ? { params: { market } } : undefined);
     const raw = res.data?.data?.universes ?? {};
     const universes: UniverseInfo[] = Object.entries(raw).map(
       ([id, info]: [string, any]) => ({
@@ -478,6 +478,7 @@ export async function getUniverses(): Promise<
     return makeOk({ universes });
   } catch {
     // Fall back to the static label list so the selector still works offline
+    if (market === 'japan') return makeOk({ universes: [{ id: 'all', name: '全市场', indexSymbol: null, stockCount: 0 }] });
     const universes: UniverseInfo[] = (
       Object.keys(UNIVERSE_LABELS) as UniverseId[]
     ).map((id) => ({

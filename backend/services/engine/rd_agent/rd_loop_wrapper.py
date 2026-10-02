@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import pickle
@@ -95,9 +96,21 @@ class RDLoopWrapper:
             "LOG_TRACE_PATH": task_log_dir,
             "PYTHONPATH": os.getenv("PYTHONPATH") or "/app",
         }
+        research = self.adapter.get_research_config("all")
+        if research is not None:
+            if env.get("QUANTMIND_RD_EXPERIMENT"):
+                research = json.loads(env["QUANTMIND_RD_EXPERIMENT"])
+            else:
+                research = self.adapter.get_research_config(
+                    env.get("QLIB_FACTOR_UNIVERSE", "all")
+                )
+            env["QUANTMIND_RD_EXPERIMENT"] = json.dumps(research)
+            env["QLIB_PROVIDER_URI"] = research["data"]["provider_uri"]
         # 设置数据文件路径环境变量
         data_file = "/app/alphaagent/scenarios/qlib/experiment/factor_data_template/daily_pv_all.h5"
-        if os.path.exists(data_file):
+        if research is not None:
+            env["FACTOR_DATA_PATH"] = research["data"]["extra"]["rd_data_files"]["all"]
+        elif os.path.exists(data_file):
             env["FACTOR_DATA_PATH"] = data_file
         # Ensure critical LLM settings are present
         if not env.get("OPENAI_BASE_URL"):
@@ -137,6 +150,9 @@ class RDLoopWrapper:
             "All factor descriptions MUST be written in Chinese (中文). "
             "Hypothesis and reason should also be in Chinese.\n"
         )
+        context = self.adapter.get_data_config().extra.get("research_context")
+        if context:
+            suffix += f"\n\nMarket research context:\n{context}\n"
         direction = getattr(self, "_direction", "")
         if direction:
             suffix += (
@@ -311,6 +327,33 @@ class RDLoopWrapper:
         同时确保对应的 Qlib provider_uri 目录可用。
         """
         import shutil
+
+        files = self.adapter.get_data_config().extra.get("rd_data_files")
+        if files:
+            selected = None
+            if os.getenv("QUANTMIND_RD_EXPERIMENT"):
+                config = json.loads(os.environ["QUANTMIND_RD_EXPERIMENT"])
+                files = config["data"]["extra"]["rd_data_files"]
+                if isinstance(config["data"]["market"], list):
+                    selected = config["data"]["market"]
+            base = Path(task_log_dir or os.getcwd()) / "git_ignore_folder"
+            for source, folder in (
+                (files["all"], "factor_implementation_source_data"),
+                (files["debug"], "factor_implementation_source_data_debug"),
+            ):
+                if not Path(source).is_file():
+                    raise FileNotFoundError(f"Research data is not prepared: {source}")
+                target = base / folder / "daily_pv.h5"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if selected is not None:
+                    from .data_pipeline.research_reader import copy_research_hdf
+
+                    pool = selected[:50] if folder.endswith("_debug") else selected
+                    copy_research_hdf(files["all"], target, pool)
+                else:
+                    shutil.copy2(source, target)
+            self._base_features_path = None
+            return
 
         # 根据市场选择数据源
         market_data_map = {

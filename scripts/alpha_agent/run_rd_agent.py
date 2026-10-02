@@ -105,6 +105,7 @@ def compute_factor_ic(
     data_path: str,
     start: str | None = None,
     end: str | None = None,
+    work_dir: str | None = None,
 ) -> dict:
     """执行因子代码并计算 IC 指标
 
@@ -122,13 +123,16 @@ def compute_factor_ic(
     if not factor_code or not Path(data_path).exists():
         return {}
 
+    if work_dir:
+        Path(work_dir).mkdir(parents=True, exist_ok=True)
+
     # Create a temporary script that executes the factor code and computes IC
     script = f"""
 import pandas as pd
 import numpy as np
 import sys, os, tempfile, traceback
 
-os.chdir(tempfile.gettempdir())
+os.chdir({work_dir!r} if {work_dir!r} else tempfile.gettempdir())
 
 # 清理上一因子残留的结果文件，避免误读陈旧 result.h5
 for _f in list(os.listdir('.')):
@@ -296,7 +300,7 @@ except Exception as e:
 
         # Copy data file to /tmp for the script (factor code expects 'daily_pv.h5')
         import shutil
-        tmp_data = '/tmp/daily_pv.h5'
+        tmp_data = str(Path(work_dir) / 'daily_pv.h5') if work_dir else '/tmp/daily_pv.h5'
         if not os.path.exists(tmp_data):
             shutil.copy2(data_path, tmp_data)
         elif os.path.getmtime(data_path) > os.path.getmtime(tmp_data):
@@ -304,7 +308,7 @@ except Exception as e:
 
         result = subprocess.run(
             [sys.executable, script_path],
-            capture_output=True, text=True, timeout=120, cwd='/tmp'
+            capture_output=True, text=True, timeout=120, cwd=work_dir or '/tmp'
         )
 
         os.unlink(script_path)
@@ -437,6 +441,14 @@ def main():
                         "task_id": args.task_id,
                         "category": f.get("category", args.market),
                     }
+                    configured = os.getenv("QUANTMIND_RD_EXPERIMENT")
+                    if configured:
+                        research = json.loads(configured)
+                        metadata.update({
+                            "data_version": research["data"]["extra"].get("data_version"),
+                            "research_benchmark": research["benchmark"],
+                            "research_portfolio": "theoretical",
+                        })
                     if f.get("formulation"):
                         metadata["formulation"] = f["formulation"]
                     if f.get("description"):
@@ -448,8 +460,9 @@ def main():
                     ic_value = None
                     rank_ic = None
                     if Path(data_path).exists() and f.get("code"):
+                        work_dir = str(Path(log_dir) / "factor_metrics" / fid) if configured else None
                         metrics = await asyncio.to_thread(
-                            compute_factor_ic, f["code"], data_path, ic_start, ic_end
+                            compute_factor_ic, f["code"], data_path, ic_start, ic_end, work_dir
                         )
                         if metrics:
                             status = "completed"

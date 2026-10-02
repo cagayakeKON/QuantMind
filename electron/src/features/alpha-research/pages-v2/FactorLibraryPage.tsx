@@ -28,6 +28,7 @@ const MARKET_LABELS: Record<string, string> = {
   crypto: '加密货币',
   hong_kong: '港股',
   us_stock: '美股',
+  japan: '日股',
 };
 
 const MARKET_COLORS: Record<string, string> = {
@@ -35,6 +36,7 @@ const MARKET_COLORS: Record<string, string> = {
   crypto: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30',
   hong_kong: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
   us_stock: 'bg-green-500/15 text-green-400 border-green-500/30',
+  japan: 'bg-rose-500/15 text-rose-400 border-rose-500/30',
 };
 
 export const FactorLibraryPage: React.FC<{ onNavigate?: (page: string) => void }> = ({ onNavigate }) => {
@@ -54,10 +56,16 @@ export const FactorLibraryPage: React.FC<{ onNavigate?: (page: string) => void }
 
   useEffect(() => {
     alphaAgentService.listMarkets().then(setMarkets).catch(() => {});
-    getUniverses()
-      .then((res) => setUniverses(res.data?.universes ?? []))
-      .catch(() => {});
   }, []);
+
+  const universeMarket = marketFilter === 'japan' ? 'japan' : undefined;
+  useEffect(() => {
+    let active = true;
+    setUniverseFilter('all');
+    setUniverses([]);
+    getUniverses(universeMarket).then((res) => { if (active) setUniverses(res.data?.universes ?? []); });
+    return () => { active = false; };
+  }, [universeMarket]);
 
   useEffect(() => {
     loadFactors();

@@ -76,7 +76,7 @@ export interface TaskConfig {
   modelName?: string;
 
   // Mining market (multi-market support)
-  miningMarket?: 'a_share' | 'crypto' | 'hong_kong' | 'us_stock' | 'futures';
+  miningMarket?: 'a_share' | 'crypto' | 'hong_kong' | 'us_stock' | 'futures' | 'japan';
 
   // Stock universe for mining and backtesting
   universe?: UniverseId;

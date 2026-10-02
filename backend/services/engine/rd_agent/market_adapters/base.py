@@ -36,7 +36,7 @@ class DataConfig:
     # 交易日历
     calendar: str = "day"
     # 市场名称 (Qlib instruments)
-    market: str = "csi300"
+    market: str | list[str] = "csi300"
     # 额外参数
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -103,3 +103,9 @@ class MarketAdapter(ABC):
         config = self.get_data_config()
         import os
         return os.path.isdir(config.provider_uri)
+
+    def get_research_config(
+        self, universe: str, *, user_id: str | None = None, tenant_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """Optional explicit configuration for the common research runner."""
+        return None

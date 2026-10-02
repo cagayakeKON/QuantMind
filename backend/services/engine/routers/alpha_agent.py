@@ -263,6 +263,19 @@ async def start_evolution(
             ),
         )
 
+    try:
+        if "universe" not in request.query_params:
+            defaults = adapter.get_research_config("all")
+            if defaults is not None:
+                universe = defaults["data"]["market"]
+        research = adapter.get_research_config(
+            universe, user_id=auth_user_id, tenant_id=auth_tenant_id
+        )
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if research is not None and not adapter.is_data_ready():
+        raise HTTPException(status_code=412, detail="市场研究数据尚未准备完成")
+
     llm_config, llm_source = await _resolve_effective_llm_config(auth_user_id, auth_tenant_id)
     if llm_config is None:
         raise HTTPException(
@@ -311,6 +324,7 @@ async def start_evolution(
             direction=direction or None,
             data_source=data_source or None,
             llm_overrides=llm_config.llm_env_overrides(),
+            research_config=research,
         )
     except HardwareLockError as exc:
         raise HTTPException(status_code=412, detail=str(exc)) from exc
@@ -586,6 +600,17 @@ async def backtest_factor(
         }
 
     market = factor.get("market") or "a_share"
+    auth_user_id, auth_tenant_id = get_authenticated_identity(request)
+    selected_universe = universe or "csi300"
+    if "universe" not in request.query_params and _configured_research(market) is not None:
+        selected_universe = factor.get("universe") or "all"
+    try:
+        research = _configured_research(
+            market, selected_universe,
+            user_id=auth_user_id, tenant_id=auth_tenant_id,
+        )
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     await persistence.update_factor_metrics(factor_id, status="backtesting")
     _running_backtests.add(factor_id)
 
@@ -597,7 +622,8 @@ async def backtest_factor(
             data_source=data_source or "qlib_bin",
             start_date=start_date,
             end_date=end_date,
-            universe=universe or "csi300",
+            universe=selected_universe,
+            research_config=research,
         )
     )
 
@@ -776,20 +802,30 @@ async def get_factor_categories():
 
 
 @router.get("/universes")
-async def get_universes(request: Request):
+async def get_universes(request: Request, market: str = Query("a_share")):
     """返回可用股票池及股票数（内置指数 + 用户可见的全局自定义池）"""
     universes: dict[str, dict] = {}
+    configured = _configured_research(market)
+    pool_market = _MARKET_TO_QLIB.get(market, "CN") if configured is not None else "CN"
     try:
-        from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
-
-        hub = QuantDBDataHub.get_instance()
-        summary = hub.get_data_summary()
-        for code, meta in (summary.get("universes") or {}).items():
-            universes[code] = {
-                "count": meta.get("count", 0) if isinstance(meta, dict) else 0,
-                "indexSymbol": meta.get("indexSymbol") if isinstance(meta, dict) else None,
-                "is_system": True,
+        if configured is not None:
+            history = Path(configured["data"]["provider_uri"]) / "instruments/all.txt"
+            count = len(history.read_text().splitlines()) if history.is_file() else 0
+            universes["all"] = {
+                "name": "全市场", "count": count,
+                "indexSymbol": None, "is_system": True,
             }
+        else:
+            from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+
+            hub = QuantDBDataHub.get_instance()
+            summary = hub.get_data_summary()
+            for code, meta in (summary.get("universes") or {}).items():
+                universes[code] = {
+                    "count": meta.get("count", 0) if isinstance(meta, dict) else 0,
+                    "indexSymbol": meta.get("indexSymbol") if isinstance(meta, dict) else None,
+                    "is_system": True,
+                }
     except Exception as e:
         logger.warning("Failed to get builtin universes: %s", e)
 
@@ -810,7 +846,7 @@ async def get_universes(request: Request):
                     SELECT code, name, symbol_count, is_system
                       FROM qm_stock_pool
                      WHERE status <> 'archived'
-                       AND market = 'CN'
+                       AND market = :pool_market
                        AND (
                             scope = 'global'
                             OR (scope = 'tenant' AND tenant_id = :tenant_id)
@@ -819,7 +855,10 @@ async def get_universes(request: Request):
                      ORDER BY is_system DESC, code ASC
                     """
                         ),
-                        {"tenant_id": tenant_id, "user_id": user_id},
+                        {
+                            "tenant_id": tenant_id, "user_id": user_id,
+                            "pool_market": pool_market,
+                        },
                     )
                 )
                 .mappings()
@@ -885,7 +924,22 @@ _MARKET_TO_QLIB: dict[str, str] = {
     "us_stock": "US",
     "crypto": "CRYPTO",
     "futures": "FUTURES",
+    "japan": "JP",
 }
+
+
+def _configured_research(
+    market: str, universe: str = "all", *,
+    user_id: str | None = None, tenant_id: str | None = None,
+) -> dict | None:
+    from backend.services.engine.rd_agent.market_adapters import get_adapter
+
+    try:
+        adapter = get_adapter(market)
+    except ValueError:
+        return None
+    return adapter.get_research_config(universe, user_id=user_id, tenant_id=tenant_id)
+
 
 _QLIB_NATIVE_UNIVERSES = ("csi300", "csi500", "csi1000", "csi800")
 
@@ -1019,13 +1073,19 @@ def _resolve_instruments_for_universe(
     return D.instruments(market="all")
 
 
-def _default_backtest_window(market: str = "a_share") -> tuple[str, str]:
+def _default_backtest_window(
+    market: str = "a_share", research_config: dict | None = None
+) -> tuple[str, str]:
     """默认回测窗口：近一年（end=数据最新交易日，start=end 往前一年）。"""
     import pandas as pd
 
     end_ts = None
     try:
-        if market == "a_share":
+        configured = research_config or _configured_research(market)
+        if configured is not None:
+            calendar = Path(configured["data"]["provider_uri"]) / "calendars/day.txt"
+            end_ts = pd.Timestamp(calendar.read_text().splitlines()[-1])
+        elif market == "a_share":
             from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
 
             cal = QuantDBDataHub.get_instance().fetch_calendar()
@@ -1049,6 +1109,7 @@ async def _run_factor_backtest(
     start_date: str | None = None,
     end_date: str | None = None,
     universe: str | None = "csi300",
+    research_config: dict | None = None,
 ) -> None:
     """统一回测入口（多市场 + 数据源可选）。
 
@@ -1057,7 +1118,7 @@ async def _run_factor_backtest(
         data_source: 'qlib_bin' (默认) | 'h5'
     """
     market_upper = _MARKET_TO_QLIB.get(market, "CN")
-    _default_start, _default_end = _default_backtest_window(market)
+    _default_start, _default_end = _default_backtest_window(market, research_config)
     end = end_date or _default_end
     start = start_date or _default_start
 
@@ -1068,7 +1129,7 @@ async def _run_factor_backtest(
 
         # H5 路径: 多市场 H5 不全，自动回退
         if data_source == "h5":
-            h5_path = _resolve_factor_h5_path_for_market(market)
+            h5_path = _resolve_factor_h5_path_for_market(market, research_config)
             if not h5_path:
                 logger.warning(
                     "[alpha-backtest] market=%s H5 不可用，自动回退到 Qlib 二进制",
@@ -1082,7 +1143,7 @@ async def _run_factor_backtest(
         if data_source == "qlib_bin":
             h5_only = _h5_only_fields_in(factor_code)
             if h5_only:
-                h5_path = _resolve_factor_h5_path_for_market(market)
+                h5_path = _resolve_factor_h5_path_for_market(market, research_config)
                 if h5_path:
                     logger.info(
                         "[alpha-backtest] %s 引用了 Qlib 二进制没有的字段 %s，"
@@ -1098,11 +1159,13 @@ async def _run_factor_backtest(
 
         if data_source == "qlib_bin":
             await _backtest_via_qlib(
-                factor_id, factor_code, kind, market, market_upper, universe, start, end
+                factor_id, factor_code, kind, market, market_upper, universe, start, end,
+                research_config=research_config,
             )
         else:
             await _backtest_via_h5(
-                factor_id, factor_code, kind, universe, start, end, market=market
+                factor_id, factor_code, kind, universe, start, end, market=market,
+                research_config=research_config,
             )
     except FactorBacktestCancelled:
         logger.info("[alpha-backtest] %s cancelled by user", factor_id)
@@ -1144,6 +1207,7 @@ async def _backtest_via_qlib(
     universe: str,
     start: str,
     end: str,
+    research_config: dict | None = None,
 ) -> None:
     """Qlib 二进制回测（默认路径，所有 5 个市场支持）。"""
     import numpy as np
@@ -1152,16 +1216,29 @@ async def _backtest_via_qlib(
     from qlib.data import D
     from backend.shared.qlib_paths import resolve_qlib_provider_uri
 
-    provider_uri = resolve_qlib_provider_uri(market_upper)
-    # 幂等 init：qlib.init 多次调用是安全的，第二次会快速返回
-    try:
-        qlib.init(provider_uri=provider_uri, region="cn" if market_upper in ("CN", "HK", "FUTURES", "CRYPTO") else "us")
-    except Exception as e:
-        logger.warning("qlib.init(%s) raised: %s", provider_uri, e)
+    configured = research_config or _configured_research(market, universe)
+    if configured is not None:
+        from backend.services.engine.rd_agent.data_pipeline.research_reader import (
+            read_research_features,
+        )
+        from backend.services.engine.rd_agent.market_adapters.base import DataConfig
 
-    instruments = _resolve_instruments_for_universe(market_upper, universe)
-    fields = ["$open", "$high", "$low", "$close", "$volume", "$factor"]
-    df = D.features(instruments, fields, start_time=start, end_time=end, freq="day")
+        data = DataConfig(**configured["data"])
+        provider_uri, instruments = data.provider_uri, data.market
+        df = await asyncio.to_thread(
+            read_research_features, data, configured["backtest"]["region"], start, end
+        )
+    else:
+        provider_uri = resolve_qlib_provider_uri(market_upper)
+        # 幂等 init：qlib.init 多次调用是安全的，第二次会快速返回
+        try:
+            qlib.init(provider_uri=provider_uri, region="cn" if market_upper in ("CN", "HK", "FUTURES", "CRYPTO") else "us")
+        except Exception as e:
+            logger.warning("qlib.init(%s) raised: %s", provider_uri, e)
+
+        instruments = _resolve_instruments_for_universe(market_upper, universe)
+        fields = ["$open", "$high", "$low", "$close", "$volume", "$factor"]
+        df = D.features(instruments, fields, start_time=start, end_time=end, freq="day")
     if df.empty:
         raise RuntimeError(f"Qlib 数据为空: market={market}, instruments={instruments}, provider_uri={provider_uri}")
 
@@ -1244,6 +1321,10 @@ async def _backtest_via_qlib(
             "icir": icir,
             "rank_icir": rank_icir,
             "n_obs": n_obs,
+            **({
+                "backtest_data_version": configured["data"]["extra"].get("data_version"),
+                "research_portfolio": "theoretical",
+            } if configured is not None else {}),
         },
     )
     logger.info(
@@ -1448,14 +1529,19 @@ async def _backtest_via_h5(
     start: str,
     end: str,
     market: str = "a_share",
+    research_config: dict | None = None,
 ) -> None:
     """H5 路径（含挖掘同源的扩展字段；仅 A 股 / 美股 / 港股有预生成数据）。"""
-    h5_path = _resolve_factor_h5_path(universe, market)
+    h5_path = (
+        research_config["data"]["extra"]["rd_data_files"]["all"]
+        if research_config is not None else _resolve_factor_h5_path(universe, market)
+    )
     if not Path(h5_path).exists():
         raise RuntimeError(f"H5 数据文件不存在: {h5_path}，请改用 data_source=qlib_bin")
     # 数据复制到隔离工作目录的动作在 _backtest_functional_factor 内完成
     await _backtest_functional_factor(
-        factor_id, factor_code, start, end, universe, market=market
+        factor_id, factor_code, start, end, universe, market=market,
+        research_config=research_config,
     )
 
 
@@ -1474,8 +1560,16 @@ _H5_PATH_CANDIDATES: dict[str, list[str]] = {
 }
 
 
-def _resolve_factor_h5_path_for_market(market: str) -> str | None:
+def _resolve_factor_h5_path_for_market(
+    market: str, research_config: dict | None = None
+) -> str | None:
     """按市场找 H5 文件；不存在返回 None。"""
+    configured = research_config or _configured_research(market)
+    if configured is not None:
+        source = configured["data"]["extra"]["rd_data_files"]["all"]
+        if not Path(source).is_file():
+            raise RuntimeError("市场研究 HDF 数据尚未准备完成")
+        return source
     for p in _H5_PATH_CANDIDATES.get(market, []):
         if Path(p).exists():
             return p
@@ -1657,6 +1751,7 @@ async def _backtest_functional_factor(
     end_date: str | None,
     universe: str | None = "csi300",
     market: str = "a_share",
+    research_config: dict | None = None,
 ) -> None:
     """回测 RD-Agent 函数式因子（calculate_* 返回 DataFrame，读 daily_pv.h5）。
 
@@ -1674,14 +1769,28 @@ async def _backtest_functional_factor(
         end = end_date or _default_end
 
         # 市场 → H5 数据文件（须与挖掘同源；见 _resolve_factor_h5_path_for_market）
-        data_path = _resolve_factor_h5_path(universe, market)
+        configured = research_config or _configured_research(market, universe)
+        data_path = (
+            configured["data"]["extra"]["rd_data_files"]["all"]
+            if configured is not None else _resolve_factor_h5_path(universe, market)
+        )
         # 每次回测独立工作目录：因子代码用相对路径 daily_pv.h5 读、写 result.h5，
         # 并发回测互不覆盖（此前固定 /tmp 会互相踩，导致状态横跳）
         import shutil
         workdir = _new_backtest_workspace(factor_id)
         try:
             if Path(data_path).exists():
-                shutil.copy2(data_path, workdir / "daily_pv.h5")
+                if configured is not None and isinstance(configured["data"]["market"], list):
+                    from backend.services.engine.rd_agent.data_pipeline.research_reader import (
+                        copy_research_hdf,
+                    )
+
+                    selected = configured["data"]["market"]
+                    await asyncio.to_thread(
+                        copy_research_hdf, data_path, workdir / "daily_pv.h5", selected
+                    )
+                else:
+                    shutil.copy2(data_path, workdir / "daily_pv.h5")
         except Exception as e:
             raise RuntimeError(f"准备回测数据 {data_path} 失败: {e}") from e
 
@@ -1858,7 +1967,13 @@ except Exception as e:
             max_drawdown=max_dd,
             universe=universe,
             date_range=f"{start}~{end}",
-            metadata={"data_source": "h5"},
+            metadata={
+                "data_source": "h5",
+                **({
+                    "backtest_data_version": configured["data"]["extra"].get("data_version"),
+                    "research_portfolio": "theoretical",
+                } if configured is not None else {}),
+            },
         )
         logger.info(
             "[alpha-backtest-fn] %s done ic=%.4f rank_ic=%s icir=%s sharpe=%s ann_ret=%s max_dd=%s",

@@ -19,7 +19,7 @@ interface FactorListProps {
 }
 
 const MARKET_LABELS: Record<string, string> = {
-  a_share: 'A股', crypto: '加密货币', hong_kong: '港股', us_stock: '美股', futures: '期货',
+  a_share: 'A股', crypto: '加密货币', hong_kong: '港股', us_stock: '美股', futures: '期货', japan: '日股',
 };
 
 export const FactorList: React.FC<FactorListProps> = ({ metrics, onNavigate }) => {

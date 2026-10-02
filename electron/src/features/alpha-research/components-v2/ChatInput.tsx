@@ -10,6 +10,7 @@ const MARKET_LABELS: Record<string, string> = {
   hong_kong: '港股',
   us_stock: '美股',
   futures: '期货',
+  japan: '日股',
 };
 
 interface ChatInputProps {
@@ -37,6 +38,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   const [markets, setMarkets] = useState<MarketInfo[]>([]);
   const [config] = useState<Partial<TaskConfig>>({ librarySuffix: '' });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const aShareUniverse = useRef<UniverseId>('csi300');
 
   useEffect(() => {
     if (initialPrompt) {
@@ -46,10 +48,16 @@ export const ChatInput: React.FC<ChatInputProps> = ({
 
   useEffect(() => {
     alphaAgentService.listMarkets().then(setMarkets).catch(() => {});
-    getUniverses()
-      .then((res) => setUniverses(res.data?.universes ?? []))
-      .catch(() => {});
   }, []);
+
+  const universeMarket = miningMarket === 'japan' ? 'japan' : undefined;
+  useEffect(() => {
+    let active = true;
+    setUniverses([]);
+    getUniverses(universeMarket)
+      .then((res) => { if (active) setUniverses(res.data?.universes ?? []); });
+    return () => { active = false; };
+  }, [universeMarket]);
 
   const handleSubmit = () => {
     if (isRunning) return;
@@ -87,6 +95,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
         { id: 'hong_kong', name: '港股', ready: false },
         { id: 'us_stock', name: '美股', ready: false },
         { id: 'futures', name: '期货', ready: false },
+        { id: 'japan', name: '日股', ready: false },
       ];
 
   const selectedNotReady = marketList.find(m => m.id === miningMarket)?.ready === false;
@@ -102,7 +111,16 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             {marketList.map((m) => (
               <button
                 key={m.id}
-                onClick={() => setMiningMarket(m.id)}
+                onClick={() => {
+                  if (m.id === miningMarket) return;
+                  if (m.id === 'japan') {
+                    aShareUniverse.current = universe;
+                    setUniverse('all');
+                  } else if (miningMarket === 'japan') {
+                    setUniverse(aShareUniverse.current);
+                  }
+                  setMiningMarket(m.id);
+                }}
                 disabled={isRunning || !m.ready}
                 className={`rounded-full px-2.5 py-[3px] text-[11px] font-semibold transition-all duration-200 flex items-center gap-1 ${
                   miningMarket === m.id
@@ -119,7 +137,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             ))}
 
             {/* Universe selector */}
-            {miningMarket === 'a_share' && (
+            {(miningMarket === 'a_share' || miningMarket === 'japan') && (
               <div className="flex items-center gap-1 ml-2 pl-2 border-l border-slate-200">
                 <span className="text-[10px] font-semibold uppercase tracking-widest text-slate-400 select-none">池</span>
                 <select
@@ -136,7 +154,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
                         </option>
                       ))
                     : (
-                      <option value="csi300">沪深300</option>
+                      <option value={miningMarket === 'japan' ? 'all' : 'csi300'}>{miningMarket === 'japan' ? '全市场' : '沪深300'}</option>
                     )}
                 </select>
               </div>
