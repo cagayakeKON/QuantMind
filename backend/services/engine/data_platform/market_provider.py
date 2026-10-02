@@ -16,6 +16,7 @@ class LocalMarketProvider:
     position_info_loader: str | None = None
     style_feature_loader_factory: str | None = None
     backtest_result_adapter: str | None = None
+    execution_data_factory: str | None = None
 
     def open(self):
         cls = getattr(importlib.import_module(self.module), self.hub_class)
@@ -33,6 +34,7 @@ LOCAL_MARKET_PROVIDERS = {
         position_info_loader="backend.services.simulation.jp.analysis_data.read_position_info",
         style_feature_loader_factory="backend.services.simulation.jp.analysis_data.create_style_feature_loader",
         backtest_result_adapter="backend.services.simulation.jp.analysis_data.public_legacy_result_view",
+        execution_data_factory="backend.services.simulation.jp.data.open_execution_data",
     ),
 }
 

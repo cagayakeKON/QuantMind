@@ -6,7 +6,6 @@ but consume only orders already saved in PostgreSQL; step cannot supply orders.
 
 from __future__ import annotations
 
-import os
 import uuid
 import asyncio
 from datetime import date, datetime
@@ -14,7 +13,9 @@ from datetime import date, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+from backend.services.simulation.services.market_execution_data import (
+    open_market_execution_data,
+)
 from backend.services.simulation.models.jp import JPSimulationSession
 from backend.shared.stock_utils import StockCodeUtil
 from backend.shared.utc_datetime import utc_now
@@ -24,21 +25,7 @@ from .rules import RuleDataMissing, opening_utc
 
 
 def execution_data(version: str | None = None) -> JPExecutionData:
-    hub = QuantJPDataHub()
-    root = hub._publication_root.resolve()
-    if version:
-        pinned = (root / "versions" / version).resolve()
-        if (
-            not pinned.is_relative_to(root / "versions")
-            or not (pinned / "manifest.json").is_file()
-        ):
-            raise RuleDataMissing("Pinned JP data version is unavailable")
-        hub = QuantJPDataHub(pinned)
-    else:
-        # Pin this operation too, so an atomic publication cannot mix versions
-        # between master, previous-close and current raw-bar reads.
-        hub = QuantJPDataHub(hub.data_dir)
-    return JPExecutionData(hub, os.getenv("QM_JP_TRADING_UNITS_FILE"))
+    return open_market_execution_data("JP", data_version=version)
 
 
 def check_daily_submission(

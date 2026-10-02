@@ -14,7 +14,7 @@ from fractions import Fraction
 
 from backend.shared.stock_utils import StockCodeUtil
 from backend.services.simulation.services.ashare_matcher import MatchConfig, match_order
-from backend.services.simulation.services.local_market_data import DailyBar
+from .data import to_daily_bar
 from .matching_rules import JapanDailyMatchRules
 from .rules import (
     RuleDataMissing,
@@ -317,22 +317,7 @@ class JPCashAccount:
                     if fill["symbol"] == symbol and fill["trade_date"] == str(day)
                 )
                 raw = bar or {}
-                daily = DailyBar(
-                    symbol=StockCodeUtil.to_suffix(symbol, market="JP"),
-                    trade_date=day,
-                    open=raw.get("open") or 0,
-                    high=raw.get("high") or 0,
-                    low=raw.get("low") or 0,
-                    close=raw.get("close") or 0,
-                    volume=raw.get("volume") or 0,
-                    amount=raw.get("amount") or 0,
-                    vwap=0,
-                    pre_close=0,
-                    limit_up=float("inf"),
-                    limit_down=0,
-                    is_st=False,
-                    suspended=False,
-                )
+                daily = to_daily_bar(day, symbol, raw, info)
                 cfg = MatchConfig(
                     price_mode="open",
                     slippage_bps=money(self.state["config"]["slippage_bps"]),
