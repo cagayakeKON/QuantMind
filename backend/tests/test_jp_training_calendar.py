@@ -1,17 +1,23 @@
 import pandas as pd
+import pytest
 
 from backend.services.api.routers.admin import admin_training_utils as module
 from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
 
 
-def test_jp_explicit_splits_keep_label_exit_outside_validation_and_test(monkeypatch):
+@pytest.mark.parametrize("calendar_as_dates", [False, True])
+def test_jp_explicit_splits_keep_label_exit_outside_validation_and_test(
+    monkeypatch, calendar_as_dates
+):
     sessions = pd.bdate_range("2026-09-01", "2026-11-30").difference(
         pd.to_datetime(["2026-09-21", "2026-09-22", "2026-09-23"])
     )
     monkeypatch.setattr(
         QuantJPDataHub,
         "fetch_calendar",
-        lambda self: pd.DataFrame({"trade_date": sessions}),
+        lambda self: pd.DataFrame(
+            {"trade_date": sessions.date if calendar_as_dates else sessions}
+        ),
     )
     payload = {
         "train_start": "2026-09-01",

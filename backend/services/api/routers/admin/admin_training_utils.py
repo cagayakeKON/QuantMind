@@ -40,10 +40,15 @@ _MARKET_TO_XCAL = {"CN": "XSHG", "US": "XNYS", "HK": "XHKG"}
 
 
 def _jp_next_split_start(anchor: datetime, horizon: int) -> datetime:
+    import pandas as pd
+
     from backend.services.engine.data_platform.jp_labels import last_label_session
     from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
 
-    sessions = QuantJPDataHub().fetch_calendar()["trade_date"]
+    # Published parquet calendars contain datetime.date; label exits are Timestamp.
+    sessions = pd.DatetimeIndex(
+        pd.to_datetime(QuantJPDataHub().fetch_calendar()["trade_date"])
+    ).normalize()
     exit_day = last_label_session(anchor, sessions, horizon)
     following = sorted(
         day for day in sessions if exit_day is not None and day > exit_day
