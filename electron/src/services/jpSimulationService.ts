@@ -10,6 +10,7 @@ export interface JPSnapshot {
   stale_symbols: string[];
 }
 export interface JPFill {
+  executed_at?: string;
   order_id: string;
   symbol: string;
   side: 'BUY' | 'SELL';

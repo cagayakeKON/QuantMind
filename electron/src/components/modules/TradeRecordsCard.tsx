@@ -5,10 +5,12 @@ import { useTradeRecords } from '../../hooks/useTradeRecords';
 import { useAppSelector } from '../../store';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { formatBackendTime, parseBackendTimestamp } from '../../utils/format';
+import { getMarketConfig } from '../../config/marketConfig';
+import { JPTradeRecordsCard } from './JPTradeRecordsCard';
 
 const MARKET_LABELS: Record<string, string> = { CN: 'A股', HK: '港股', US: '美股', CRYPTO: '区块链' };
 
-export const TradeRecordsCard: React.FC = () => {
+const StandardTradeRecordsCard: React.FC = () => {
   const tradingMode = useAppSelector((state) => state.ui.tradingMode);
   const currentMarket = useAppSelector(selectCurrentMarket);
   const { records, loading, isOffline, isFallbackToOrders, isStale, lastUpdatedAt, refresh } = useTradeRecords({
@@ -351,4 +353,10 @@ export const TradeRecordsCard: React.FC = () => {
       `}</style>
     </Card>
   );
+};
+
+export const TradeRecordsCard: React.FC = () => {
+  const market = useAppSelector(selectCurrentMarket);
+  return getMarketConfig(market).tradeRecordsUi === 'jp_cash'
+    ? <JPTradeRecordsCard /> : <StandardTradeRecordsCard />;
 };
