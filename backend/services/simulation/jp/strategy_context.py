@@ -36,4 +36,15 @@ def prepare_context(request):
         instrument_mapper="backend.services.simulation.jp.strategy_context.to_provider_instrument",
         environment=environment,
         feature_snapshot_reader="backend.services.simulation.jp.feature_snapshot.create_reader",
+        feature_fields=(
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "factor",
+            "volume_factor",
+            "vwap",
+        ),
     )

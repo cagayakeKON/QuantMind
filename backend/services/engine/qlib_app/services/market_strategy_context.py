@@ -6,6 +6,24 @@ import re
 from types import SimpleNamespace
 
 import pandas as pd
+from qlib.backtest.signal import Signal
+
+
+class _IntervalSignal(Signal):
+    """The public feature request supplies bars inside its requested interval."""
+
+    def __init__(self, inner, start_date, end_date):
+        self.inner = inner
+        self.start, self.end = pd.Timestamp(start_date), pd.Timestamp(end_date)
+
+    def get_signal(self, start_time=None, end_time=None):
+        start = (
+            self.start if start_time is None else pd.Timestamp(start_time).normalize()
+        )
+        end = self.end if end_time is None else pd.Timestamp(end_time).normalize()
+        if end < self.start or start > self.end:
+            return None
+        return self.inner.get_signal(max(start, self.start), min(end, self.end))
 
 
 @dataclass(frozen=True)
@@ -16,6 +34,7 @@ class StrategyContextSpec:
     instrument_mapper: str
     environment: dict[str, str] = field(default_factory=dict)
     feature_snapshot_reader: str | None = None
+    feature_fields: tuple[str, ...] | None = None
 
     def as_dict(self):
         return asdict(self)
@@ -69,6 +88,7 @@ class MarketStrategyContext:
         try:
             # Qlib expressions can request bars beyond their output dates, e.g.
             # Ref($close, -1). Clipping end_time alone does not bound those reads.
+            self.validate_fields(fields)
             for field in fields:
                 if re.fullmatch(r"\$[A-Za-z_][A-Za-z_0-9]*", field):
                     continue
@@ -187,6 +207,54 @@ class MarketStrategyContext:
                 raise
 
         return FundamentalAligner(snapshot_loader=load)
+
+    def feature_signal(self, metric, *, pool_snapshot=None, signal_lag_days=1):
+        """Use the public signal algorithm with the current resolved universe."""
+        from ..utils.simple_signal import SimpleSignal
+
+        def instruments():
+            try:
+                if pool_snapshot is not None and not pool_snapshot.unfiltered:
+                    return [self.mapper(code) for code in pool_snapshot.api_symbols]
+                return self.list_instruments(
+                    self.provider.instruments("all"), end_time=self.asof, as_list=True
+                )
+            except Exception as exc:
+                self.errors.append(str(exc))
+                raise
+
+        self.validate_fields([metric])
+        return SimpleSignal(
+            metric=metric,
+            signal_lag_days=signal_lag_days,
+            instrument_provider=instruments,
+        )
+
+    def validate_fields(self, fields):
+        spec = self.__dict__.get("spec")
+        if spec is not None and spec.feature_fields is not None:
+            requested = {
+                name
+                for field in fields
+                for name in re.findall(r"\$([A-Za-z_][A-Za-z_0-9]*)", field)
+            }
+            missing = requested - set(spec.feature_fields)
+            if missing:
+                raise ValueError(
+                    "Market strategy fields are unavailable: "
+                    + ", ".join(sorted(missing))
+                )
+
+    def request_feature_signal(self, metric, request, *, pool_snapshot=None):
+        return _IntervalSignal(
+            self.feature_signal(
+                metric,
+                pool_snapshot=pool_snapshot,
+                signal_lag_days=request.signal_lag_days,
+            ),
+            request.start_date,
+            request.end_date,
+        )
 
     def list_instruments(self, instruments, start_time=None, end_time=None, **kwargs):
         end = self.asof if end_time is None else min(pd.Timestamp(end_time), self.asof)

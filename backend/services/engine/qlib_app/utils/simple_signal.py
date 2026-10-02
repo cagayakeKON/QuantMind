@@ -35,9 +35,11 @@ class SimpleSignal(Signal):
         pred_path: str | None = None,
         signal_lag_days: int = 1,
         qlib_signal_shift_days: int = 1,
+        instrument_provider=None,
     ):
         self.metric = metric
         self.universe = universe
+        self._instrument_provider = instrument_provider
         self._pred_path = pred_path
         self.signal_lag_days = max(0, int(signal_lag_days or 0))
         # qlib 原生策略（TopkDropoutStrategy / WeightStrategyBase）取信号时固定用
@@ -101,6 +103,9 @@ class SimpleSignal(Signal):
         return _exclude_bj_instruments(instruments)
 
     def _get_universe_instruments(self) -> list[str]:
+        instrument_provider = getattr(self, "_instrument_provider", None)
+        if instrument_provider is not None:
+            return instrument_provider()
         if self._universe_instruments is not None:
             return self._universe_instruments
         if not self.universe:

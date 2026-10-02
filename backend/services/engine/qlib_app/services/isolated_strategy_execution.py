@@ -22,7 +22,7 @@ async def execute_isolated_strategy(request, model_dir, meta, pool_snapshot):
     spec = await asyncio.to_thread(getattr(import_module(module), function), request)
     payload = {
         "request": request.model_dump(mode="json", exclude_unset=True),
-        "model_dir": str(model_dir),
+        "model_dir": str(model_dir) if model_dir is not None else None,
         "meta": meta,
         "pool_snapshot": pool_snapshot.model_dump(mode="json"),
         "context": spec.as_dict(),

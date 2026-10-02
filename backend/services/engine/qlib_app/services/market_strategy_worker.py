@@ -27,7 +27,9 @@ def main():
             module, function = execution.synchronous_runner.rsplit(".", 1)
             result = getattr(import_module(module), function)(
                 request,
-                Path(payload["model_dir"]),
+                Path(payload["model_dir"])
+                if payload["model_dir"] is not None
+                else None,
                 payload["meta"],
                 pool_snapshot=PoolSnapshot.model_validate(payload["pool_snapshot"]),
                 strategy_context=context,

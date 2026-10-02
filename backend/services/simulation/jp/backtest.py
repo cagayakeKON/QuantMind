@@ -36,17 +36,17 @@ from .strategy_snapshot import (
 
 def run_cash_backtest(
     request,
-    model_dir: Path,
+    model_dir: Path | None,
     meta: dict,
     *,
     pool_snapshot: PoolSnapshot | None = None,
     strategy_context=None,
 ) -> QlibBacktestResult:
     started = time.monotonic()
-    from qlib.strategy.base import BaseStrategy
     from backend.services.engine.qlib_app.services.dated_strategy import (
         DatedStrategyRunner,
         build_dated_strategy,
+        requested_feature_metric,
     )
     from backend.services.engine.qlib_app.services.strategy_builder import (
         extract_backtest_dates,
@@ -82,7 +82,14 @@ def run_cash_backtest(
         raise ValueError(
             "CN-specific costs do not apply to JP; use its commission and slippage fields"
         )
-    if request.use_vectorized or request.allow_feature_signal_fallback:
+    metric = (
+        None
+        if request.strategy_type == "jp_cash_topk"
+        else requested_feature_metric(request)
+    )
+    if request.use_vectorized or (
+        request.allow_feature_signal_fallback and metric is None
+    ):
         raise ValueError("JP requires its cash ledger and real model predictions")
     commission = request.jp_commission_rate
     if commission is None:
@@ -115,16 +122,19 @@ def run_cash_backtest(
         raise ValueError("JP custom pools require a resolved shared pool snapshot")
     if pool_snapshot is not None:
         _validate_pool(pool_snapshot)
-    if (
-        meta.get("data_source") != "quantdb_factors"
-        or meta.get("factor_source") != "l1_factors"
-    ):
-        raise ValueError("JP model must use the published l1_factors dataset")
-    version = meta.get("jp_data_version")
-    if not version:
-        raise RuleDataMissing(
-            "JP model has no pinned data version; retrain with JP metadata"
-        )
+    version = meta.get("jp_data_version") if metric is None else None
+    if metric is None:
+        if (
+            meta.get("data_source") != "quantdb_factors"
+            or meta.get("factor_source") != "l1_factors"
+        ):
+            raise ValueError("JP model must use the published l1_factors dataset")
+        if not version:
+            raise RuleDataMissing(
+                "JP model has no pinned data version; retrain with JP metadata"
+            )
+    elif strategy_context is None:
+        raise ValueError("Feature signals require the registered dated market context")
     data = execution_data(request.jp_data_version)
     execution_version = data.hub.data_dir.name
     start, end = (
@@ -142,14 +152,26 @@ def run_cash_backtest(
     anchor = data.calendar.sessions[index - 1]
     if strategy_context is not None:
         strategy_context.advance(anchor, start)
+    signal_data = (
+        strategy_context.request_feature_signal(
+            metric, request, pool_snapshot=pool_snapshot
+        )
+        if metric is not None
+        else None
+    )
     strategy_config = (
         None
         if request.strategy_type == "jp_cash_topk"
-        else build_dated_strategy(request, strategy_context=strategy_context)
+        else build_dated_strategy(
+            request, strategy_context=strategy_context, signal_data=signal_data
+        )
     )
-    known_after = labels_available_on(meta, data.calendar, anchor)
-    pred = prediction_path(model_dir)
-    scores, digest = read_test_scores(pred, anchor, end)
+    known_after = digest = None
+    scores = {}
+    if metric is None:
+        known_after = labels_available_on(meta, data.calendar, anchor)
+        pred = prediction_path(model_dir)
+        scores, digest = read_test_scores(pred, anchor, end)
     account = JPCashAccount.create(
         data.calendar,
         request.initial_capital,
@@ -193,24 +215,25 @@ def run_cash_backtest(
         else None
     )
     for day_index, day in enumerate(sessions):
-        if previous not in scores:
-            raise RuleDataMissing(
-                f"Exact JP test-split signals are missing on {previous}"
-            )
-        outcome = filter_signals_by_pool(scores[previous], pool_snapshot)
-        if outcome.empty_pool or outcome.empty_result:
-            raise RuleDataMissing(
-                f"Stock pool has no JP model signals on {previous}: "
-                + "; ".join(outcome.warnings)
-            )
-        daily_scores = outcome.kept
+        daily_scores = []
+        if metric is None:
+            if previous not in scores:
+                raise RuleDataMissing(
+                    f"Exact JP test-split signals are missing on {previous}"
+                )
+            outcome = filter_signals_by_pool(scores[previous], pool_snapshot)
+            if outcome.empty_pool or outcome.empty_result:
+                raise RuleDataMissing(
+                    f"Stock pool has no JP model signals on {previous}: "
+                    + "; ".join(outcome.warnings)
+                )
+            daily_scores = outcome.kept
         symbols = sorted(
             {r["symbol"] for r in daily_scores} | set(account.state["positions"])
         )
-        if isinstance(strategy_config, BaseStrategy):
-            # Instance factories keep their own Signal, as in the public engine.
-            # Quote the resolved universe rather than only the selected model's
-            # symbols, while retaining held positions outside a changed pool.
+        if strategy_runner is not None and not strategy_runner.uses_snapshot_signal:
+            # Native signals need quotes for the resolved universe, not merely
+            # securities present in an optional auxiliary model prediction.
             if pool_snapshot is not None and not pool_snapshot.unfiltered:
                 members = pool_snapshot.api_symbols
             else:
@@ -303,8 +326,11 @@ def run_cash_backtest(
             "execution_engine": "jp_cash_ledger",
             "currency": "JPY",
             "return_basis": "price_only",
-            "signal_source": "model_pred_test",
-            "training_labels_available_on": str(known_after),
+            "signal_source": "model_pred_test" if metric is None else "feature_field",
+            "training_labels_available_on": str(known_after)
+            if known_after is not None
+            else None,
+            **({"signal_feature": metric} if metric is not None else {}),
             "benchmark_entry": "first_execution_open",
             **(
                 {"strategy_decision_class": type(strategy_runner.strategy).__name__}
@@ -381,8 +407,19 @@ def run_cash_backtest(
 
 
 async def execute_backtest(request):
-    model_dir, meta = await resolve_model(
-        request.tenant_id, request.user_id, request.model_id
+    from backend.services.engine.qlib_app.services.dated_strategy import (
+        requested_feature_metric,
+    )
+
+    metric = (
+        None
+        if request.strategy_type == "jp_cash_topk"
+        else requested_feature_metric(request)
+    )
+    model_dir, meta = (
+        await resolve_model(request.tenant_id, request.user_id, request.model_id)
+        if metric is None
+        else (None, {})
     )
     ref = (request.pool_id or request.universe or "all").strip()
     if ref.lower() in {"all", "pool:all"}:
@@ -420,7 +457,8 @@ async def execute_backtest(request):
 
     builder, fallback, _ = StrategyFactory.resolve_builder(request.strategy_type)
     if request.strategy_type != "jp_cash_topk" and (
-        request.dynamic_position
+        metric is not None
+        or request.dynamic_position
         or fallback
         or isinstance(
             builder, (CustomStrategyBuilder, StopLossBuilder, AdaptiveDriftBuilder)

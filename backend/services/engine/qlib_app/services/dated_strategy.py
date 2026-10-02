@@ -160,7 +160,17 @@ class _SnapshotSignal(Signal):
         return self.scores.copy()
 
 
-def build_dated_strategy(request, *, strategy_context=None):
+def requested_feature_metric(request):
+    """Mirror the public request's explicit feature-field signal selection."""
+    signal = request.strategy_params.signal.strip()
+    if signal == "<PRED>":
+        return None
+    if signal.endswith((".pkl", ".parquet")):
+        raise ValueError("Dated prediction files require registered model provenance")
+    return signal if signal.startswith("$") else f"${signal}"
+
+
+def build_dated_strategy(request, *, strategy_context=None, signal_data=None):
     """Reuse public builder, template, code-precedence and config adaptation rules."""
     from .backtest_service import PROJECT_ROOT, QlibBacktestService
     from .strategy_builder import CustomStrategyBuilder
@@ -180,7 +190,7 @@ def build_dated_strategy(request, *, strategy_context=None):
             if strategy_context is not None
             else {}
         ),
-        signal_data=None,
+        signal_data=signal_data,
         backtest_id=request.backtest_id,
     )
     config = StrategyAdapter(PROJECT_ROOT).adapt(
@@ -228,7 +238,21 @@ def build_dated_strategy(request, *, strategy_context=None):
         kwargs.get("dynamic_position") or kwargs.get("market_state_series")
     ):
         raise ValueError("Dynamic positions require a dated market state adapter")
-    if kwargs.get("signal") != "<PRED>":
+    configured_signal = kwargs.get("signal")
+    if strategy_context is not None:
+        configured_signal = QlibBacktestService._normalize_signal_config(
+            configured_signal
+        )
+        if configured_signal is None or (
+            isinstance(configured_signal, str)
+            and (configured_signal == "<PRED>" or configured_signal.startswith("$"))
+        ):
+            configured_signal = signal_data if signal_data is not None else "<PRED>"
+        if isinstance(configured_signal, dict) and "class" in configured_signal:
+            configured_signal = init_instance_by_config(configured_signal)
+        kwargs["signal"] = configured_signal
+        strategy_context.assert_reads_succeeded()
+    elif not isinstance(configured_signal, str) or configured_signal != "<PRED>":
         raise ValueError(
             "Dated cash execution requires the selected model's predictions"
         )
@@ -254,9 +278,17 @@ class DatedStrategyRunner:
         self.account = SimpleNamespace(current_position=Position())
         if isinstance(config, BaseStrategy):
             self.strategy = config
+            self.uses_snapshot_signal = False
         else:
-            config = deepcopy(config)
-            config["kwargs"]["signal"] = self.signal
+            # Qlib passes native objects unchanged. Clone the kwargs mapping
+            # only so replacing a prediction placeholder does not mutate it.
+            configured_signal = config["kwargs"].get("signal")
+            config = {**config, "kwargs": dict(config["kwargs"])}
+            self.uses_snapshot_signal = (
+                isinstance(configured_signal, str) and configured_signal == "<PRED>"
+            )
+            if self.uses_snapshot_signal:
+                config["kwargs"]["signal"] = self.signal
             self.strategy = init_instance_by_config(config, accept_types=BaseStrategy)
         common = CommonInfrastructure(
             trade_account=self.account, trade_exchange=self.exchange
