@@ -29,7 +29,7 @@ export interface MarketConfig {
   trainingCapabilities?: {dealPrices: ('open' | 'close')[]; industryFeature: boolean};
   simulationUi?: 'standard' | 'jp_cash';
   stockSearch?: 'local' | 'gateway';
-  stockTerminalUi?: 'standard' | 'daily_equity';
+  stockTerminal?: { market: string; adjustments: ('none' | 'qfq' | 'hfq')[]; requestTimeoutMs?: number };
   backtestUi?: 'standard' | 'jp_cash';
   tradeRecordsUi?: 'standard' | 'jp_cash';
   portfolioChartsUi?: 'standard' | 'jp_cash';
@@ -46,7 +46,7 @@ export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
     trainingCapabilities: {dealPrices: ['open'], industryFeature: false},
     simulationUi: 'jp_cash',
     stockSearch: 'gateway',
-    stockTerminalUi: 'daily_equity',
+    stockTerminal: { market: 'JP', adjustments: ['none', 'qfq'], requestTimeoutMs: 120000 },
     backtestUi: 'jp_cash',
     tradeRecordsUi: 'jp_cash',
     portfolioChartsUi: 'jp_cash',

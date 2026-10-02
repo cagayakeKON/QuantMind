@@ -6,7 +6,7 @@ markets continue to use its existing QuantDB implementation.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -22,6 +22,43 @@ class HubTerminalSource:
 
     def symbol_key(self, symbol: str) -> str:
         return StockCodeUtil.to_prefix(symbol, market=self.market)
+
+    def read_symbol_table(self, dataset: str, symbol: str) -> pd.DataFrame:
+        suffix = StockCodeUtil.to_suffix(symbol, market=self.market)
+        path = self.hub.data_dir / "3_financial_data" / dataset / f"{suffix}.parquet"
+        return pd.read_parquet(path) if path.is_file() else pd.DataFrame()
+
+    def series(self, view: str, symbol: str, years: int, end: str | None, columns):
+        from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
+
+        relative = QuantDBDataHub._VIEW_REL_MAP.get(view)
+        if relative not in self.hub._VIEW_REL_MAP.values():
+            return pd.DataFrame()
+        anchor = date.fromisoformat(end) if end else date.today()
+        suffix = StockCodeUtil.to_suffix(symbol, market=self.market)
+        frame = self.hub._normalize_columns(
+            self.hub._read(
+                relative, anchor - timedelta(days=years * 366), anchor, [suffix]
+            )
+        )
+        present = [column for column in columns if column in frame]
+        if frame.empty or not present:
+            return pd.DataFrame()
+        frame["dt"] = pd.to_datetime(frame["trade_date"])
+        return frame[["dt", *present]]
+
+    def news_keywords(self, symbol: str) -> list[str]:
+        frame = self.read_latest("2_base_sector/master")
+        suffix = StockCodeUtil.to_suffix(symbol, market=self.market)
+        hits = frame[frame.symbol == suffix] if not frame.empty else frame
+        words = [self.symbol_key(symbol)]
+        if not hits.empty:
+            words += [hits.iloc[0].get("stock_name"), hits.iloc[0].get("name_en")]
+        return [
+            str(word).strip()
+            for word in words
+            if isinstance(word, str) and word.strip()
+        ]
 
     def read_latest(self, relative: str, asof: str | None = None) -> pd.DataFrame:
         cutoff = date.fromisoformat(asof) if asof else None

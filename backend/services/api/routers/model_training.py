@@ -3681,6 +3681,24 @@ def _read_stock_pred_history(
                     (c for c in ("symbol", "instrument") if c in cols), None
                 )
                 if score_col and date_col and sym_col:
+                    from backend.shared.stock_utils import StockCodeUtil
+
+                    jp_symbol = StockCodeUtil.is_jp_symbol(code6)
+                    symbol_expr = f"regexp_extract(CAST({sym_col} AS VARCHAR), '[0-9]+', 0)"
+                    symbol_filter = "code6 = ?"
+                    query_params = [cutoff, code6]
+                    if jp_symbol:
+                        variants = sorted(
+                            {
+                                StockCodeUtil.to_prefix(code6),
+                                StockCodeUtil.to_suffix(code6),
+                                StockCodeUtil.to_qlib(code6).upper(),
+                                StockCodeUtil.to_jp_code(code6),
+                            }
+                        )
+                        symbol_expr = f"UPPER(CAST({sym_col} AS VARCHAR))"
+                        symbol_filter = f"code6 IN ({','.join('?' for _ in variants)})"
+                        query_params = [cutoff, *variants]
                     # 先全市场截面算 RANK 再过滤该股（过滤在窗口前做会使排名恒为 1）；
                     # regexp_extract 抽连续数字段，兼容 SH600000/600000.SH/sh600000
                     # （注：duckdb 的 regexp_replace 默认只替换首个匹配，不能用于去前缀）
@@ -3692,8 +3710,7 @@ def _read_stock_pred_history(
                         WITH d AS (
                             SELECT CAST({date_col} AS DATE) AS td,
                                    CAST({score_col} AS DOUBLE) AS sc,
-                                   regexp_extract(CAST({sym_col} AS VARCHAR),
-                                                  '[0-9]+', 0) AS code6,
+                                   {symbol_expr} AS code6,
                                    RANK() OVER (PARTITION BY CAST({date_col} AS DATE)
                                                 ORDER BY CAST({score_col} AS DOUBLE) DESC) AS rk,
                                    COUNT(*) OVER (PARTITION BY CAST({date_col} AS DATE)) AS tot
@@ -3710,9 +3727,9 @@ def _read_stock_pred_history(
                               )
                         )
                         SELECT td, sc, rk, tot FROM d
-                        WHERE code6 = ? ORDER BY td DESC
+                        WHERE {symbol_filter} ORDER BY td DESC
                         """,
-                        [cutoff, code6],
+                        query_params,
                     ).fetchall()
                     items = [
                         {
@@ -3752,6 +3769,9 @@ async def _load_stock_pred_history(
     仅推理批次详情页等明确指定模型的调用方会传 model_id。
     Returns (items, model)；模型缺失/无文件/读空时 items 为 []，调用方回退 engine_signal_scores。
     """
+    from backend.shared.stock_utils import StockCodeUtil
+
+    jp_symbol = StockCodeUtil.is_jp_symbol(sym)
     try:
         if model_id:
             model = await model_registry_service.get_model(
@@ -3759,7 +3779,9 @@ async def _load_stock_pred_history(
             )
         else:
             model = await model_registry_service.get_default_model(
-                tenant_id=tenant_id, user_id=user_id
+                tenant_id=tenant_id,
+                user_id=user_id,
+                **({"market": "JP"} if jp_symbol else {}),
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("分数曲线模型解析失败: %s", exc)
@@ -3769,7 +3791,12 @@ async def _load_stock_pred_history(
     if not model or not storage_path:
         return [], None
 
-    code6 = re.sub(r"[^0-9]", "", sym)
+    if jp_symbol and (
+        str((model.get("metadata_json") or {}).get("market", "CN")).upper() != "JP"
+    ):
+        return [], None
+
+    code6 = StockCodeUtil.to_prefix(sym) if jp_symbol else re.sub(r"[^0-9]", "", sym)
     if not code6:
         return [], None
     items = await asyncio.to_thread(
@@ -3809,6 +3836,7 @@ async def get_stock_inference_history(
     from backend.shared.stock_utils import StockCodeUtil
 
     sym = str(symbol).strip().upper()
+    jp_symbol = StockCodeUtil.is_jp_symbol(sym)
     try:
         anchor = date.fromisoformat(str(end_date)[:10]) if end_date else date.today()
     except (ValueError, TypeError):
@@ -3819,6 +3847,8 @@ async def get_stock_inference_history(
     norm = sym
     if "." not in norm and not norm.startswith(("SH", "SZ", "BJ")):
         norm = StockCodeUtil.to_suffix(norm)
+    if jp_symbol:
+        norm = StockCodeUtil.to_prefix(sym)
 
     params: dict[str, Any] = {
         "cutoff": cutoff,
@@ -3837,6 +3867,9 @@ async def get_stock_inference_history(
         }
         _sym_variants |= {s.lower() for s in list(_sym_variants)}
         _sym_variants = {s for s in _sym_variants if s}
+        if jp_symbol:
+            _sym_variants = {StockCodeUtil.to_prefix(sym), StockCodeUtil.to_suffix(sym)}
+            _sym_variants |= {value.lower() for value in list(_sym_variants)}
     except Exception:  # noqa: BLE001
         _sym_variants = {sym}
     params["syms"] = sorted(_sym_variants)
@@ -3980,6 +4013,18 @@ async def get_stock_inference_history(
         board = "北交所"
     else:
         board = "其他"
+    if jp_symbol:
+        from backend.services.api.stock_terminal_sources import terminal_source
+
+        source = terminal_source(symbol=sym)
+        frame, _ = await asyncio.to_thread(source.universe, anchor.isoformat())
+        hit = frame[frame["Symbol"] == StockCodeUtil.to_suffix(sym)]
+        if not hit.empty:
+            record = hit.iloc[0]
+            stock_meta.update(name=record.get("Name"), industry=record.get("rs_hyname"))
+            board = record.get("board") or ""
+        else:
+            board = ""
 
     # 曲线模型下拉：返回该用户全部可用模型（供个股终端切换），而非仅当前分数对应的单一模型
     models: list[dict[str, Any]] = []
@@ -3987,7 +4032,9 @@ async def get_stock_inference_history(
         from backend.shared.model_registry import model_registry_service
 
         all_models = await model_registry_service.list_models(
-            tenant_id=tenant_id, user_id=user_id
+            tenant_id=tenant_id,
+            user_id=user_id,
+            **({"market": "JP"} if jp_symbol else {}),
         )
         for m in all_models:
             pmeta = m.get("metadata_json") or {}

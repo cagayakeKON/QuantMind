@@ -2,6 +2,8 @@
 
 from contextlib import asynccontextmanager
 from datetime import date
+import sqlite3
+from types import SimpleNamespace
 
 import duckdb
 import pandas as pd
@@ -10,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend.services.api.routers import stock_terminal as terminal
+from backend.services.api.routers import market_kline
 from backend.services.api.stock_terminal_sources import (
     HubTerminalSource,
     terminal_source,
@@ -280,3 +283,127 @@ def test_legacy_list_still_uses_existing_loader(client, source, monkeypatch):
     assert calls == [day]
     assert response.json()["data"]["items"][0]["symbol"] == "600519.SH"
     assert response.json()["data"]["items"][0]["pe"] == 23
+
+
+def test_shared_detail_routes_use_dated_jp_valuation_and_report_missing_data(
+    client, monkeypatch
+):
+    def no_cn(*args, **kwargs):
+        raise AssertionError("JP details must not read CN data")
+
+    monkeypatch.setattr(terminal, "_quantdb_dir", no_cn)
+    valuation = client.get(
+        "/api/v1/stock-terminal/series",
+        params={
+            "symbol": "JP72030",
+            "group": "valuation",
+            "end_date": "2026-09-29",
+        },
+    )
+    assert valuation.status_code == 200, valuation.text
+    data = valuation.json()["data"]
+    assert data["dates"] == ["2026-09-29"]
+    assert data["columns"]["pe_ttm"] == [12]
+    assert data["currency"] == "JPY"
+    assert data["available"] is True
+    for group in ("margin", "chip", "flow", "sentiment", "technical", "holders"):
+        response = client.get(
+            "/api/v1/stock-terminal/series",
+            params={"symbol": "JP72030", "group": group},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["available"] is False
+    for route in ("financials", "dividends"):
+        response = client.get(
+            f"/api/v1/stock-terminal/{route}", params={"symbol": "JP72030"}
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["data"]["available"] is False
+
+
+def test_jp_financial_file_uses_currency_and_disclosure_date(client, source):
+    path = source.hub.data_dir / "3_financial_data/income/72030.JP.parquet"
+    path.parent.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "m_timetag": ["20260331", "20260630"],
+            "disclosed_date": ["2026-05-01", "2026-08-01"],
+            "revenue": [1e9, 2e9],
+        }
+    ).to_parquet(path, index=False)
+    per_share = source.hub.data_dir / "3_financial_data/pershare_index/72030.JP.parquet"
+    per_share.parent.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "m_timetag": ["20260331"],
+            "disclosed_date": ["2026-05-01"],
+            "s_fa_eps_basic": [12.5],
+        }
+    ).to_parquet(per_share, index=False)
+    response = client.get(
+        "/api/v1/stock-terminal/financials",
+        params={
+            "symbol": "72030.JP",
+            "date": "2026-07-01",
+        },
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["currency"] == "JPY"
+    assert data["periods"] == ["20260331"]
+    assert data["income"][0]["items"]["营业收入"] == 10
+    assert data["per_share"][0]["items"]["EPS(JPY)"] == 12.5
+
+
+def test_local_kline_cache_keeps_publication_window_and_adjustment(
+    monkeypatch, tmp_path
+):
+    calls = []
+    hub = SimpleNamespace(data_dir=tmp_path / "version-one")
+
+    def fetch(symbol, start, end, adjust):
+        calls.append((symbol, start, end, adjust, hub.data_dir))
+        return pd.DataFrame(
+            {
+                "trade_date": ["2026-09-28", "2026-09-29"],
+                "close": [50, 51 if hub.data_dir.name == "version-one" else 52],
+            }
+        )
+
+    hub.fetch_daily_kline = fetch
+    provider = SimpleNamespace(open=lambda: hub, currency="JPY", source="test-source")
+    monkeypatch.setattr(market_kline, "_LOCAL_KLINE_PROVIDERS", {"JP": provider})
+    monkeypatch.setattr(market_kline, "_KLINE_CACHE", {})
+    args = (date(2026, 9, 28), date(2026, 9, 29), 2, "qfq")
+    first = market_kline._local_provider_kline("JP", "JP72030", *args)
+    alias = market_kline._local_provider_kline("JP", "72030.JP", *args)
+    assert alias == first
+    assert len(calls) == 1
+    assert first["data"]["items"][0]["open"] is None
+    tail = market_kline._local_provider_kline("JP", "JP72030", *args[:2], 1, "qfq")
+    assert len(tail["data"]["items"]) == 1
+    market_kline._local_provider_kline("JP", "JP72030", *args[:2], 2, "none")
+    assert len(calls) == 3
+    hub.data_dir = tmp_path / "version-two"
+    next_version = market_kline._local_provider_kline("JP", "JP72030", *args)
+    assert len(calls) == 4
+    assert next_version["data"]["items"][-1]["close"] == 52
+    assert next_version["data"]["data_version"] == "version-two"
+
+
+def test_jp_news_reuses_common_huntly_search(client, tmp_path, monkeypatch):
+    path = tmp_path / "news.sqlite"
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "CREATE TABLE page (id INTEGER,title TEXT,url TEXT,updated_at TEXT,connector_id INTEGER)"
+        )
+        db.execute(
+            "INSERT INTO page VALUES (1,'トヨタ 最新発表','https://example.org/toyota','2026-09-29',1)"
+        )
+    monkeypatch.setenv("HUNTLY_SQLITE_PATH", str(path))
+    monkeypatch.setattr(
+        terminal, "_quantdb_dir", lambda: pytest.fail("JP news read CN metadata")
+    )
+    response = client.get("/api/v1/stock-terminal/news", params={"symbol": "JP72030"})
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["items"][0]["title"] == "トヨタ 最新発表"

@@ -6,7 +6,7 @@ import { BarChart3, Coins, Landmark, BrainCircuit, Users2, PieChart } from 'luci
 import { stockTerminalService, FinancialsResponse, SeriesResponse, DividendItem } from '../../services/stockTerminalService';
 import { SeriesChart, buildSeries } from './SeriesChart';
 
-export interface TabProps { symbol: string; asof?: string; }
+export interface TabProps { symbol: string; asof?: string; currency?: string; }
 
 const _divFmt = (v: number | null, digits = 3): string => v == null ? '--' : Number(v).toFixed(digits);
 const _f2 = (v: number | null): string => v == null ? '--' : Number(v).toFixed(2);
@@ -28,7 +28,7 @@ function mergeSeriesByDate(...resps: SeriesResponse[]): SeriesResponse {
       });
     });
   });
-  return { dates, columns };
+  return { dates, columns, ...(resps.every(r => r.available === false) ? { available: false } : {}) };
 }
 
 function TabShell({ title, icon: Icon, children, loading, centerTitle, autoHeight }: {
@@ -80,7 +80,7 @@ function FinTable({ records, periods }: { records: { period: string; items: Reco
 }
 
 // ---------- 财务报表 ----------
-export function FinancialsTab({ symbol, asof }: TabProps) {
+export function FinancialsTab({ symbol, asof, currency = '元' }: TabProps) {
   const [data, setData] = useState<FinancialsResponse | null>(null);
   const [loading, setLoading] = useState(false);
   useEffect(() => {
@@ -90,6 +90,7 @@ export function FinancialsTab({ symbol, asof }: TabProps) {
     return () => { c = true; };
   }, [symbol, asof]);
   if (!data) return <TabShell title="财务报表" icon={BarChart3} loading={loading}><div /></TabShell>;
+  if (data.available === false) return <TabShell title="财务报表" icon={BarChart3}><div className="py-8 text-center text-[11px] text-slate-400">当前数据源未提供财报数据</div></TabShell>;
   return (
     <TabShell title="财务报表" icon={BarChart3} loading={loading} centerTitle autoHeight>
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
@@ -119,7 +120,7 @@ export function FinancialsTab({ symbol, asof }: TabProps) {
       {/* 四张报表单列堆叠，超出面板高度时由外层容器向下滚动 */}
       <div className="flex flex-col gap-3">
         <div className="bg-white/70 rounded-2xl border border-slate-100 p-2">
-          <div className="text-[11px] font-bold text-slate-500 mb-1">利润表（亿元）</div>
+          <div className="text-[11px] font-bold text-slate-500 mb-1">利润表（亿{currency}）</div>
           <FinTable records={data.income} periods={data.periods} />
         </div>
         <div className="bg-white/70 rounded-2xl border border-slate-100 p-2">
@@ -127,11 +128,11 @@ export function FinancialsTab({ symbol, asof }: TabProps) {
           <FinTable records={data.per_share} periods={data.periods} />
         </div>
         <div className="bg-white/70 rounded-2xl border border-slate-100 p-2">
-          <div className="text-[11px] font-bold text-slate-500 mb-1">资产负债表（亿元）</div>
+          <div className="text-[11px] font-bold text-slate-500 mb-1">资产负债表（亿{currency}）</div>
           <FinTable records={data.balance} periods={data.periods} />
         </div>
         <div className="bg-white/70 rounded-2xl border border-slate-100 p-2">
-          <div className="text-[11px] font-bold text-slate-500 mb-1">现金流量表（亿元）</div>
+          <div className="text-[11px] font-bold text-slate-500 mb-1">现金流量表（亿{currency}）</div>
           <FinTable records={data.cashflow} periods={data.periods} />
         </div>
       </div>
@@ -175,7 +176,7 @@ export function ValuationTab({ symbol, asof }: TabProps) {
 }
 
 // ---------- 筹码资金 ----------
-export function ChipFlowTab({ symbol, asof }: TabProps) {
+export function ChipFlowTab({ symbol, asof, currency = '元' }: TabProps) {
   const [chip, setChip] = useState<SeriesResponse>({ dates: [], columns: {} });
   const [flow, setFlow] = useState<SeriesResponse>({ dates: [], columns: {} });
   const [loading, setLoading] = useState(false);
@@ -194,8 +195,8 @@ export function ChipFlowTab({ symbol, asof }: TabProps) {
     { key: 'chip_concentration_20', name: '筹码集中度', color: '#3b82f6' },
   ]);
   const flowS = buildSeries(flow, [
-    { key: 'flow_net_amount', name: '主力净流入(元)', color: '#e11d48' },
-    { key: 'flow_super_net', name: '超大单净流入(元)', color: '#f97316' },
+    { key: 'flow_net_amount', name: `主力净流入(${currency})`, color: '#e11d48' },
+    { key: 'flow_super_net', name: `超大单净流入(${currency})`, color: '#f97316' },
   ]);
   return (
     <TabShell title="筹码与资金" icon={PieChart} loading={loading} autoHeight>
@@ -205,7 +206,7 @@ export function ChipFlowTab({ symbol, asof }: TabProps) {
           <SeriesChart resp={chip} series={chipS} height={280} tooltipFmt={(n, v) => `${n}: ${_divFmt(v)}`} />
         </div>
         <div className="bg-white/70 rounded-2xl border border-slate-100 p-2">
-          <div className="text-[11px] font-bold text-slate-500 mb-1">主力资金流（元）</div>
+          <div className="text-[11px] font-bold text-slate-500 mb-1">主力资金流（{currency}）</div>
           <SeriesChart resp={flow} series={flowS} height={280} tooltipFmt={(n, v) => `${n}: ${_divFmt(v, 0)}`} />
         </div>
       </div>
@@ -214,7 +215,7 @@ export function ChipFlowTab({ symbol, asof }: TabProps) {
 }
 
 // ---------- 融资融券 ----------
-export function MarginTab({ symbol, asof }: TabProps) {
+export function MarginTab({ symbol, asof, currency = '元' }: TabProps) {
   const [resp, setResp] = useState<SeriesResponse>({ dates: [], columns: {} });
   const [loading, setLoading] = useState(false);
   useEffect(() => {
@@ -224,8 +225,8 @@ export function MarginTab({ symbol, asof }: TabProps) {
     return () => { c = true; };
   }, [symbol, asof]);
   const series = buildSeries(resp, [
-    { key: 'finance_balance', name: '融资余额(元)', color: '#3b82f6' },
-    { key: 'finance_net', name: '融资净买入(元)', color: '#f59e0b' },
+    { key: 'finance_balance', name: `融资余额(${currency})`, color: '#3b82f6' },
+    { key: 'finance_net', name: `融资净买入(${currency})`, color: '#f59e0b' },
   ]);
   return (
     <TabShell title="融资融券" icon={Landmark} loading={loading} autoHeight>
@@ -280,7 +281,7 @@ export function SentimentTab({ symbol, asof }: TabProps) {
 }
 
 // ---------- 股东户数 / 分红 ----------
-export function HoldersTab({ symbol, asof }: TabProps) {
+export function HoldersTab({ symbol, asof, currency = '元' }: TabProps) {
   const [hn, setHn] = useState<SeriesResponse>({ dates: [], columns: {} });
   const [divs, setDivs] = useState<DividendItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -306,7 +307,7 @@ export function HoldersTab({ symbol, asof }: TabProps) {
           <div className="overflow-x-auto custom-scrollbar">
             <table className="w-full text-[11px]">
               <thead className="text-slate-400 font-bold">
-                <tr><th className="text-left py-1">除权日</th><th className="text-right">每股派息(元)</th><th className="text-right">送/转</th></tr>
+                <tr><th className="text-left py-1">除权日</th><th className="text-right">每股派息({currency})</th><th className="text-right">送/转</th></tr>
               </thead>
               <tbody>
                 {divs.slice(0, 20).map(d => (

@@ -10,25 +10,28 @@ interface Props {
   onSelect: (item: StockListItem) => void;
   watchlistSymbols: Set<string>;
   placeholder?: string;
+  market?: string;
+  currency?: string;
 }
 
 const HISTORY_KEY = 'stock-terminal-search-history';
 
-function loadHistory(): string[] {
+function loadHistory(key: string): string[] {
   try {
-    const raw = localStorage.getItem(HISTORY_KEY);
+    const raw = localStorage.getItem(key);
     return raw ? (JSON.parse(raw) as string[]) : [];
   } catch {
     return [];
   }
 }
 
-export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜索股票代码 / 名称' }: Props) {
+export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜索股票代码 / 名称', market, currency }: Props) {
+  const historyKey = market ? `${HISTORY_KEY}:${market}` : HISTORY_KEY;
   const [q, setQ] = useState('');
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<StockListItem[]>([]);
-  const [history, setHistory] = useState<string[]>(() => loadHistory());
+  const [history, setHistory] = useState<string[]>(() => loadHistory(historyKey));
   const [highlight, setHighlight] = useState(0);
   const wrapRef = useRef<HTMLDivElement>(null);
 
@@ -53,7 +56,7 @@ export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜�
     setLoading(true);
     const timer = setTimeout(async () => {
       try {
-        const resp = await stockTerminalService.getStockList({ q: trimmed, page: 1, page_size: 10 });
+        const resp = await stockTerminalService.getStockList({ q: trimmed, page: 1, page_size: 10, ...(market ? { market } : {}) });
         setItems(resp.items ?? []);
       } catch {
         setItems([]);
@@ -62,13 +65,13 @@ export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜�
       }
     }, 300);
     return () => clearTimeout(timer);
-  }, [q, open]);
+  }, [q, open, market]);
 
   const handleSelect = (it: StockListItem) => {
     const key = `${it.symbol}|${it.name}`;
     const next = [key, ...history.filter((h) => h !== key)].slice(0, 5);
     setHistory(next);
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+    localStorage.setItem(historyKey, JSON.stringify(next));
     setOpen(false);
     onSelect(it);
   };
@@ -149,7 +152,7 @@ export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜�
                           {watched && <Star className="w-3 h-3 text-amber-400 fill-amber-400 shrink-0" />}
                         </span>
                         <span className="text-[11px] text-slate-400 truncate">
-                          {it.board ?? ''} {it.industry ? `· ${it.industry}` : ''} {it.total_mv ? `· ${it.total_mv.toFixed(0)}亿` : ''}
+                          {it.board ?? ''} {it.industry ? `· ${it.industry}` : ''} {it.total_mv ? `· ${it.total_mv.toFixed(0)}亿${currency || ''}` : ''}
                         </span>
                       </span>
                       <span className="shrink-0 text-right">
@@ -177,7 +180,7 @@ export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜�
                     <button
                       onClick={() => {
                         setHistory([]);
-                        localStorage.removeItem(HISTORY_KEY);
+                        localStorage.removeItem(historyKey);
                       }}
                       className="ml-auto text-[10px] text-slate-400 hover:text-slate-600"
                     >
@@ -192,7 +195,7 @@ export function StockSearchBar({ onSelect, watchlistSymbols, placeholder = '搜�
                           key={h}
                           onClick={async () => {
                             try {
-                              const resp = await stockTerminalService.getStockList({ q: sym, page: 1, page_size: 10 });
+                              const resp = await stockTerminalService.getStockList({ q: sym, page: 1, page_size: 10, ...(market ? { market } : {}) });
                               const hit = resp.items?.find((x) => x.symbol === sym) ?? resp.items?.[0];
                               if (hit) handleSelect(hit);
                               else handleSelect({ symbol: sym, name: name || sym } as StockListItem);

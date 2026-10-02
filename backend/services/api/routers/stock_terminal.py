@@ -613,11 +613,18 @@ async def stock_dividends(
 ):
     _ = current_user
     sym = symbol.upper().strip()
-    if not _SYMBOL_RE.match(sym):
+    source = terminal_source(symbol=sym)
+    if not _SYMBOL_RE.match(sym) and source is None:
         raise HTTPException(status_code=400, detail=f"非法代码 {sym}")
-    df = _read_symbol_parquet("dividend_factors", sym)
+    df = (
+        source.read_symbol_table("dividend_factors", sym)
+        if source else _read_symbol_parquet("dividend_factors", sym)
+    )
     if df.empty:
-        return {"success": True, "data": {"items": []}}
+        data = {"items": []}
+        if source:
+            data.update(available=False, currency=source.provider.currency)
+        return {"success": True, "data": data}
     df = df.sort_values("time", ascending=False)
     if date:
         df = df[df["time"].astype(str).str[:10] <= date]
@@ -709,9 +716,13 @@ async def stock_signal_overlay(
     """
     _ = current_user
     sym = symbol.upper().strip()
-    if not _SYMBOL_RE.match(sym):
+    source = terminal_source(symbol=sym)
+    if not _SYMBOL_RE.match(sym) and source is None:
         raise HTTPException(status_code=400, detail=f"非法代码 {sym}")
-    prefix = f"{sym.split('.')[1]}{sym.split('.')[0]}"  # 600519.SH -> SH600519
+    prefix = (
+        source.symbol_key(sym)
+        if source else f"{sym.split('.')[1]}{sym.split('.')[0]}"
+    )
 
     from datetime import timedelta as _td
 
@@ -895,7 +906,8 @@ async def stock_news(
     """
     _ = current_user
     sym = symbol.upper().strip()
-    if not _SYMBOL_RE.match(sym):
+    source = terminal_source(symbol=sym)
+    if not _SYMBOL_RE.match(sym) and source is None:
         raise HTTPException(status_code=400, detail=f"非法代码 {sym}")
 
     import os as _os
@@ -908,18 +920,22 @@ async def stock_news(
     code = sym.split(".")[0]
     name = ""
     try:
-        detail_dir = _quantdb_dir() / "2_base_sector" / "instrument_detail"
-        detail_file = detail_dir / "instrument_list.parquet"
-        if not detail_file.exists():
-            detail_file = detail_dir / "instrument_detail.parquet"
-        detail = pd.read_parquet(detail_file, columns=["Symbol", "Name"])
-        hit = detail[detail["Symbol"] == sym]
-        if not hit.empty:
-            name = str(hit.iloc[0]["Name"] or "").strip()
+        if source is None:
+            detail_dir = _quantdb_dir() / "2_base_sector" / "instrument_detail"
+            detail_file = detail_dir / "instrument_list.parquet"
+            if not detail_file.exists():
+                detail_file = detail_dir / "instrument_detail.parquet"
+            detail = pd.read_parquet(detail_file, columns=["Symbol", "Name"])
+            hit = detail[detail["Symbol"] == sym]
+            if not hit.empty:
+                name = str(hit.iloc[0]["Name"] or "").strip()
     except Exception:  # noqa: BLE001
         pass
 
-    keywords = [k for k in {code, name, name.replace(" ", "")} if k]
+    keywords = (
+        await asyncio.to_thread(source.news_keywords, sym)
+        if source else [k for k in {code, name, name.replace(" ", "")} if k]
+    )
     items: list[dict] = []
     seen: set[int] = set()
     try:
@@ -1162,19 +1178,26 @@ async def stock_financials(
 ):
     _ = current_user
     sym = symbol.upper().strip()
-    if not _SYMBOL_RE.match(sym):
+    source = terminal_source(symbol=sym)
+    if not _SYMBOL_RE.match(sym) and source is None:
         raise HTTPException(status_code=400, detail=f"非法代码 {sym}")
 
-    income = _read_symbol_parquet("income", sym)
-    balance = _read_symbol_parquet("balance", sym)
-    cashflow = _read_symbol_parquet("cashflow", sym)
-    pershare = _read_symbol_parquet("pershare_index", sym)
+    read = source.read_symbol_table if source else _read_symbol_parquet
+    income = read("income", sym)
+    balance = read("balance", sym)
+    cashflow = read("cashflow", sym)
+    pershare = read("pershare_index", sym)
 
     if date:
         # 只看该日之前披露的报告期（日历点选历史日时财报不出现未来数据）
         cutoff = date.replace("-", "")
 
         def _until_disclosed(df: pd.DataFrame) -> pd.DataFrame:
+            if source and not df.empty:
+                if "disclosed_date" not in df:
+                    raise HTTPException(status_code=422, detail="财报缺少披露日期")
+                disclosed = pd.to_datetime(df["disclosed_date"], format="%Y-%m-%d")
+                return df[disclosed.dt.date <= _date.fromisoformat(date)]
             return df if df.empty else df[df["m_timetag"].astype(str).str[:8] <= cutoff]
 
         income = _until_disclosed(income)
@@ -1199,7 +1222,25 @@ async def stock_financials(
             "income": _fin_records(income, _INCOME_COLS, limit, yi=True),
             "balance": _fin_records(balance, _BALANCE_COLS, limit, yi=True),
             "cashflow": _fin_records(cashflow, _CASHFLOW_COLS, limit, yi=True),
-            "per_share": _fin_records(pershare, _PERSHARE_COLS, limit, yi=False),
+            "per_share": _fin_records(
+                pershare,
+                {
+                    key: label.replace("(元)", f"({source.provider.currency})")
+                    for key, label in _PERSHARE_COLS.items()
+                }
+                if source else _PERSHARE_COLS,
+                limit,
+                yi=False,
+            ),
+            **(
+                {
+                    "available": any(
+                        not frame.empty for frame in (income, balance, cashflow, pershare)
+                    ),
+                    "currency": source.provider.currency,
+                }
+                if source else {}
+            ),
         },
     }
 
@@ -1214,14 +1255,24 @@ async def stock_series(
 ):
     _ = current_user
     sym = symbol.upper().strip()
-    if not _SYMBOL_RE.match(sym):
+    source = terminal_source(symbol=sym)
+    if not _SYMBOL_RE.match(sym) and source is None:
         raise HTTPException(status_code=400, detail=f"非法代码 {sym}")
 
     # 股东户数: 平铺小文件, endDate 为报告期
     if group == "holders":
-        hn = _read_symbol_parquet("holder_num", sym)
+        hn = (
+            source.read_symbol_table("holder_num", sym)
+            if source else _read_symbol_parquet("holder_num", sym)
+        )
         if hn.empty:
-            return {"success": True, "data": {"dates": [], "columns": {}}}
+            return {
+                "success": True,
+                "data": {
+                    "dates": [], "columns": {},
+                    **({"available": False} if source else {}),
+                },
+            }
         hn = hn.sort_values("endDate")
         if end_date:
             hn = hn[hn["endDate"].astype(str).str[:10] <= end_date]
@@ -1242,7 +1293,9 @@ async def stock_series(
     end_dt = end_date.replace("-", "") if end_date else ""
     cache_key = _series_cache_key(sym, group, years, end_dt)
     cached_df = _series_cache_get(cache_key)
-    if cached_df is not None:
+    if source:
+        df = await asyncio.to_thread(source.series, view, sym, years, end_date, cols)
+    elif cached_df is not None:
         df = cached_df
     else:
         def _run() -> pd.DataFrame:
@@ -1256,19 +1309,32 @@ async def stock_series(
                 logger.warning("series query %s %s failed: %s", group, sym, exc)
                 return pd.DataFrame()
 
-        import asyncio
-
         df = await asyncio.to_thread(_run)
         _series_cache_set(cache_key, df)
     if df.empty:
-        return {"success": True, "data": {"dates": [], "columns": {}}}
-    if group == "flow":
+        return {
+            "success": True,
+            "data": {
+                "dates": [], "columns": {},
+                **({"available": False} if source else {}),
+            },
+        }
+    if group == "flow" and source is None:
         df = normalize_l2_flow_money_to_yuan(df)
     # 对外不暴露对账用的 amount 列
     out_cols = [c for c in cols if c in df.columns and c != "amount"]
     dates = [str(v)[:10] for v in df["dt"]]
     columns = {c: [_safe_f(v) for v in df[c]] for c in out_cols}
-    return {"success": True, "data": {"dates": dates, "columns": columns}}
+    return {
+        "success": True,
+        "data": {
+            "dates": dates, "columns": columns,
+            **(
+                {"available": True, "currency": source.provider.currency}
+                if source else {}
+            ),
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2217,5 +2283,6 @@ async def stock_profile(
         profile.update(
             market=source.market, currency=source.provider.currency,
             frequency="daily", data_version=source.hub.data_dir.name,
+            pb_basis="PB",
         )
     return {"success": True, "data": profile}

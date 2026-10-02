@@ -83,13 +83,16 @@ class StockTerminalService {
   }
 
   /** 日K：传 start/end 时按精确日期区间拉取（后端不再做 days×2 自然日放大）；否则按 days 回溯 */
-  async getDailyKline(symbol: string, days = 500, adjust: KlineAdjust = 'qfq', start?: string, end?: string): Promise<KlineBar[]> {
+  async getDailyKline(symbol: string, days = 500, adjust: KlineAdjust = 'qfq', start?: string, end?: string, market = 'A', timeoutMs?: number): Promise<KlineBar[]> {
     try {
       const resp = await this.client.get('/market/kline', {
-        params: { symbol, market: 'A', adjust, ...(start ? { start, end } : { days }) },
+        params: { symbol, market, adjust, ...(start ? { start, end } : { days }) },
+        ...(timeoutMs ? { timeout: timeoutMs } : {}),
       });
       const items = resp.data?.data?.items ?? [];
-      return items.map((it: any) => ({
+      const pricedItems = market === 'A' ? items : items.filter((it: any) =>
+        ['open', 'high', 'low', 'close'].every(key => it[key] != null && Number.isFinite(Number(it[key]))));
+      return pricedItems.map((it: any) => ({
         date: String(it.date ?? '').slice(0, 10),
         open: Number(it.open),
         high: Number(it.high),
@@ -287,6 +290,8 @@ export interface MarketCalendarData {
   days: MarketCalendarDay[];
 }
 export interface FinancialsResponse {
+  available?: boolean;
+  currency?: string;
   symbol: string;
   periods: string[];
   income: FinRecord[];
@@ -294,7 +299,7 @@ export interface FinancialsResponse {
   cashflow: FinRecord[];
   per_share: FinRecord[];
 }
-export interface SeriesResponse { dates: string[]; columns: Record<string, (number | null)[]>; }
+export interface SeriesResponse { dates: string[]; columns: Record<string, (number | null)[]>; available?: boolean; currency?: string; }
 export interface DividendItem {
   date: string; interest: number | null; stock_bonus: number | null;
   stock_gift: number | null; gugai: number | null; dr: number | null;

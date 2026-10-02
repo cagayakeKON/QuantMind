@@ -16,7 +16,7 @@ import { L2FeatureCard } from '../components/L2FeatureCard';
 import { useAppSelector } from '../../../store';
 import { selectCurrentMarket } from '../../../store/slices/uiSlice';
 import { getMarketConfig } from '../../../config/marketConfig';
-import DailyEquityTerminal from './DailyEquityTerminal';
+import { normalizeStockCode } from '../../../utils/portfolioUtils';
 
 type DetailTab = 'overview' | 'financials' | 'valuation' | 'chipflow' | 'margin' | 'sentiment' | 'holders' | 'news' | 'l2';
 
@@ -73,6 +73,10 @@ function weekKey(date: string): string {
 }
 
 function StandardStockTerminalPage() {
+  const market = useAppSelector(selectCurrentMarket);
+  const config = getMarketConfig(market);
+  const terminal = config.stockTerminal;
+  const currency = terminal ? config.currency : undefined;
   const [selected, setSelected] = useState<StockListItem | null>(null);
   const [profile, setProfile] = useState<StockProfile | null>(null);
   const [bars, setBars] = useState<KlineBar[]>([]);
@@ -99,7 +103,7 @@ function StandardStockTerminalPage() {
       return;
     }
     let cancelled = false;
-    const code = selected.symbol.split('.')[0];
+    const code = terminal ? normalizeStockCode(selected.symbol, terminal.market) : selected.symbol.split('.')[0];
     modelTrainingService
       .getStockInferenceHistory(code, 750, modelId || undefined)
       .then((resp) => {
@@ -131,7 +135,7 @@ function StandardStockTerminalPage() {
     return () => {
       cancelled = true;
     };
-  }, [selected, modelId]);
+  }, [selected, modelId, terminal]);
 
   // 自选星标：用户股票池 favorites（与全局股票池对齐）
   useEffect(() => {
@@ -205,7 +209,7 @@ function StandardStockTerminalPage() {
     startD.setFullYear(startD.getFullYear() - 2);
     const iso = (d: Date) => d.toISOString().slice(0, 10);
     stockTerminalService
-      .getDailyKline(selected.symbol, 500, adjust, iso(startD), iso(endD))
+      .getDailyKline(selected.symbol, 500, adjust, iso(startD), iso(endD), terminal?.market, terminal?.requestTimeoutMs)
       .then((items) => {
         if (cancelled) return;
         if (period !== 'daily' && items.length) {
@@ -226,7 +230,7 @@ function StandardStockTerminalPage() {
     return () => {
       cancelled = true;
     };
-  }, [selected, period, adjust]);
+  }, [selected, period, adjust, terminal]);
 
   const up = (profile?.pct_change ?? selected?.pct_change ?? 0) >= 0;
 
@@ -248,7 +252,7 @@ function StandardStockTerminalPage() {
             </div>
           </div>
           <div className="justify-self-center min-w-0 w-full max-w-[560px]">
-            <StockSearchBar onSelect={handleSelect} watchlistSymbols={watchlist} />
+            <StockSearchBar onSelect={handleSelect} watchlistSymbols={watchlist} market={terminal?.market} currency={currency} />
           </div>
           {selected && (
             <div className="hidden md:flex items-center gap-2 text-[11px] text-slate-500 justify-self-end">
@@ -348,7 +352,7 @@ function StandardStockTerminalPage() {
                         </button>
                       ))}
                       <div className="w-px h-4 bg-slate-200 mx-1" />
-                      {KLINE_ADJUSTS.map((a) => (
+                      {KLINE_ADJUSTS.filter(a => !terminal || terminal.adjustments.includes(a.key)).map((a) => (
                         <button
                           key={a.key}
                           onClick={() => setAdjust(a.key)}
@@ -471,12 +475,12 @@ function StandardStockTerminalPage() {
                 <div className="flex-1 min-h-0 overflow-y-auto p-3 pb-16 bg-gray-50/30 custom-scrollbar">
                   <div className={detailTab === 'overview' ? '[&>div]:!grid-cols-1 [&>div]:!gap-3' : ''}>
                     {detailTab === 'overview' && <OverviewTab profile={profile} />}
-                    {detailTab === 'financials' && <FinancialsTab symbol={selected.symbol} asof={signalDate} />}
+                    {detailTab === 'financials' && <FinancialsTab symbol={selected.symbol} asof={signalDate} currency={currency} />}
                     {detailTab === 'valuation' && <ValuationTab symbol={selected.symbol} asof={signalDate} />}
-                    {detailTab === 'chipflow' && <ChipFlowTab symbol={selected.symbol} asof={signalDate} />}
-                    {detailTab === 'margin' && <MarginTab symbol={selected.symbol} asof={signalDate} />}
+                    {detailTab === 'chipflow' && <ChipFlowTab symbol={selected.symbol} asof={signalDate} currency={currency} />}
+                    {detailTab === 'margin' && <MarginTab symbol={selected.symbol} asof={signalDate} currency={currency} />}
                     {detailTab === 'sentiment' && <SentimentTab symbol={selected.symbol} asof={signalDate} />}
-                    {detailTab === 'holders' && <HoldersTab symbol={selected.symbol} asof={signalDate} />}
+                    {detailTab === 'holders' && <HoldersTab symbol={selected.symbol} asof={signalDate} currency={currency} />}
                     {detailTab === 'news' && <NewsTab symbol={selected.symbol} />}
                     {detailTab === 'l2' && <L2FeatureCard l2={profile?.l2_features ?? null} signalDate={profile?.signal_date ?? null} />}
                   </div>
@@ -490,9 +494,7 @@ function StandardStockTerminalPage() {
   );
 }
 
-const TERMINAL_PAGES = {standard: StandardStockTerminalPage, daily_equity: DailyEquityTerminal};
 export default function StockTerminalPage() {
   const market = useAppSelector(selectCurrentMarket);
-  const Page = TERMINAL_PAGES[getMarketConfig(market).stockTerminalUi || 'standard'];
-  return <Page />;
+  return <StandardStockTerminalPage key={getMarketConfig(market).stockTerminal?.market || 'legacy'} />;
 }

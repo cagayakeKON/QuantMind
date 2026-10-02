@@ -51,17 +51,22 @@ def _local_provider_kline(market, symbol, start, end, days, adjust):
     provider = _LOCAL_KLINE_PROVIDERS[market]
     hub = provider.open()
     suffix = StockCodeUtil.to_suffix(symbol, market=market)
-    frame = hub.fetch_daily_kline(suffix, start, end, adjust=adjust).tail(days)
-    items = [
-        {
-            "date": str(pd.Timestamp(row["trade_date"]).date()),
-            **{
-                key: _safe_float(row.get(key), default=None)
-                for key in ("open", "high", "low", "close", "volume", "amount")
-            },
-        }
-        for row in frame.to_dict("records")
-    ]
+    key = _kline_cache_key(market, suffix, str(start), str(end), adjust)
+    key += f"|{hub.data_dir}|{days}"
+    items = _kline_cache_get(key)
+    if items is None:
+        frame = hub.fetch_daily_kline(suffix, start, end, adjust=adjust).tail(days)
+        items = [
+            {
+                "date": str(pd.Timestamp(row["trade_date"]).date()),
+                **{
+                    key: _safe_float(row.get(key), default=None)
+                    for key in ("open", "high", "low", "close", "volume", "amount")
+                },
+            }
+            for row in frame.to_dict("records")
+        ]
+        _kline_cache_set(key, items)
     return {
         "success": True,
         "data": {

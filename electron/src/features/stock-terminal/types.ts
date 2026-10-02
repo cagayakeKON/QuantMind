@@ -56,6 +56,8 @@ export interface IndexMembership {
 }
 
 export interface StockProfile {
+  currency?: string;
+  pb_basis?: string;
   symbol: string;
   name: string;
   board: string;

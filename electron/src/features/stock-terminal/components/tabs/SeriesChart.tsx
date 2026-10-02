@@ -58,6 +58,8 @@ export function SeriesChart({ resp, series, height = 220, tooltipFmt }: Props) {
     };
   }, [resp, series, tooltipFmt]);
 
+  if (resp.available === false) return <div className="py-8 text-center text-[11px] text-slate-400">当前数据源未提供该项数据</div>;
+
   return (
     <ReactECharts option={option} notMerge lazyUpdate style={{ width: '100%', height }} opts={{ renderer: 'canvas' }} />
   );

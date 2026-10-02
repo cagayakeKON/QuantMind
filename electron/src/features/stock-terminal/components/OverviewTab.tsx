@@ -26,6 +26,8 @@ export function OverviewTab({ profile }: Props) {
 
   const up = (profile.pct_change ?? 0) >= 0;
   const v = profile.valuation ?? {};
+  const moneyUnit = profile.currency ? ` ${profile.currency}` : '元';
+  const capUnit = profile.currency ? `亿${profile.currency}` : '亿';
 
   return (
     <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
@@ -39,7 +41,7 @@ export function OverviewTab({ profile }: Props) {
         <Field label="市场板块" value={profile.board} />
         <Field label="所属行业" value={profile.industry ?? '--'} />
         <Field label="员工人数" value={profile.staff_num ? `${Math.round(profile.staff_num).toLocaleString()}人` : '--'} />
-        <Field label="IPO 发行价" value={fmt(profile.ipo_price, '元')} />
+        <Field label="IPO 发行价" value={fmt(profile.ipo_price, moneyUnit)} />
         {profile.main_business && (
           <p className="text-[10px] text-slate-500 leading-relaxed pt-2 line-clamp-4" title={profile.main_business}>
             {profile.main_business}
@@ -53,14 +55,14 @@ export function OverviewTab({ profile }: Props) {
           <Coins className="w-3 h-3 text-amber-500" />
           <span className="text-[11px] font-bold text-slate-600">行情与规模</span>
         </div>
-        <Field label="最新收盘" value={fmt(profile.close, '元')} accent={up ? 'text-rose-500' : 'text-emerald-500'} />
+        <Field label="最新收盘" value={fmt(profile.close, moneyUnit)} accent={up ? 'text-rose-500' : 'text-emerald-500'} />
         <Field
           label={`涨跌幅 (${profile.trade_date || '--'})`}
           value={`${up ? '+' : ''}${fmt(profile.pct_change, '%')}`}
           accent={up ? 'text-rose-500' : 'text-emerald-500'}
         />
-        <Field label="总市值" value={fmt(profile.total_mv, '亿')} />
-        <Field label="流通市值" value={fmt(profile.float_mv, '亿')} />
+        <Field label="总市值" value={fmt(profile.total_mv, capUnit)} />
+        <Field label="流通市值" value={fmt(profile.float_mv, capUnit)} />
         <Field label="总股本" value={profile.total_share ? `${(profile.total_share / 10000).toFixed(1)}亿股` : '--'} />
         <Field label="涨跌停价" value={profile.limit_up_price ? `${fmt(profile.limit_up_price)} / ${fmt(profile.limit_down_price)}` : '--'} />
       </div>
@@ -73,11 +75,11 @@ export function OverviewTab({ profile }: Props) {
         </div>
         <Field label="PE (动)" value={fmt(profile.pe_dynamic)} />
         <Field label="PE (TTM)" value={fmt(v.pe_ttm)} />
-        <Field label="PB (MRQ)" value={fmt(profile.pb)} />
+        <Field label={profile.pb_basis || 'PB (MRQ)'} value={fmt(profile.pb)} />
         <Field label="PS (TTM)" value={fmt(v.ps_ttm)} />
         <Field label="股息率" value={fmt(profile.dividend_yield, '%')} />
-        <Field label="净利润 TTM" value={v.net_profit_ttm != null ? `${(v.net_profit_ttm / 1e8).toFixed(1)}亿` : '--'} />
-        <Field label="营收 TTM" value={v.revenue_ttm != null ? `${(v.revenue_ttm / 1e8).toFixed(1)}亿` : '--'} />
+        <Field label="净利润 TTM" value={v.net_profit_ttm != null ? `${(v.net_profit_ttm / 1e8).toFixed(1)}${capUnit}` : '--'} />
+        <Field label="营收 TTM" value={v.revenue_ttm != null ? `${(v.revenue_ttm / 1e8).toFixed(1)}${capUnit}` : '--'} />
       </div>
     </div>
   );
