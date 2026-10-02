@@ -711,12 +711,19 @@ async def get_data_window(
 @router.get("/qlib-data-range", summary="获取 Qlib 数据日期范围")
 async def get_qlib_data_range(
     current_user: dict[str, Any] = Depends(get_current_user),
+    market: str | None = None,
 ):
     """
     返回 qlib_data 的日期范围，用于前端日期选择器限制。
     读取 db/qlib_data/calendars/day.txt 获取交易日历。
+    显式注册的本地市场使用其已发布日线与现金交易日历的交集。
     """
     _ = current_user
+    from backend.services.api.market_data_range import registered_market_data_range
+
+    local_range = await registered_market_data_range(market)
+    if local_range is not None:
+        return local_range
     qlib_data_dir = Path(resolve_qlib_provider_uri())
     calendars_path = qlib_data_dir / "calendars" / "day.txt"
 

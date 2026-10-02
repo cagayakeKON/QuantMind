@@ -43,6 +43,7 @@ function modelMatchesMarket(rawMarket: string, currentMarket: string): boolean {
   if (cur === 'CN') return mkt === 'CN' || mkt === 'A_SHARE' || mkt === 'A股' || mkt === 'CHINA';
   if (cur === 'HK') return mkt === 'HK' || mkt === 'HONG_KONG' || mkt === '港股';
   if (cur === 'US') return mkt === 'US' || mkt === 'US_STOCK' || mkt === '美股';
+  if (cur === 'JP') return mkt === 'JP' || mkt === 'JAPAN' || mkt === '日本';
   if (cur === 'CRYPTO') return mkt === 'CRYPTO' || mkt === '加密';
   if (cur === 'FUTURES') return mkt === 'FUTURES' || mkt === '期货';
   return true;
@@ -53,12 +54,17 @@ function modelMarketLabel(rawMarket: string): string {
   if (mkt === 'CUSTOM' || mkt.endsWith('_CUSTOM')) return '自定义';
   if (mkt === 'HK' || mkt === 'HONG_KONG') return '港股';
   if (mkt === 'US' || mkt === 'US_STOCK') return '美股';
+  if (mkt === 'JP' || mkt === 'JAPAN') return '日本';
   if (mkt === 'CRYPTO') return '加密';
   if (mkt === 'FUTURES') return '期货';
   return 'A股';
 }
 
 const MARKET_UNIVERSE_PRESETS: Record<string, { label: string; value: string; custom?: boolean }[]> = {
+  JP: [
+    { label: '全部日股', value: 'all' },
+    { label: '自定义', value: '__custom__', custom: true },
+  ],
   CN: [
     { label: '全部', value: 'all' },
     { label: '沪深300', value: 'csi300' },
@@ -184,27 +190,33 @@ export const QlibQuickBacktest: React.FC = () => {
 
   // 获取 Qlib 数据日期范围
   useEffect(() => {
+    let cancelled = false;
+    setDataMinDate(null);
+    setDataMaxDate(null);
     const fetchDataRange = async () => {
       const { backtestService } = await import('../../services/backtestService');
-      const result = await backtestService.getQlibDataRange();
-      if (result.exists && result.min_date && result.max_date) {
+      const result = await backtestService.getQlibDataRange(marketConfig.backtest?.market);
+      if (!cancelled && result.exists && result.min_date && result.max_date) {
         setDataMinDate(result.min_date);
         setDataMaxDate(result.max_date);
       }
     };
     fetchDataRange();
-  }, []);
+    return () => { cancelled = true; };
+  }, [marketConfig.backtest?.market]);
 
   // 加载用户模型列表
   useEffect(() => {
+    let cancelled = false;
     const loadModels = async () => {
       setModelsLoading(true);
       try {
         const [userResp, sysModels] = await Promise.all([
           // 回测选模型：只要可用模型，已归档的不应出现（管理页才需要 includeArchived）
-          modelTrainingService.listUserModels(false),
-          modelTrainingService.listSystemModels(),
+          modelTrainingService.listUserModels(false, marketConfig.backtest?.market),
+          modelTrainingService.listSystemModels(marketConfig.backtest?.market),
         ]);
+        if (cancelled) return;
         const sysItems: UserModelRecord[] = (sysModels ?? []).map((sm) => {
           const raw = sm as unknown as Record<string, any>;
           return {
@@ -222,6 +234,7 @@ export const QlibQuickBacktest: React.FC = () => {
               model_type: sm.model_type,
               feature_count: sm.feature_count,
               market: raw.market,
+              ...(marketConfig.backtest ? { context: raw.context } : {}),
               target_horizon_days: raw.target_horizon_days,
               train_start: raw.train_start,
               train_end: raw.train_end,
@@ -245,11 +258,12 @@ export const QlibQuickBacktest: React.FC = () => {
       } catch {
         // silent
       } finally {
-        setModelsLoading(false);
+        if (!cancelled) setModelsLoading(false);
       }
     };
     loadModels();
-  }, []);
+    return () => { cancelled = true; };
+  }, [marketConfig.backtest?.market]);
 
   // 按当前市场过滤模型（已归档模型一律排除，防止参与回测）
   const filteredModels = useMemo(() => {
@@ -260,10 +274,10 @@ export const QlibQuickBacktest: React.FC = () => {
       const ctx = meta.context;
       const ctxMarket = String((ctx && typeof ctx === 'object' ? ctx.market : '') || '').toUpperCase();
       const mkt = raw || ctxMarket;
-      if (!mkt) return true; // 无市场标记的模型始终显示
+      if (!mkt) return !marketConfig.backtest?.requireModelMarket;
       return modelMatchesMarket(mkt, currentMarket);
     });
-  }, [models, currentMarket]);
+  }, [models, currentMarket, marketConfig.backtest?.requireModelMarket]);
 
   // 当过滤列表变化时，确保选中模型仍在列表中
   useEffect(() => {
@@ -395,6 +409,7 @@ export const QlibQuickBacktest: React.FC = () => {
       if (!resolvedUserId) throw new Error('未登录或用户信息缺失');
 
       const config: BacktestConfig = {
+        market: marketConfig.backtest?.market,
         symbol: universePath,
         start_date: startDate,
         end_date: endDate,
@@ -409,7 +424,7 @@ export const QlibQuickBacktest: React.FC = () => {
         strategy_id: strategyInfo?.id,
         model_id: selectedModelId || undefined,
         seed: seed.trim() === '' ? undefined : Number(seed),
-        commission: 0.00025,
+        commission: marketConfig.backtest?.commission ?? 0.00025,
         deal_price: getTailTradeDealPrice(tailTradeEnabled),
         signal_lag_days: getTailTradeSignalLagDays(tailTradeEnabled),
         allow_feature_signal_fallback: ALLOW_FEATURE_SIGNAL_FALLBACK,
@@ -1057,7 +1072,7 @@ export const QlibQuickBacktest: React.FC = () => {
         open={customPoolOpen}
         onClose={() => setCustomPoolOpen(false)}
         selectedPoolId={selectedCustomPool?.pool_id}
-        market="CN"
+        market={marketConfig.backtest?.market ?? 'CN'}
         onSelect={selectCustomPool}
       />
       {showErrorLog && (

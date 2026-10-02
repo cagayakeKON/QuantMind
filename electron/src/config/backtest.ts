@@ -105,6 +105,9 @@ export const BACKTEST_CONFIG = {
     ],
 
     MARKET_BENCHMARKS: {
+      JP: [
+        { code: 'TOPIX', name: 'TOPIX 价格指数' },
+      ],
       CN: [
         { code: 'SH000300', name: '沪深300' },
         { code: 'SH000905', name: '中证500' },

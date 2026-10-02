@@ -15,6 +15,9 @@
 import axios, { AxiosInstance } from 'axios';
 import { SERVICE_URLS } from '../config/services';
 import { authService } from '../features/auth/services/authService';
+import type { AppMarket } from '../store/slices/uiSlice';
+import { getMarketConfig } from '../config/marketConfig';
+import { normalizeStockCode } from '../utils/portfolioUtils';
 
 // ============================================================================
 // 类型定义
@@ -22,6 +25,7 @@ import { authService } from '../features/auth/services/authService';
 
 /** 回测请求配置 */
 export interface BacktestConfig {
+  market?: AppMarket;
   // 必填参数
   strategy_code?: string;
   strategy_id?: string;
@@ -190,6 +194,7 @@ export interface Trade {
 
 /** 历史查询过滤器 */
 export interface HistoryFilter {
+  market?: AppMarket;
   status?: 'pending' | 'running' | 'completed' | 'failed';
   symbol?: string;
   start_date?: string;
@@ -565,7 +570,15 @@ class BacktestService {
     return lines.join('\n');
   }
 
-  private buildUniverse(symbol: string): string {
+  private buildUniverse(symbol: string, market?: AppMarket): string {
+    if (market && getMarketConfig(market).backtest) {
+      const raw = (symbol || '').trim();
+      if (!raw) return getMarketConfig(market).defaultUniverse;
+      // Pool references and files belong to the shared resolver grammar.
+      if (/^(pool_id:|pool:|list:|file:)/i.test(raw) || raw.toLowerCase() === 'all'
+        || /[/\\]/.test(raw) || /\.(txt|csv)$/i.test(raw)) return raw;
+      return `list:${raw.split(/[,\s]+/).filter(Boolean).map(code => normalizeStockCode(code, market)).join(',')}`;
+    }
     if (!symbol) return 'csi300';
     const normalized = symbol.trim();
     if (!normalized) return 'csi300';
@@ -761,7 +774,7 @@ class BacktestService {
       end_date: config.end_date,
       initial_capital: config.initial_capital,
       benchmark: config.benchmark_symbol || 'SH000300',
-      universe: this.buildUniverse(config.symbol),
+      universe: this.buildUniverse(config.symbol, config.market),
       // 基础费率，后端会据此计算详细费用
       commission: config.commission ?? 0.00025,
       user_id: this.normalizeUserId(config.user_id),
@@ -777,6 +790,8 @@ class BacktestService {
       qlib_provider_uri: config.qlib_provider_uri,
       qlib_region: config.qlib_region,
     };
+
+    if (config.market) payload.market = config.market;
 
     if (config.model_id?.trim()) {
       payload.model_id = config.model_id;
@@ -901,6 +916,7 @@ class BacktestService {
     params.append('tenant_id', tenantId || 'default'); // 注入必填的 tenant_id
 
     if (filters?.status) params.append('status', filters.status);
+    if (filters?.market) params.append('market', filters.market);
     if (filters?.symbol) params.append('symbol', filters.symbol);
     if (filters?.start_date) params.append('start_date', filters.start_date);
     if (filters?.end_date) params.append('end_date', filters.end_date);
@@ -1783,7 +1799,7 @@ class BacktestService {
    * 获取 Qlib 数据日期范围
    * 用于前端日期选择器限制
    */
-  async getQlibDataRange(): Promise<{
+  async getQlibDataRange(market?: AppMarket): Promise<{
     exists: boolean;
     min_date: string | null;
     max_date: string | null;
@@ -1793,6 +1809,7 @@ class BacktestService {
       const userApiUrl = SERVICE_URLS.USER_SERVICE;
       const token = authService.getAccessToken();
       const response = await axios.get(`${userApiUrl}/api/v1/models/qlib-data-range`, {
+        ...(market ? { params: { market } } : {}),
         headers: {
           Authorization: `Bearer ${token}`,
         },

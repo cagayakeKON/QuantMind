@@ -11,6 +11,7 @@ class LocalMarketProvider:
     currency: str
     source: str
     benchmark: str
+    daily_partition_dir: str = "1_kline_data/daily_unadjusted"
 
     def open(self):
         cls = getattr(importlib.import_module(self.module), self.hub_class)

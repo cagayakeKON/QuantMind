@@ -25,6 +25,10 @@ import { getMarketConfig } from '../../config/marketConfig';
 import { message } from 'antd';
 
 const MARKET_UNIVERSE_PRESETS: Record<string, { label: string; value: string; custom?: boolean }[]> = {
+  JP: [
+    { label: '全部日股', value: 'all' },
+    { label: '自定义', value: '__custom__', custom: true },
+  ],
   CN: [
     { label: '全部', value: 'all' },
     { label: '沪深300', value: 'csi300' },
@@ -239,6 +243,7 @@ export const QlibExpertBacktest: React.FC = () => {
       }
 
       const config: BacktestConfig = {
+        market: marketConfig.backtest?.market,
         symbol: universePath,
         start_date: effectiveStart,
         end_date: effectiveEnd,
@@ -249,7 +254,7 @@ export const QlibExpertBacktest: React.FC = () => {
         // 专家模式代码优先：不传 strategy_params，后端以 STRATEGY_CONFIG 为准补全缺失项
         benchmark_symbol: benchmark,
         strategy_code: codeToRun,
-        commission: 0.00025,
+        commission: marketConfig.backtest?.commission ?? 0.00025,
         qlib_provider_uri: marketConfig.qlibProviderUri,
         qlib_region: marketConfig.qlibRegion,
       };
@@ -303,16 +308,20 @@ export const QlibExpertBacktest: React.FC = () => {
 
   // 获取 Qlib 数据日期范围
   useEffect(() => {
+    let cancelled = false;
+    setDataMinDate(null);
+    setDataMaxDate(null);
     const fetchDataRange = async () => {
       const { backtestService } = await import('../../services/backtestService');
-      const result = await backtestService.getQlibDataRange();
-      if (result.exists && result.min_date && result.max_date) {
+      const result = await backtestService.getQlibDataRange(marketConfig.backtest?.market);
+      if (!cancelled && result.exists && result.min_date && result.max_date) {
         setDataMinDate(result.min_date);
         setDataMaxDate(result.max_date);
       }
     };
     fetchDataRange();
-  }, []);
+    return () => { cancelled = true; };
+  }, [marketConfig.backtest?.market]);
 
   // 市场切换时重置基准和股票池
   useEffect(() => {
@@ -599,7 +608,7 @@ export const QlibExpertBacktest: React.FC = () => {
         open={customPoolOpen}
         onClose={() => setCustomPoolOpen(false)}
         selectedPoolId={selectedCustomPool?.pool_id}
-        market={currentMarket === 'CN' ? 'CN' : undefined}
+        market={marketConfig.backtest?.market ?? (currentMarket === 'CN' ? 'CN' : undefined)}
         title="专家回测股票池"
         onSelect={(pool) => {
           setSelectedCustomPool(pool);
