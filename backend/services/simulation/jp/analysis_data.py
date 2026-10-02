@@ -149,6 +149,115 @@ def public_factor_metrics(result, request, pred, strategy_context):
     }
 
 
+def save_style_features(result, request, context):
+    """Record inputs for the existing style algorithm, never fabricated exposures."""
+    from pathlib import Path
+    from backend.services.engine.qlib_app.services.style_attribution_service import (
+        StyleAttributionService,
+    )
+
+    saved = {"data_version": recorded_version(result), "available": False}
+    if not result.positions or context is None:
+        return {**saved, "reason": "No recorded holdings or market data context"}
+    if context.spec.data_version != saved["data_version"]:
+        raise ValueError("Style provider does not match the recorded version")
+    if context.execution_day != pd.Timestamp(request.end_date):
+        raise ValueError("Style inputs require the completed execution interval")
+    fields = list(StyleAttributionService.STYLE_FACTORS.values())
+    unavailable = []
+    try:
+        context.validate_fields(fields)
+    except ValueError as exc:
+        unavailable.append(str(exc))
+    # TOPIX supplies price levels, not a constituent/volume series. Do not feed
+    # missing benchmark fields to the public algorithm's zero-valued fallback.
+    volume = Path(context.spec.provider_uri) / "features/jp_topix/volume.day.bin"
+    if not volume.is_file():
+        unavailable.append("TOPIX volume is unavailable")
+    if unavailable:
+        return {**saved, "reason": "; ".join(unavailable)}
+    symbols = list(dict.fromkeys(row["symbol"] for row in result.positions))
+    if request.benchmark not in symbols:
+        symbols.append(request.benchmark)
+    day = max(row["date"] for row in result.positions)
+    frame = context._read_provider_features(
+        symbols, [context.mapper(code) for code in symbols], fields, day, day
+    )
+    if frame is None or frame.empty or not set(fields).issubset(frame.columns):
+        return {**saved, "reason": "Recorded style inputs are unavailable"}
+    if not np.isfinite(frame[fields].to_numpy(dtype=float)).all():
+        return {**saved, "reason": "Recorded style inputs are incomplete"}
+    if set(frame.index.get_level_values("instrument")) != set(symbols):
+        return {**saved, "reason": "Recorded style instruments are incomplete"}
+    dates = frame.index.get_level_values("datetime")
+    if (
+        not frame.index.is_unique
+        or len(frame) != len(symbols)
+        or not (dates == pd.Timestamp(day)).all()
+    ):
+        return {**saved, "reason": "Recorded style dates are incomplete"}
+    rows = frame.reset_index()
+    rows["datetime"] = rows["datetime"].map(
+        lambda value: str(pd.Timestamp(value).date())
+    )
+    return {
+        **saved,
+        "available": True,
+        "fields": fields,
+        "rows": rows[["instrument", "datetime", *fields]].to_dict("records"),
+    }
+
+
+def create_style_feature_loader(result):
+    """The public style API consumes only the recorded, versioned inputs."""
+    version = recorded_version(result)
+    saved = (result.advanced_stats or {}).get("style_features")
+    if saved is not None and saved.get("data_version") != version:
+        raise ValueError("Recorded JP style input versions do not match")
+    if result.style_attribution and (not saved or not saved.get("available")):
+        raise ValueError("Recorded JP style attribution has no matching source")
+
+    frame = pd.DataFrame()
+    if saved and saved.get("available"):
+        from backend.services.engine.qlib_app.services.style_attribution_service import (
+            StyleAttributionService,
+        )
+
+        fields = list(StyleAttributionService.STYLE_FACTORS.values())
+        frame = pd.DataFrame(saved.get("rows", []))
+        if (
+            frame.empty
+            or not set(fields).issubset(saved.get("fields", []))
+            or not {"instrument", "datetime", *fields}.issubset(frame.columns)
+        ):
+            raise ValueError("Recorded JP style inputs are unavailable")
+        frame["datetime"] = pd.to_datetime(frame["datetime"], errors="raise")
+        frame[fields] = frame[fields].apply(pd.to_numeric, errors="raise")
+        if (
+            frame["datetime"].isna().any()
+            or frame.duplicated(["instrument", "datetime"]).any()
+            or not np.isfinite(frame[fields].to_numpy(dtype=float)).all()
+        ):
+            raise ValueError("Recorded JP style inputs are invalid")
+
+    def read(instruments, fields, start_time=None, end_time=None):
+        if not saved or not saved.get("available"):
+            return pd.DataFrame()
+        if not set(fields).issubset(saved.get("fields", [])):
+            raise ValueError("Recorded JP style fields are unavailable")
+        selected = frame[frame.instrument.isin(instruments)]
+        selected = selected[
+            selected.datetime.between(pd.Timestamp(start_time), pd.Timestamp(end_time))
+        ]
+        if set(selected.instrument) != set(instruments) or len(selected) != len(
+            set(instruments)
+        ):
+            raise ValueError("Recorded JP style instruments are unavailable")
+        return selected.set_index(["instrument", "datetime"])[fields].copy()
+
+    return read
+
+
 def public_report_metrics(result, request):
     """Map cash valuations to the original public report metric algorithms."""
     from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer

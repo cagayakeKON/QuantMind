@@ -32,6 +32,8 @@ class StyleAttributionService:
         benchmark: str,
         start_date: str,
         end_date: str,
+        *,
+        feature_loader=None,
     ) -> dict[str, Any]:
         """
         分析持仓的风格暴露
@@ -56,7 +58,7 @@ class StyleAttributionService:
             last_date = pos_df["date"].max()
 
             # 简化版：计算期末截面的风格暴露
-            factor_data = D.features(
+            factor_data = (feature_loader if feature_loader is not None else D.features)(
                 all_symbols,
                 list(cls.STYLE_FACTORS.values()),
                 start_time=last_date,

@@ -460,13 +460,20 @@ def run_cash_backtest(
         execution_time=time.monotonic() - started,
     )
     if request.strategy_type != "jp_cash_topk":
-        from .analysis_data import public_factor_metrics, public_report_metrics
+        from .analysis_data import (
+            public_factor_metrics,
+            public_report_metrics,
+            save_style_features,
+        )
 
         report = report.model_copy(update=public_report_metrics(report, request))
         report = report.model_copy(
             update=public_factor_metrics(
                 report, request, strategy_runner.analysis_signals(), strategy_context
             )
+        )
+        report.advanced_stats["style_features"] = save_style_features(
+            report, request, strategy_context
         )
     return report
 
