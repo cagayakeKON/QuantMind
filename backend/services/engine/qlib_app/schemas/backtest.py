@@ -66,6 +66,7 @@ class QlibBacktestRequest(BaseModel):
     market: Literal["CN", "HK", "JP", "US", "CRYPTO", "FUTURES"] | None = None
     jp_commission_rate: float | None = Field(None, ge=0, lt=1)
     jp_slippage_bps: float = Field(5.0, ge=0, lt=10000)
+    jp_data_version: str | None = Field(None, max_length=128)
 
     # 策略配置 (支持原生 ID 和前端模板 ID)
     strategy_type: str = Field(

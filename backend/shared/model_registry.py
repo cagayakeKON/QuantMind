@@ -157,7 +157,9 @@ class ModelRegistryService:
             "model_file": str(row.get("model_file") or ""),
             "metadata_json": metadata_json,
             "metrics_json": metrics_json,
-            "is_default": bool(row.get("is_default")),
+            "is_default": bool(metadata_json.get("market_default"))
+            if str(metadata_json.get("market") or "").upper() == "JP"
+            else bool(row.get("is_default")),
             "created_at": row.get("created_at").isoformat()
             if row.get("created_at")
             else None,
@@ -517,11 +519,14 @@ class ModelRegistryService:
         self, *, tenant_id: str, user_id: str, market: str | None = None
     ) -> dict[str, Any] | None:
         tenant, user = self._normalize_owner(tenant_id=tenant_id, user_id=user_id)
-        market_clause = ""
+        market_clause = " AND COALESCE(metadata_json->>'market', 'CN') <> 'JP'"
+        default_clause = "is_default = TRUE"
         params: dict[str, Any] = {"tenant_id": tenant, "user_id": user}
         if market:
             market_clause = " AND COALESCE(metadata_json->>'market', 'CN') = :market"
             params["market"] = str(market).upper().strip()
+            if params["market"] == "JP":
+                default_clause = "metadata_json->>'market_default' = 'true'"
         async with get_session(read_only=True) as session:
             row = (
                 (
@@ -532,7 +537,7 @@ class ModelRegistryService:
                                metadata_json, metrics_json, is_default, created_at, updated_at, activated_at
                         FROM qm_user_models
                         WHERE tenant_id = :tenant_id AND user_id = :user_id
-                          AND is_default = TRUE AND status IN ('ready', 'active'){market_clause}
+                          AND {default_clause} AND status IN ('ready', 'active'){market_clause}
                         ORDER BY activated_at DESC NULLS LAST, updated_at DESC
                         LIMIT 1
                         """
@@ -608,6 +613,13 @@ class ModelRegistryService:
             if status not in _READY_STATUSES:
                 raise ValueError("model is not ready")
 
+            target_meta = self._parse_json_field(target.get("metadata_json"))
+            if str(target_meta.get("market") or "").upper() == "JP":
+                await self._set_jp_default_model(
+                    tenant_id=tenant, user_id=user, model_id=mid
+                )
+                return await self.get_model(tenant_id=tenant, user_id=user, model_id=mid)
+
             await session.execute(
                 text(
                     """
@@ -658,6 +670,72 @@ class ModelRegistryService:
             raise ValueError("model not found after update")
         return model
 
+    async def _set_jp_default_model(
+        self, *, tenant_id: str, user_id: str, model_id: str, only_if_missing=False
+    ):
+        # A separate namespace keeps JP models out of legacy broker/default scans.
+        now = datetime.now(timezone.utc)
+        params = {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "model_id": model_id,
+            "updated_at": now,
+        }
+        async with get_session() as session:
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:owner, 0))"),
+                {"owner": f"jp-default:{tenant_id}:{user_id}"},
+            )
+            target = (
+                await session.execute(
+                    text("""
+                SELECT model_id FROM qm_user_models
+                WHERE tenant_id = :tenant_id AND user_id = :user_id AND model_id = :model_id
+                  AND metadata_json->>'market' = 'JP' AND status IN ('ready', 'active')
+                FOR UPDATE
+            """),
+                    params,
+                )
+            ).first()
+            if not target:
+                raise ValueError("JP default model is not ready")
+            if only_if_missing:
+                current = (
+                    await session.execute(
+                        text("""
+                    SELECT model_id FROM qm_user_models
+                    WHERE tenant_id = :tenant_id AND user_id = :user_id
+                      AND metadata_json->>'market' = 'JP'
+                      AND metadata_json->>'market_default' = 'true'
+                      AND status IN ('ready', 'active') LIMIT 1
+                """),
+                        params,
+                    )
+                ).first()
+                if current:
+                    return
+            await session.execute(
+                text("""
+                UPDATE qm_user_models
+                SET metadata_json = jsonb_set(metadata_json, '{market_default}', 'false'::jsonb),
+                    updated_at = :updated_at
+                WHERE tenant_id = :tenant_id AND user_id = :user_id
+                  AND metadata_json->>'market' = 'JP'
+                  AND metadata_json->>'market_default' = 'true'
+            """),
+                params,
+            )
+            await session.execute(
+                text("""
+                UPDATE qm_user_models
+                SET is_default = FALSE,
+                    metadata_json = jsonb_set(metadata_json - 'system_default' - 'readonly', '{market_default}', 'true'::jsonb),
+                    activated_at = :updated_at, updated_at = :updated_at
+                WHERE tenant_id = :tenant_id AND user_id = :user_id AND model_id = :model_id
+            """),
+                params,
+            )
+
     async def archive_model(
         self, *, tenant_id: str, user_id: str, model_id: str
     ) -> dict[str, Any]:
@@ -676,6 +754,40 @@ class ModelRegistryService:
         )
         if bool(metadata.get("readonly")):
             raise ValueError("system model cannot be archived")
+
+        if str(metadata.get("market") or "").upper() == "JP":
+            async with get_session() as session:
+                await session.execute(
+                    text("""
+                    UPDATE qm_user_models
+                    SET status = 'archived', is_default = FALSE, updated_at = :now,
+                        metadata_json = jsonb_set(metadata_json, '{market_default}', 'false'::jsonb)
+                    WHERE tenant_id = :tenant_id AND user_id = :user_id AND model_id = :model_id
+                """),
+                    {
+                        "tenant_id": tenant,
+                        "user_id": user,
+                        "model_id": mid,
+                        "now": datetime.now(timezone.utc),
+                    },
+                )
+            if not await self.get_default_model(
+                tenant_id=tenant, user_id=user, market="JP"
+            ):
+                models = await self.list_models(
+                    tenant_id=tenant, user_id=user, market="JP"
+                )
+                ready = next(
+                    (m for m in models if m["status"] in _READY_STATUSES), None
+                )
+                if ready:
+                    await self._set_jp_default_model(
+                        tenant_id=tenant,
+                        user_id=user,
+                        model_id=ready["model_id"],
+                        only_if_missing=True,
+                    )
+            return await self.get_model(tenant_id=tenant, user_id=user, model_id=mid)
 
         now = datetime.now(timezone.utc)
         async with get_session() as session:
@@ -723,6 +835,7 @@ class ModelRegistryService:
                             FROM qm_user_models
                             WHERE tenant_id = :tenant_id AND user_id = :user_id
                               AND status IN ('ready', 'active') AND model_id <> :archived_id
+                              AND COALESCE(metadata_json->>'market', 'CN') <> 'JP'
                             ORDER BY updated_at DESC
                             LIMIT 1
                             """
@@ -1305,6 +1418,7 @@ class ModelRegistryService:
                         FROM qm_user_models
                         WHERE tenant_id = :tenant_id AND user_id = :user_id
                           AND is_default = TRUE AND status IN ('ready', 'active')
+                          AND COALESCE(metadata_json->>'market', 'CN') <> 'JP'
                         ORDER BY activated_at DESC NULLS LAST, updated_at DESC
                         LIMIT 1
                         """
@@ -1453,6 +1567,7 @@ class ModelRegistryService:
         """从 benchmark 推断市场，与 admin_training_utils._resolve_market 保持一致。"""
         raw = str(benchmark or "").upper().strip()
         _BENCHMARK_MARKET = {
+            "TOPIX": "JP",
             "HSI": "HK",
             "HSCEI": "HK",
             "HSTECH": "HK",
@@ -1551,6 +1666,8 @@ class ModelRegistryService:
             "label_formula": request_payload.get("label_formula"),
             "training_window": request_payload.get("training_window"),
         }
+        if market_str == "JP":
+            metadata.pop("market_default", None)
 
         async with get_session() as session:
             await session.execute(
@@ -1668,7 +1785,7 @@ class ModelRegistryService:
                         {"tenant_id": tenant, "user_id": user},
                     )
                 ).first()
-                should_set_default = not bool(has_business_default)
+                should_set_default = not bool(has_business_default) and market_str != "JP"
                 if should_set_default:
                     await session.execute(
                         text(
@@ -1742,6 +1859,11 @@ class ModelRegistryService:
                         "updated_at": now,
                     },
                 )
+
+        if market_str == "JP" and sync_status == "ready":
+            await self._set_jp_default_model(
+                tenant_id=tenant, user_id=user, model_id=model_id, only_if_missing=True
+            )
 
         return {
             "model_id": model_id,

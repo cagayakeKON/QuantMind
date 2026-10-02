@@ -224,7 +224,13 @@ class BacktestPersistence:
         # 【核心性能优化 2】仅在明确包含 trades 且确实有数据时才进行极其耗时的归一化
         should_normalize_trades = (include_fields is None or "trades" in include_fields) and (exclude_fields is None or "trades" not in exclude_fields)
         trades = merged_payload.get("trades")
-        if should_normalize_trades and isinstance(trades, list) and trades:
+        if (
+            should_normalize_trades
+            and merged_payload.get("market") != "JP"
+            and (merged_payload.get("config") or {}).get("market") != "JP"
+            and isinstance(trades, list)
+            and trades
+        ):
             try:
                 from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
 
@@ -494,7 +500,13 @@ class BacktestPersistence:
 
             # 仅在需要时进行耗时的归一化
             trades = payload.get("trades")
-            if should_normalize_trades and isinstance(trades, list) and trades:
+            if (
+                should_normalize_trades
+                and payload.get("market") != "JP"
+                and (payload.get("config") or {}).get("market") != "JP"
+                and isinstance(trades, list)
+                and trades
+            ):
                 try:
                     from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
 

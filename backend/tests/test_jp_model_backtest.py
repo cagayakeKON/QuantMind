@@ -13,6 +13,7 @@ from backend.services.engine.qlib_app.services.backtest_service_runtime import (
     QlibBacktestServiceRuntimeMixin,
 )
 from backend.services.simulation.jp import backtest
+from backend.services.simulation.jp.model_signals import model_registry_service
 from backend.services.simulation.jp.model_portfolio import portfolio_orders
 from backend.services.simulation.jp.rules import RuleDataMissing
 
@@ -74,6 +75,20 @@ def test_real_raw_fills_dated_settlement_and_topix_report(model_data):
     assert result.config["execution_engine"] == "jp_cash_ledger"
     assert len(result.config["prediction_sha256"]) == 64
     assert [row["date"] for row in result.equity_curve] == ["2026-09-28", "2026-09-29"]
+
+
+@pytest.mark.asyncio
+async def test_research_jp_reads_dated_publication_without_cn_table(model_data):
+    from backend.services.api.routers import research_service as research
+
+    records = await research._load_sdl_day_map(None, date(2026, 9, 29), market="JP")
+    assert records["JP72030"]["close"] == 50
+    assert records["JP72030"]["currency"] == "JPY"
+    assert all(code.startswith("JP") for code in records)
+    with pytest.raises(ValueError, match="dated publication"):
+        research._get_sdl_table("JP")
+    assert research._get_sdl_table("CN") == "stock_daily_latest"
+    assert research._get_sdl_table("HK") == "stock_daily_latest_hk"
 
 
 def test_no_training_split_signals_or_cn_strategy_fallback(model_data):
@@ -149,9 +164,7 @@ async def test_failure_is_persisted_and_never_falls_back(monkeypatch):
     async def resolve(**kwargs):
         return SimpleNamespace(fallback_used=True, effective_model_id="cn-default")
 
-    monkeypatch.setattr(
-        backtest.model_registry_service, "resolve_effective_model", resolve
-    )
+    monkeypatch.setattr(model_registry_service, "resolve_effective_model", resolve)
     saved = []
 
     async def save(*args, **kwargs):

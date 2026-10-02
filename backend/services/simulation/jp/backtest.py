@@ -1,69 +1,27 @@
 """Model-driven backtests through the same strict JP cash execution ledger."""
 
 import asyncio
-import hashlib
-import json
 import math
-import shutil
-import tempfile
 import time
 from datetime import date
 from pathlib import Path
 from uuid import uuid4
 
-import duckdb
 import numpy as np
 import pandas as pd
 
 from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestResult
-from backend.shared.model_registry import model_registry_service
-from backend.shared.stock_utils import StockCodeUtil
 from backend.shared.utc_datetime import utc_now
 from .account import JPCashAccount, money
 from .model_portfolio import portfolio_orders
+from .model_signals import (
+    labels_available_on,
+    prediction_path,
+    read_test_scores,
+    resolve_model,
+)
 from .rules import RuleDataMissing
 from .service import execution_data
-
-
-def read_test_scores(path: Path, first: date, last: date) -> tuple[dict, str]:
-    # Snapshot an open file before parsing; inference atomically replaces the source.
-    with tempfile.TemporaryDirectory(prefix="quantmind-jp-pred-") as temp:
-        frozen = Path(temp) / "pred.parquet"
-        with path.open("rb") as source, frozen.open("wb") as target:
-            shutil.copyfileobj(source, target)
-        digest = hashlib.sha256(frozen.read_bytes()).hexdigest()
-        with duckdb.connect() as conn:
-            columns = {
-                item[0]
-                for item in conn.execute(
-                    "DESCRIBE SELECT * FROM read_parquet(?)", [str(frozen)]
-                ).fetchall()
-            }
-            if not {"symbol", "trade_date", "pred", "split"} <= columns:
-                raise RuleDataMissing(
-                    "JP backtest requires dated, test-split model predictions"
-                )
-            frame = conn.execute(
-                "SELECT symbol, trade_date, pred FROM read_parquet(?) "
-                "WHERE CAST(trade_date AS DATE) BETWEEN ? AND ? AND split = 'test'",
-                [str(frozen), first, last],
-            ).fetchdf()
-    result = {}
-    for row in frame.itertuples():
-        if not StockCodeUtil.is_jp_symbol(row.symbol) or not math.isfinite(
-            float(row.pred)
-        ):
-            raise ValueError(
-                "JP prediction contains invalid securities or non-finite scores"
-            )
-        day = pd.Timestamp(row.trade_date).date()
-        result.setdefault(day, []).append(
-            {"symbol": StockCodeUtil.to_prefix(row.symbol), "score": float(row.pred)}
-        )
-    for rows in result.values():
-        if len({r["symbol"] for r in rows}) != len(rows):
-            raise ValueError("Duplicate JP date/security prediction")
-    return result, digest
 
 
 def run_cash_backtest(request, model_dir: Path, meta: dict) -> QlibBacktestResult:
@@ -135,7 +93,8 @@ def run_cash_backtest(request, model_dir: Path, meta: dict) -> QlibBacktestResul
         raise RuleDataMissing(
             "JP model has no pinned data version; retrain with JP metadata"
         )
-    data = execution_data(version)
+    data = execution_data(request.jp_data_version)
+    execution_version = data.hub.data_dir.name
     start, end = (
         date.fromisoformat(request.start_date),
         date.fromisoformat(request.end_date),
@@ -149,34 +108,8 @@ def run_cash_backtest(request, model_dir: Path, meta: dict) -> QlibBacktestResul
     if not index:
         raise RuleDataMissing("JP backtest needs the prior signal session")
     anchor = data.calendar.sessions[index - 1]
-    training_end = max(str(meta.get("train_end") or ""), str(meta.get("val_end") or ""))
-    if not training_end:
-        raise RuleDataMissing(
-            "JP backtest requires the model training/validation cutoff"
-        )
-    from backend.services.engine.data_platform.jp_labels import last_label_session
-
-    known_after = last_label_session(
-        training_end,
-        data.calendar.sessions,
-        int(meta.get("target_horizon_days") or 1),
-    )
-    if known_after is None or anchor < known_after.date():
-        raise ValueError(
-            "JP signal precedes the availability of training/validation labels"
-        )
-    pred = next(
-        (
-            p
-            for p in (model_dir / "pred.parquet", model_dir / "pred/pred.parquet")
-            if p.is_file()
-        ),
-        None,
-    )
-    if pred is None:
-        raise RuleDataMissing(
-            "JP model predictions are unavailable; run historical inference first"
-        )
+    known_after = labels_available_on(meta, data.calendar, anchor)
+    pred = prediction_path(model_dir)
     scores, digest = read_test_scores(pred, anchor, end)
     account = JPCashAccount.create(
         data.calendar,
@@ -256,13 +189,14 @@ def run_cash_backtest(request, model_dir: Path, meta: dict) -> QlibBacktestResul
             "min_commission": 0,
             **dict.fromkeys(cn_fees, 0),
             "risk_free_rate": risk_free,
-            "data_version": version,
+            "data_version": execution_version,
+            "training_data_version": version,
             "prediction_sha256": digest,
             "execution_engine": "jp_cash_ledger",
             "currency": "JPY",
             "return_basis": "price_only",
             "signal_source": "model_pred_test",
-            "training_labels_available_on": str(known_after.date()),
+            "training_labels_available_on": str(known_after),
             "benchmark_entry": "first_execution_open",
         }
     )
@@ -275,7 +209,7 @@ def run_cash_backtest(request, model_dir: Path, meta: dict) -> QlibBacktestResul
         config=config,
         market="JP",
         currency="JPY",
-        data_version=version,
+        data_version=execution_version,
         total_return=total,
         annual_return=float((1 + total) ** (252 / len(sessions)) - 1),
         sharpe_ratio=float(
@@ -314,17 +248,9 @@ def run_cash_backtest(request, model_dir: Path, meta: dict) -> QlibBacktestResul
 
 
 async def _run_registered_backtest(request, persistence):
-    if not request.model_id:
-        raise ValueError("Select a registered JP model before backtesting")
-    resolved = await model_registry_service.resolve_effective_model(
-        tenant_id=request.tenant_id, user_id=request.user_id, model_id=request.model_id
+    model_dir, meta = await resolve_model(
+        request.tenant_id, request.user_id, request.model_id
     )
-    if resolved.fallback_used or resolved.effective_model_id != request.model_id:
-        raise LookupError("Requested JP model is unavailable")
-    model_dir = Path(resolved.storage_path)
-    meta = json.loads((model_dir / "metadata.json").read_text(encoding="utf-8"))
-    if (meta.get("context") or {}).get("market") != "JP":
-        raise ValueError("JP backtest requires a registered Japanese-market model")
     result = await asyncio.to_thread(run_cash_backtest, request, model_dir, meta)
     await persistence.save_run(
         result.backtest_id,

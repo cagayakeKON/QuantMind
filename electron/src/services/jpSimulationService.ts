@@ -54,6 +54,23 @@ export interface JPReadiness {
   data_version: string;
 }
 
+export interface JPModelParameters {
+  model_id: string;
+  topk: number;
+  exposure: number;
+  min_score: number;
+}
+export interface JPModelPlan extends JPModelParameters {
+  session_id: string;
+  revision: number;
+  signal_date: string;
+  execution_date: string;
+  data_version: string;
+  prediction_sha256: string;
+  plan_sha256: string;
+  orders: JPOrder[];
+}
+
 const base = '/api/v1/simulation/jp';
 const selectionKey = (userId: string, tenantId: string) => `qm:jp-session:${tenantId}:${userId}`;
 export const selectJPSession = (id: string, userId: string, tenantId: string) => {
@@ -94,10 +111,16 @@ export const jpSimulationService = {
   readiness: () => apiClient.get<JPReadiness>(`${base}/readiness`),
   list: () => apiClient.get<JPSession[]>(`${base}/sessions`),
   create: (request: {name: string; mode: 'replay' | 'daily'; initial_cash: number;
-    start_date?: string; end_date?: string}) => apiClient.post<JPSession>(`${base}/sessions`, request),
+    start_date?: string; end_date?: string; commission_rate?: number; slippage_bps?: number}) => apiClient.post<JPSession>(`${base}/sessions`, request),
   get: (id: string) => apiClient.get<JPSession>(`${base}/sessions/${id}`),
   queue: (session: JPSession, orders: JPOrder[]) => apiClient.post<JPSession>(
     `${base}/sessions/${session.session_id}/orders`, {revision: session.revision, orders}),
   step: (session: JPSession) => apiClient.post<JPSession>(
     `${base}/sessions/${session.session_id}/step`, {revision: session.revision}),
+  modelPlan: (session: JPSession, parameters: JPModelParameters) => apiClient.post<JPModelPlan>(
+    `${base}/sessions/${session.session_id}/model-plan`, {revision: session.revision, ...parameters}),
+  modelOrders: (session: JPSession, parameters: JPModelParameters, plan: JPModelPlan) => apiClient.post<JPSession>(
+    `${base}/sessions/${session.session_id}/model-orders`, {
+      revision: session.revision, ...parameters, plan_sha256: plan.plan_sha256,
+    }),
 };

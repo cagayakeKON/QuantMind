@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.services.simulation.models.jp import JPSimulationSession
 from backend.services.trade_shared.deps import AuthContext, get_auth_context, get_db
 from . import service
+from .model_orders import model_plan
 from .rules import RuleDataMissing
 
 router = APIRouter(prefix="/api/v1/simulation/jp", tags=["JP-Cash-Simulation"])
@@ -42,6 +43,18 @@ class QueueRequest(BaseModel):
 
 class StepRequest(BaseModel):
     revision: int = Field(ge=0)
+
+
+class ModelPlanRequest(BaseModel):
+    revision: int = Field(ge=0)
+    model_id: str = Field(min_length=1, max_length=200)
+    topk: int = Field(default=5, ge=1, le=200)
+    exposure: Decimal = Field(default=Decimal("0.95"), ge=0, le=1)
+    min_score: float = Field(default=0, allow_inf_nan=False)
+
+
+class ModelOrdersRequest(ModelPlanRequest):
+    plan_sha256: str = Field(pattern="^[a-f0-9]{64}$")
 
 
 def failure(exc):
@@ -150,6 +163,38 @@ async def step(
             auth.user_id,
             auth.tenant_id,
             expected_revision=request.revision,
+        )
+    except (ValueError, LookupError, OSError) as exc:
+        await db.rollback()
+        raise failure(exc) from exc
+
+
+@router.post("/sessions/{session_id}/model-plan")
+async def preview_model(
+    session_id: uuid.UUID,
+    request: ModelPlanRequest,
+    auth: AuthContext = Depends(get_auth_context),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await model_plan(
+            db, session_id, auth.user_id, auth.tenant_id, **request.model_dump()
+        )
+    except (ValueError, LookupError, OSError) as exc:
+        await db.rollback()
+        raise failure(exc) from exc
+
+
+@router.post("/sessions/{session_id}/model-orders")
+async def save_model_orders(
+    session_id: uuid.UUID,
+    request: ModelOrdersRequest,
+    auth: AuthContext = Depends(get_auth_context),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        return await model_plan(
+            db, session_id, auth.user_id, auth.tenant_id, **request.model_dump()
         )
     except (ValueError, LookupError, OSError) as exc:
         await db.rollback()

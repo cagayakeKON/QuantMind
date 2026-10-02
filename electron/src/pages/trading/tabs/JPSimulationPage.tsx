@@ -4,6 +4,7 @@ import dayjs from 'dayjs';
 import { jpSimulationService, selectJPSession, selectedJPSession, type JPFill, type JPOrder, type JPReadiness, type JPSession } from '../../../services/jpSimulationService';
 import { normalizeStockCode } from '../../../utils/portfolioUtils';
 import { authService } from '../../../features/auth/services/authService';
+import JPModelOrders from './JPModelOrders';
 
 const yen = (value: string | number) => new Intl.NumberFormat('ja-JP', {
   style: 'currency', currency: 'JPY', currencyDisplay: 'code', maximumFractionDigits: 1,
@@ -52,12 +53,14 @@ export default function JPSimulationPage() {
       setCurrent(result);
       selectJPSession(result.session_id, userId, tenantId);
       setSessions([result, ...sessions.filter(s => s.session_id !== result.session_id)]);
-    } catch (failure) { if (request === generation.current) setError(errorText(failure)); }
+      return true;
+    } catch (failure) { if (request === generation.current) setError(errorText(failure)); return false; }
     finally { if (request === generation.current) setBusy(false); }
   };
   const create = async () => {
     const values = await createForm.validateFields();
     await apply(() => jpSimulationService.create({name: values.name, mode, initial_cash: values.cash,
+      commission_rate: values.commission / 100, slippage_bps: values.slippage,
       ...(mode === 'replay' ? {start_date: values.start.format('YYYY-MM-DD'), end_date: values.end?.format('YYYY-MM-DD')} : {}),
     }));
   };
@@ -89,11 +92,13 @@ export default function JPSimulationPage() {
       <Space wrap className="mb-4"><Select style={{width: 300}} placeholder="选择账户" value={current?.session_id}
         disabled={busy} onChange={id => { setCurrent(sessions.find(s => s.session_id === id) || null); selectJPSession(id, userId, tenantId); }}
         options={sessions.map(s => ({value: s.session_id, label: `${s.name} · ${s.mode === 'daily' ? '日常' : '历史回放'} · JPY`}))} /></Space>
-      <Form form={createForm} layout="inline" initialValues={{name: '日股模拟账户', cash: 1000000}}>
+      <Form form={createForm} layout="inline" initialValues={{name: '日股模拟账户', cash: 1000000, commission: 0, slippage: 5}}>
         <Form.Item><Select value={mode} onChange={setMode} style={{width: 130}} disabled={busy}
           options={[{value: 'replay', label: '历史回放'}, {value: 'daily', label: '日常模拟'}]} /></Form.Item>
         <Form.Item name="name" rules={[{required: true}]}><Input placeholder="账户名称" /></Form.Item>
         <Form.Item name="cash" rules={[{required: true}]}><InputNumber min={1} addonAfter="JPY" /></Form.Item>
+        <Form.Item name="commission" label="佣金 %" rules={[{required: true}]}><InputNumber min={0} max={99} step={0.01} /></Form.Item>
+        <Form.Item name="slippage" label="滑点 bps" rules={[{required: true}]}><InputNumber min={0} max={9999} /></Form.Item>
         {mode === 'replay' && <><Form.Item name="start" rules={[{required: true}]}><DatePicker placeholder="回放起始日" /></Form.Item>
           <Form.Item name="end"><DatePicker placeholder="截止日（可选）" /></Form.Item></>}
         <Button type="primary" onClick={() => void create()} loading={busy}>创建账户</Button>
@@ -107,6 +112,7 @@ export default function JPSimulationPage() {
         <Card size="small"><Statistic title="持仓市值 · JPY" value={snapshot?.market_value || 0} /></Card>
       </div>
       {Boolean(snapshot?.stale_symbols.length) && <Alert type="warning" message={`以下持仓缺少当日收盘价，估值沿用上次价格：${snapshot?.stale_symbols.join('、')}`} />}
+      <JPModelOrders session={current} busy={busy} finished={finished} onSubmit={apply} />
       <Card size="small" title={`下一交易日 ${current.state.next_date}${finished ? '（回放已结束）' : ''}`}>
         <Form form={orderForm} layout="inline" initialValues={{symbol: '7203', side: 'BUY', quantity: 100}}>
           <Form.Item name="symbol" rules={[{required: true}]}><Input placeholder="日股代码" /></Form.Item>

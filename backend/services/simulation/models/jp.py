@@ -3,8 +3,8 @@
 import uuid
 from datetime import date
 
-from sqlalchemy import Date, Index, Integer, JSON, String
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import Date, Index, Integer, JSON, String, Uuid
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.services.simulation.models import Base, TimestampMixin
@@ -14,7 +14,7 @@ class JPSimulationSession(Base, TimestampMixin):
     __tablename__ = "jp_simulation_sessions"
 
     session_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)

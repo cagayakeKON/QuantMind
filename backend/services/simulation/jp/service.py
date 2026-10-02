@@ -147,11 +147,12 @@ async def queue_orders(
     requests: list[dict],
     *,
     expected_revision: int,
+    _data: JPExecutionData | None = None,
 ):
     session = await load_session(db, session_id, user_id, tenant_id, lock=True)
     if session.revision != expected_revision:
         raise ValueError("JP account changed; refresh before submitting")
-    data = await asyncio.to_thread(
+    data = _data or await asyncio.to_thread(
         execution_data, session.data_version if session.mode == "replay" else None
     )
     signal_day = (

@@ -56,6 +56,8 @@ def _get_sdl_table(market: str | None = None) -> str:
     """Return the stock_daily_latest table name for the given market."""
     if market:
         key = market.upper()
+        if key == "JP":
+            raise ValueError("JP research reads its dated publication, not an SDL table")
         if key in _MARKET_SDL_TABLE:
             return _MARKET_SDL_TABLE[key]
     return "stock_daily_latest"
@@ -99,7 +101,41 @@ def _sdl_redis_key(trade_date: date) -> str:
     return f"qm:research:sdl:{trade_date.isoformat()}:v9"
 
 
+def _read_jp_research_day(trade_date: date) -> dict[str, dict[str, Any]]:
+    from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+
+    hub = QuantJPDataHub()
+    hub = QuantJPDataHub(hub.data_dir)
+    master = hub.fetch_stock_list(trade_date)
+    if master.empty or str(master["time"].max())[:10] != str(trade_date):
+        return {}
+    symbols = master["symbol"].tolist()
+    bars = hub.fetch_daily_kline_batch(symbols, trade_date, trade_date, adjust="none")
+    result = {
+        StockCodeUtil.to_prefix(row["symbol"], market="JP"): {
+            "stock_name": row.get("stock_name"),
+            "industry": row.get("industry_name"),
+            "market": "JP",
+            "currency": "JPY",
+            "data_version": hub.data_dir.name,
+        }
+        for row in master.to_dict("records")
+    }
+    for row in bars.to_dict("records"):
+        symbol = StockCodeUtil.to_prefix(row["symbol"], market="JP")
+        if symbol in result:
+            result[symbol].update(
+                {
+                    field: _serialize_float(row.get(field))
+                    for field in ("open", "high", "low", "close", "volume", "amount")
+                }
+            )
+    return result
+
+
 async def _load_sdl_day_map(session, trade_date: date, market: str | None = None) -> dict[str, dict[str, Any]]:
+    if str(market or "").upper() == "JP":
+        return await _offload_sdl_read(_read_jp_research_day, trade_date)
     if trade_date.year != _SDL_REDIS_YEAR:
         return {}
 
@@ -986,7 +1022,7 @@ async def _do_get_overview(
         params["rid"] = run_id
 
     is_cn = not market or market.upper() == "CN"
-    if is_cn:
+    if is_cn or str(market or "").upper() == "JP":
         async with get_session(read_only=True) as session:
             snap_sql = f"""
                 SELECT snap.*
@@ -1008,7 +1044,7 @@ async def _do_get_overview(
             merged_rows: list[dict[str, Any]] = []
             for td, rows in by_date.items():
                 sdl_map: dict[str, dict[str, Any]] = {}
-                if isinstance(td, date) and td.year == _SDL_REDIS_YEAR:
+                if isinstance(td, date) and (td.year == _SDL_REDIS_YEAR or str(market or "").upper() == "JP"):
                     sdl_map = await _load_sdl_day_map(session, td, market=market)
                 for snap in rows:
                     symbol = StockCodeUtil.to_prefix(str(snap.get("symbol") or ""))
