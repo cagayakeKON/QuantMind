@@ -16,14 +16,18 @@ from backend.shared.stock_utils import StockCodeUtil
 from .rules import RuleDataMissing
 
 
-async def resolve_model(tenant_id, user_id, model_id):
-    if not model_id:
-        raise ValueError("Select a registered JP model")
+async def resolve_model(tenant_id, user_id, model_id, *, strategy_id=None):
     resolved = await model_registry_service.resolve_effective_model(
-        tenant_id=tenant_id, user_id=user_id, model_id=model_id
+        tenant_id=tenant_id,
+        user_id=user_id,
+        model_id=model_id,
+        strategy_id=strategy_id,
+        market="JP",
     )
-    if resolved.fallback_used or resolved.effective_model_id != model_id:
+    if resolved.fallback_used or (model_id and resolved.effective_model_id != model_id):
         raise LookupError("Requested JP model is unavailable")
+    if not resolved.effective_model_id or not resolved.storage_path:
+        raise ValueError("Select a registered JP model or configure its market default")
     directory = Path(resolved.storage_path)
     meta = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
     if str((meta.get("context") or {}).get("market") or "").upper() != "JP":
@@ -40,7 +44,18 @@ async def resolve_model(tenant_id, user_id, model_id):
         or not version
     ):
         raise RuleDataMissing("JP model requires versioned l1_factors metadata")
-    return directory, {**meta, "jp_data_version": version}
+    return directory, {
+        **meta,
+        "jp_data_version": version,
+        **(
+            {
+                "effective_model_id": resolved.effective_model_id,
+                "model_source": resolved.model_source,
+            }
+            if not model_id
+            else {}
+        ),
+    }
 
 
 def prediction_path(directory: Path) -> Path:

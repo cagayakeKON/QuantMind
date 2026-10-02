@@ -49,6 +49,28 @@ describe('common backtest market context', () => {
     }), { params: { async_mode: true } });
   });
 
+  it('uses registered execution defaults and forwards a Japanese strategy binding without requiring a model id', async () => {
+    await new BacktestService().runBacktest({ ...base, market: 'JP', strategy_id: 'personal-strategy',
+      strategy_type: 'CustomStrategy', commission: 0, benchmark_symbol: 'TOPIX' });
+    expect(calls.post).toHaveBeenCalledWith('/backtest', expect.objectContaining({
+      market: 'JP', strategy_id: 'personal-strategy', deal_price: 'open',
+      strategy_params: { topk: 5, signal: '<PRED>' }, user_id: 'alice', tenant_id: 'tenant-a',
+    }), { params: { async_mode: true } });
+    expect(calls.post.mock.calls[0][1]).not.toHaveProperty('model_id');
+  });
+
+  it('preserves an explicit JP execution price for server-side rule validation', async () => {
+    await new BacktestService().runBacktest({ ...base, market: 'JP', deal_price: 'close' });
+    expect(calls.post.mock.calls[0][1].deal_price).toBe('close');
+  });
+
+  it.each([undefined, 'CN', 'HK', 'US', 'CRYPTO', 'FUTURES'] as const)
+  ('retains legacy request defaults and strategy-id behavior for %s', async market => {
+    await new BacktestService().runBacktest({ ...base, market, strategy_id: 'legacy-strategy' });
+    expect(calls.post.mock.calls[0][1].deal_price).toBe('close');
+    expect(calls.post.mock.calls[0][1]).not.toHaveProperty('strategy_id');
+  });
+
   it.each(['pool:mine', 'pool_id:uuid', 'list:216A0.JP', 'LIST:JP72030', 'file:C:\\data\\members.txt', '/data/members.csv', 'all', ''])
   ('preserves the shared JP pool grammar: %s', async symbol => {
     await new BacktestService().runBacktest({ ...base, market: 'JP', symbol });

@@ -1221,11 +1221,21 @@ class ModelRegistryService:
         user_id: str,
         strategy_id: str | None = None,
         model_id: str | None = None,
+        market: str | None = None,
     ) -> ResolvedModel:
         tenant, user = self._normalize_owner(tenant_id=tenant_id, user_id=user_id)
         await self._ensure_system_default_record(tenant_id=tenant, user_id=user)
 
         reason_parts: list[str] = []
+        scoped_market = str(market or "").upper().strip()
+
+        def _matches_market(item: dict[str, Any]) -> bool:
+            if not scoped_market:
+                return True
+            metadata = self._parse_json_field(item.get("metadata_json"))
+            context = self._parse_json_field(metadata.get("context"))
+            declared = metadata.get("market") or context.get("market")
+            return str(declared or "").upper().strip() == scoped_market
 
         async def _load_ready(mid: str) -> dict[str, Any] | None:
             item = await self.get_model(tenant_id=tenant, user_id=user, model_id=mid)
@@ -1233,12 +1243,14 @@ class ModelRegistryService:
                 return None
             if str(item.get("status") or "") not in _READY_STATUSES:
                 return None
+            if not _matches_market(item):
+                return None
             return item
 
         explicit_id = str(model_id or "").strip()
         if explicit_id:
             system_record = await self._resolve_system_model_record(explicit_id)
-            if system_record:
+            if system_record and _matches_market(system_record):
                 return ResolvedModel(
                     effective_model_id=str(
                         system_record.get("model_id") or explicit_id
@@ -1286,8 +1298,12 @@ class ModelRegistryService:
                     f"strategy binding model_id={binding_model_id} not ready"
                 )
 
-        default = await self.get_default_model(tenant_id=tenant, user_id=user)
-        if default:
+        default = await self.get_default_model(
+            tenant_id=tenant,
+            user_id=user,
+            **({"market": scoped_market} if scoped_market else {}),
+        )
+        if default and _matches_market(default):
             default_id = str(default.get("model_id") or "")
             return ResolvedModel(
                 effective_model_id=default_id,

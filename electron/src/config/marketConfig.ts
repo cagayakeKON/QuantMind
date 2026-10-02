@@ -32,7 +32,7 @@ export interface MarketConfig {
   stockTerminal?: { market: string; adjustments: ('none' | 'qfq' | 'hfq')[]; requestTimeoutMs?: number };
   backtestUi?: 'standard' | 'jp_cash';
   /** Optional request context for markets joining the common backtest pages. */
-  backtest?: { market: AppMarket; commission: number; requireModelMarket: boolean };
+  backtest?: { market: AppMarket; commission: number; requireModelMarket: boolean; dealPrice?: 'open' | 'close' };
   tradeRecordsUi?: 'standard' | 'jp_cash';
   portfolioChartsUi?: 'standard' | 'jp_cash';
   strategyMonitorUi?: 'standard' | 'jp_cash';
@@ -50,7 +50,7 @@ export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
     stockSearch: 'gateway',
     stockTerminal: { market: 'JP', adjustments: ['none', 'qfq'], requestTimeoutMs: 120000 },
     backtestUi: 'jp_cash',
-    backtest: { market: 'JP', commission: 0, requireModelMarket: true },
+    backtest: { market: 'JP', commission: 0, requireModelMarket: true, dealPrice: 'open' },
     tradeRecordsUi: 'jp_cash',
     portfolioChartsUi: 'jp_cash',
     strategyMonitorUi: 'jp_cash',

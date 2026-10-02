@@ -15,7 +15,7 @@ from backend.services.engine.qlib_app.services import (
     market_strategy_context as contexts,
 )
 from backend.services.engine.qlib_app.utils import simple_signal
-from backend.services.simulation.jp import backtest
+from backend.services.simulation.jp import backtest, model_signals
 from backend.services.engine.qlib_app.services import (
     backtest_service_runtime as public_runtime,
 )
@@ -215,12 +215,21 @@ async def test_missing_field_is_not_silently_an_empty_success(
 
 @pytest.mark.asyncio
 async def test_default_prediction_request_still_requires_registered_model(
-    model_data, runtime_factory
+    model_data, runtime_factory, monkeypatch
 ):
     request, _, _ = model_data
     request.strategy_type = "CustomStrategy"
     request.model_id = None
     request.strategy_content = "raise AssertionError('Factory must not run')"
+
+    async def missing(**kwargs):
+        return SimpleNamespace(
+            fallback_used=False, effective_model_id=None, storage_path=""
+        )
+
+    monkeypatch.setattr(
+        model_signals.model_registry_service, "resolve_effective_model", missing
+    )
 
     async def save(**kwargs):
         pass

@@ -57,6 +57,11 @@ async def test_jp_default_switch_and_archive_preserve_legacy_default(monkeypatch
             assert (await service.get_default_model(**params, market="JP"))[
                 "model_id"
             ] == mid
+            japanese = await service.resolve_effective_model(**params, market="JP")
+            legacy = await service.resolve_effective_model(**params)
+            assert japanese.effective_model_id == mid
+            assert japanese.model_source == "user_default"
+            assert legacy.effective_model_id == "cn"
         async with get_session(read_only=True) as db:
             # Legacy trading workers still scan this column and see only the original default.
             ids = (

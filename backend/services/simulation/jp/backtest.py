@@ -327,6 +327,14 @@ def run_cash_backtest(
             "currency": "JPY",
             "return_basis": "price_only",
             "signal_source": "model_pred_test" if metric is None else "feature_field",
+            **(
+                {
+                    "effective_model_id": meta["effective_model_id"],
+                    "model_source": meta["model_source"],
+                }
+                if metric is None and "effective_model_id" in meta
+                else {}
+            ),
             "training_labels_available_on": str(known_after)
             if known_after is not None
             else None,
@@ -417,7 +425,12 @@ async def execute_backtest(request):
         else requested_feature_metric(request)
     )
     model_dir, meta = (
-        await resolve_model(request.tenant_id, request.user_id, request.model_id)
+        await resolve_model(
+            request.tenant_id,
+            request.user_id,
+            request.model_id,
+            **({"strategy_id": request.strategy_id} if request.strategy_id else {}),
+        )
         if metric is None
         else (None, {})
     )

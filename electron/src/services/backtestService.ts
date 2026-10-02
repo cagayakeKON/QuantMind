@@ -740,6 +740,7 @@ class BacktestService {
 
     const strategyParams = config.strategy_params || {};
     const tenantId = authService.getTenantId() || 'default'; // 从 authService 获取租户 ID
+    const marketContext = config.market ? getMarketConfig(config.market).backtest : undefined;
 
     const buyCost = Number(
       config.buy_cost ?? strategyParams.buy_cost ?? strategyParams.open_cost
@@ -780,7 +781,7 @@ class BacktestService {
       user_id: this.normalizeUserId(config.user_id),
       tenant_id: tenantId,
       seed: config.seed,
-      deal_price: config.deal_price || 'close',
+      deal_price: config.deal_price || marketContext?.dealPrice || 'close',
       is_third_party: config.is_third_party ?? (config.strategy_type === 'CustomStrategy'),
       dynamic_position: dynamicPosition,
       market_state_symbol:
@@ -795,6 +796,9 @@ class BacktestService {
 
     if (config.model_id?.trim()) {
       payload.model_id = config.model_id;
+    }
+    if (marketContext && config.strategy_id?.trim()) {
+      payload.strategy_id = config.strategy_id;
     }
     // 全局股票池引用：后端 pool_id 优先于 universe 解析并物化
     if (config.pool_id?.trim()) {
