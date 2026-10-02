@@ -317,6 +317,13 @@ class JPCashAccount:
                 opened = money(bar["open"])
                 if opened <= 0 or money(bar["volume"]) <= 0:
                     raise ValueError("No valid opening trade")
+                used_volume = sum(
+                    fill["quantity"]
+                    for fill in self.state["fills"]
+                    if fill["symbol"] == symbol and fill["trade_date"] == str(day)
+                )
+                if used_volume + quantity > money(bar["volume"]):
+                    raise ValueError("JP simulated fills exceed observed daily volume")
                 flag = "upper_limit_touched" if side == "BUY" else "lower_limit_touched"
                 if bar.get(flag):
                     base = info.get("limit_base_price")

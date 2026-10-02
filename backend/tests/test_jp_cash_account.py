@@ -155,6 +155,21 @@ def test_missing_trade_does_not_use_previous_close_or_adjusted_price():
     assert not account.state["fills"]
 
 
+def test_orders_cannot_reuse_more_than_observed_daily_volume():
+    account = JPCashAccount.create(calendar(), "20000", slippage_bps=0)
+    bars, master = market()
+    bars["JP72030"]["volume"] = 100
+    result = account.step(
+        date(2026, 9, 2),
+        bars,
+        master,
+        orders(("JP72030", "BUY", 100), ("JP72030", "SELL", 100)),
+    )
+    assert [item["status"] for item in result["orders"]] == ["filled", "rejected"]
+    assert "daily volume" in result["orders"][1]["reason"]
+    assert len(account.state["fills"]) == 1
+
+
 def test_limit_touch_at_intraday_high_is_not_automatically_untradable():
     account = JPCashAccount.create(calendar(), slippage_bps=0)
     bars, master = market()
