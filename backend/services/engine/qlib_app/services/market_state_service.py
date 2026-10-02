@@ -56,7 +56,8 @@ DEFAULT_WINDOW = 20
 class MarketStateService:
     """计算市场状态与动态风险仓位"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, data_provider=None) -> None:
+        self._data_provider = data_provider
         self._config_url = os.getenv("MARKET_CONFIG_URL") or os.getenv("MARKET_STATE_CONFIG_URL")
 
     def _fetch_remote_config(self, style: str | None) -> dict[str, Any]:
@@ -160,7 +161,8 @@ class MarketStateService:
         thresholds: dict[str, float],
     ) -> dict[str, str]:
         try:
-            df = D.features(
+            provider = D if self._data_provider is None else self._data_provider
+            df = provider.features(
                 [symbol],
                 ["$close", "$volume"],
                 start_time=start_date,

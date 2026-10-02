@@ -175,7 +175,11 @@ def build_dated_strategy(request, *, strategy_context=None):
         )
     config = builder.build(
         request=request,
-        market_state_kwargs={},
+        market_state_kwargs=(
+            strategy_context.market_state_kwargs(request)
+            if strategy_context is not None
+            else {}
+        ),
         signal_data=None,
         backtest_id=request.backtest_id,
     )
@@ -213,10 +217,16 @@ def build_dated_strategy(request, *, strategy_context=None):
         )
     if strategy_context is not None:
         strategy_context.assert_reads_succeeded()
+        if isinstance(config, BaseStrategy):
+            # The public builder returns instances unchanged, including their
+            # own Signal. Rebinding execution infrastructure does not replace it.
+            return config
     if not isinstance(config, dict):
         raise ValueError("Dated execution requires a standard strategy configuration")
     kwargs = config.get("kwargs", {})
-    if kwargs.get("dynamic_position") or kwargs.get("market_state_series"):
+    if strategy_context is None and (
+        kwargs.get("dynamic_position") or kwargs.get("market_state_series")
+    ):
         raise ValueError("Dynamic positions require a dated market state adapter")
     if kwargs.get("signal") != "<PRED>":
         raise ValueError(
@@ -239,9 +249,12 @@ class DatedStrategyRunner:
         self.exchange = DecisionExchange(commission)
         self.signal = _SnapshotSignal()
         self.account = SimpleNamespace(current_position=Position())
-        config = deepcopy(config)
-        config["kwargs"]["signal"] = self.signal
-        self.strategy = init_instance_by_config(config, accept_types=BaseStrategy)
+        if isinstance(config, BaseStrategy):
+            self.strategy = config
+        else:
+            config = deepcopy(config)
+            config["kwargs"]["signal"] = self.signal
+            self.strategy = init_instance_by_config(config, accept_types=BaseStrategy)
         common = CommonInfrastructure(
             trade_account=self.account, trade_exchange=self.exchange
         )

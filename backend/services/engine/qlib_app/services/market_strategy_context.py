@@ -3,6 +3,7 @@
 from dataclasses import asdict, dataclass, field
 from importlib import import_module
 import re
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -103,24 +104,67 @@ class MarketStrategyContext:
                     raise ValueError(
                         "Strategy requested bars outside its known snapshot"
                     )
-            frame = self.provider.features(
-                mapped,
-                fields,
-                start_time=start,
-                end_time=end,
-                freq=freq,
-                disk_cache=disk_cache,
-                inst_processors=inst_processors or [],
+            return self._read_provider_features(
+                original, mapped, fields, start, end, freq, disk_cache, inst_processors
             )
-            if original != mapped and not frame.empty:
-                names = dict(zip(mapped, original, strict=True))
-                reset = frame.reset_index()
-                reset["instrument"] = reset["instrument"].map(names)
-                frame = reset.set_index(frame.index.names)
-            return frame
         except Exception as exc:
             self.errors.append(str(exc))
             raise
+
+    def _read_provider_features(
+        self,
+        original,
+        mapped,
+        fields,
+        start,
+        end,
+        freq="day",
+        disk_cache=None,
+        inst_processors=None,
+    ):
+        frame = self.provider.features(
+            mapped,
+            fields,
+            start_time=start,
+            end_time=end,
+            freq=freq,
+            disk_cache=disk_cache,
+            inst_processors=inst_processors or [],
+        )
+        if original != mapped and not frame.empty:
+            names = dict(zip(mapped, original, strict=True))
+            reset = frame.reset_index()
+            reset["instrument"] = reset["instrument"].map(names)
+            frame = reset.set_index(frame.index.names)
+        return frame
+
+    def market_state_kwargs(self, request):
+        """Use the public causal state algorithm on this pinned market history."""
+        from .market_state_service import MarketStateService
+        from .backtest_service import QlibBacktestService
+
+        def historical_features(instruments, fields, start_time, end_time):
+            try:
+                original = list(instruments)
+                return self._read_provider_features(
+                    original,
+                    [self.mapper(code) for code in original],
+                    fields,
+                    start_time,
+                    end_time,
+                )
+            except Exception as exc:
+                self.errors.append(str(exc))
+                raise
+
+        owner = SimpleNamespace(
+            _market_state_service=MarketStateService(
+                data_provider=SimpleNamespace(features=historical_features)
+            )
+        )
+        result = QlibBacktestService._build_market_state_kwargs(owner, request)
+        self.assert_reads_succeeded()
+        return result
 
     def list_instruments(self, instruments, start_time=None, end_time=None, **kwargs):
         end = self.asof if end_time is None else min(pd.Timestamp(end_time), self.asof)

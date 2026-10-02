@@ -28,8 +28,13 @@ async def execute_isolated_strategy(request, model_dir, meta, pool_snapshot):
         "context": spec.as_dict(),
     }
     environment = {**_safe_env(), **spec.environment}
-    if "ALLOW_CUSTOM_STRATEGY" in os.environ:
-        environment["ALLOW_CUSTOM_STRATEGY"] = os.environ["ALLOW_CUSTOM_STRATEGY"]
+    for key in (
+        "ALLOW_CUSTOM_STRATEGY",
+        "MARKET_CONFIG_URL",
+        "MARKET_STATE_CONFIG_URL",
+    ):
+        if key in os.environ:
+            environment[key] = os.environ[key]
     process = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",

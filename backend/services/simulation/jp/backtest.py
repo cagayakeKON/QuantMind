@@ -43,6 +43,7 @@ def run_cash_backtest(
     strategy_context=None,
 ) -> QlibBacktestResult:
     started = time.monotonic()
+    from qlib.strategy.base import BaseStrategy
     from backend.services.engine.qlib_app.services.dated_strategy import (
         DatedStrategyRunner,
         build_dated_strategy,
@@ -106,7 +107,7 @@ def run_cash_backtest(
         or request.strategy_params.long_exposure > 1
     ):
         raise ValueError("JP cash backtests do not support shorting or leverage")
-    if request.dynamic_position:
+    if request.dynamic_position and strategy_context is None:
         raise ValueError(
             "Dynamic positions require the registered market's dated state adapter"
         )
@@ -206,6 +207,18 @@ def run_cash_backtest(
         symbols = sorted(
             {r["symbol"] for r in daily_scores} | set(account.state["positions"])
         )
+        if isinstance(strategy_config, BaseStrategy):
+            # Instance factories keep their own Signal, as in the public engine.
+            # Quote the resolved universe rather than only the selected model's
+            # symbols, while retaining held positions outside a changed pool.
+            if pool_snapshot is not None and not pool_snapshot.unfiltered:
+                members = pool_snapshot.api_symbols
+            else:
+                members = data.hub.fetch_stock_list(as_of=previous).get("symbol", [])
+            symbols = sorted(
+                set(symbols)
+                | {StockCodeUtil.to_prefix(code, market="JP") for code in members}
+            )
         prior_bars, prior_master = data.day(
             previous, symbols, list(account.state["positions"])
         )
@@ -294,7 +307,7 @@ def run_cash_backtest(
             "training_labels_available_on": str(known_after),
             "benchmark_entry": "first_execution_open",
             **(
-                {"strategy_decision_class": strategy_config["class"]}
+                {"strategy_decision_class": type(strategy_runner.strategy).__name__}
                 if strategy_config is not None
                 else {}
             ),
@@ -302,6 +315,15 @@ def run_cash_backtest(
                 {
                     "strategy_data_version": strategy_context.spec.data_version,
                     "strategy_price_basis": "raw",
+                    **(
+                        {
+                            "strategy_market_state_series": getattr(
+                                strategy_runner.strategy, "market_state_series", None
+                            )
+                        }
+                        if request.dynamic_position
+                        else {}
+                    ),
                 }
                 if strategy_context is not None
                 else {}
@@ -390,6 +412,7 @@ async def execute_backtest(request):
         StrategyFactory,
         CustomStrategyBuilder,
         StopLossBuilder,
+        AdaptiveDriftBuilder,
     )
     from backend.services.engine.qlib_app.services.isolated_strategy_execution import (
         execute_isolated_strategy,
@@ -397,7 +420,11 @@ async def execute_backtest(request):
 
     builder, fallback, _ = StrategyFactory.resolve_builder(request.strategy_type)
     if request.strategy_type != "jp_cash_topk" and (
-        fallback or isinstance(builder, (CustomStrategyBuilder, StopLossBuilder))
+        request.dynamic_position
+        or fallback
+        or isinstance(
+            builder, (CustomStrategyBuilder, StopLossBuilder, AdaptiveDriftBuilder)
+        )
     ):
         return await execute_isolated_strategy(request, model_dir, meta, pool)
     result = await asyncio.to_thread(
