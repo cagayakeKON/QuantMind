@@ -17,7 +17,6 @@ vi.mock('../../../services/backtestService', () => ({ backtestService: {
 } }));
 vi.mock('../../../services/strategyManagementService', () => ({ strategyManagementService: {} }));
 vi.mock('../StrategyPicker', () => ({ StrategyPicker: () => null }));
-vi.mock('../QlibStrategyConfigurator', () => ({ QlibStrategyConfigurator: () => null }));
 vi.mock('../QlibResultComponents', () => ({ QlibResultDisplay: () => <div>Common result</div>, ErrorLogModal: () => null }));
 vi.mock('../StockPoolPickerModal', () => ({ StockPoolPickerModal: ({ market }: any) => { state.poolMarket = market; return null; } }));
 vi.mock('../MultiStockCodeInput', () => ({ MultiStockCodeInput: () => null }));
@@ -97,5 +96,33 @@ describe('market context in the existing backtest components', () => {
     await waitFor(() => expect(state.run).toHaveBeenCalledWith(expect.objectContaining({
       market: 'JP', benchmark_symbol: 'TOPIX', commission: 0, strategy_type: 'CustomStrategy',
     })));
+  });
+
+  it('uses editable Japanese commission without the A-share fee offsets', async () => {
+    render(<QlibQuickBacktest />);
+    expect(screen.getByRole('spinbutton', { name: '交易费率（万分之）' })).toHaveValue(0);
+    expect(screen.getByText('日本市场 · JPY')).toBeInTheDocument();
+    expect(screen.queryByText('已匹配 A 股标准')).not.toBeInTheDocument();
+    await waitFor(() => expect(state.users).toHaveBeenCalled());
+    fireEvent.change(screen.getByRole('spinbutton', { name: '交易费率（万分之）' }), { target: { value: '3.5' } });
+    fireEvent.click(screen.getByRole('button', { name: /立即执行回测/ }));
+    await waitFor(() => expect(state.run).toHaveBeenCalledWith(expect.objectContaining({ market: 'JP', commission: 0.00035 })));
+  });
+
+  it('preserves the stored closing-mode preference while applying JP execution capabilities', async () => {
+    localStorage.setItem('backtest_tail_trade_mode', '1');
+    const view = render(<QlibQuickBacktest />);
+    expect(screen.getByRole('button', { name: /尾盘交易 OFF/ })).toBeDisabled();
+    expect(screen.queryByRole('option', { name: '收盘价成交 (Close)' })).not.toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '开盘价成交 (Open)' })).toBeInTheDocument();
+    await waitFor(() => expect(state.users).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole('button', { name: /立即执行回测/ }));
+    await waitFor(() => expect(state.run).toHaveBeenCalledWith(expect.objectContaining({ market: 'JP', deal_price: 'open' })));
+    state.market = 'CN'; view.rerender(<QlibQuickBacktest />);
+    expect(screen.getByRole('button', { name: /尾盘交易 ON/ })).toBeEnabled();
+    expect(screen.getByRole('option', { name: '收盘价成交 (Close)' })).toBeInTheDocument();
+    expect(screen.getByRole('spinbutton', { name: '交易费率（万分之）' })).toHaveValue(2.5);
+    expect(screen.getByText('已匹配 A 股标准')).toBeInTheDocument();
+    expect(localStorage.getItem('backtest_tail_trade_mode')).toBe('1');
   });
 });

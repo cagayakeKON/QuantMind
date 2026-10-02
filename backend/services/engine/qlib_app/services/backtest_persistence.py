@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 
 from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestResult
+from backend.services.engine.data_platform.market_provider import adapt_backtest_result_payload
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.utils import normalize_user_id
 from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
@@ -242,6 +243,8 @@ class BacktestPersistence:
                     backtest_id=backtest_id,
                     error=str(exc),
                 )
+
+        merged_payload = adapt_backtest_result_payload(merged_payload)
 
         # 如果指定了字段，裁剪结果
         if include_fields:
@@ -513,6 +516,8 @@ class BacktestPersistence:
                     payload["trades"] = RiskAnalyzer.normalize_trades_for_display(trades)
                 except Exception:
                     pass
+
+            payload = adapt_backtest_result_payload(payload)
 
             # 裁剪字段
             if include_fields:

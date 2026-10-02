@@ -1,6 +1,7 @@
 """Map recorded JP cash results to the existing analysis data contracts."""
 
 from functools import partial
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -106,6 +107,45 @@ def public_trades(fills):
         }
         for fill in fills
     ]
+
+
+def public_legacy_result_view(payload):
+    """Project old cash reports without rewriting saved records or their metrics."""
+    config = payload.get("config") or {}
+    if config.get("strategy_type") != "jp_cash_topk":
+        return payload
+    updates = {}
+    trades = payload.get("trades") or []
+    if trades and not all("action" in row and "date" in row for row in trades):
+        updates["trades"] = public_trades(trades)
+    positions = payload.get("positions") or []
+    if positions and not all("date" in row and "amount" in row for row in positions):
+        saved = payload.get("advanced_stats") or {}
+        day = config.get("end_date")
+        if not day or "cash_funds" not in saved:
+            raise ValueError("Recorded JP final position valuation is unavailable")
+        original = {row["symbol"]: row for row in positions}
+        state = {"positions": original, "cash_funds": saved["cash_funds"]}
+        rows = public_positions({pd.Timestamp(day): cash_position_snapshot(state)})
+        updates["positions"] = [{**original[row["symbol"]], **row} for row in rows]
+        # Old reports did not record names/sectors. Let the existing parser use
+        # its original code/unknown-sector defaults; never query current master.
+        if "position_info" not in saved:
+            version = recorded_version(
+                SimpleNamespace(
+                    market=payload.get("market"),
+                    config=config,
+                    data_version=payload.get("data_version"),
+                )
+            )
+            updates["advanced_stats"] = {
+                **saved,
+                "position_info": {
+                    "data_version": version,
+                    "by_date": {day: {row["symbol"]: {} for row in rows}},
+                },
+            }
+    return {**payload, **updates} if updates else payload
 
 
 def public_factor_metrics(result, request, pred, strategy_context):

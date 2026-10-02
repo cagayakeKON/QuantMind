@@ -12,9 +12,10 @@ interface Props {
   params: QlibStrategyParams;
   onChange: (params: QlibStrategyParams) => void;
   strategyCode?: string;
+  commission?: { rate: number; label: string; onChange: (rate: number) => void };
 }
 
-export const QlibStrategyConfigurator: React.FC<Props> = ({ strategyType, params, onChange, strategyCode }) => {
+export const QlibStrategyConfigurator: React.FC<Props> = ({ strategyType, params, onChange, strategyCode, commission }) => {
   const isLongShortTopk = strategyType === 'long_short_topk';
   const paramMap = params as Record<string, unknown>;
   const hasParam = (key: string) => paramMap[key] !== undefined && paramMap[key] !== null;
@@ -445,16 +446,22 @@ export const QlibStrategyConfigurator: React.FC<Props> = ({ strategyType, params
         <div className="pt-4 border-t border-gray-100">
           <div className="flex items-center justify-between mb-3">
             <span className="text-xs font-bold text-gray-400 uppercase tracking-wider">交易费率 (万分之)</span>
-            <span className="text-xs text-gray-400 italic">已匹配 A 股标准</span>
+            <span className="text-xs text-gray-400 italic">{commission?.label ?? '已匹配 A 股标准'}</span>
           </div>
           <div className="space-y-3">
             <div className="flex items-center gap-3">
               <input
                 type="number"
-                value={((params.buy_cost || 0.00026) * 10000 - 0.1).toFixed(1)}
+                aria-label="交易费率（万分之）"
+                min={commission ? 0 : undefined}
+                value={commission ? (commission.rate * 10000).toFixed(1) : ((params.buy_cost || 0.00026) * 10000 - 0.1).toFixed(1)}
                 onChange={(e) => {
                   const c = Number(e.target.value);
-                  onChange({ ...params, buy_cost: (c + 0.1) / 10000, sell_cost: (c + 0.1 + 5.0) / 10000 });
+                  if (commission) {
+                    commission.onChange(c / 10000);
+                  } else {
+                    onChange({ ...params, buy_cost: (c + 0.1) / 10000, sell_cost: (c + 0.1 + 5.0) / 10000 });
+                  }
                 }}
                 className="w-20 px-2 py-1 bg-gray-50 border border-gray-200 rounded text-xs font-mono text-gray-700 focus:outline-none"
               />

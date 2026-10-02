@@ -20,19 +20,10 @@ import { EnhancedAdvancedAnalysisModule } from '../components/backtestCenter/Enh
 import { useBacktestCenterStore, ModuleId } from '../stores/backtestCenterStore';
 import { Bell } from 'lucide-react';
 import { PAGE_LAYOUT } from '../config/pageLayout';
-import { useAppSelector } from '../store';
-import { selectCurrentMarket } from '../store/slices/uiSlice';
-import { getMarketConfig } from '../config/marketConfig';
-import JPBacktestPage from './JPBacktestPage';
 
 // 固定尺寸常量已移除，改为自适应布局
 
 export const NewBacktestCenterPage: React.FC = () => {
-  const market = useAppSelector(selectCurrentMarket);
-  return getMarketConfig(market).backtestUi === 'jp_cash' ? <JPBacktestPage /> : <StandardBacktestCenterPage />;
-};
-
-const StandardBacktestCenterPage: React.FC = () => {
   const { activeModule, setActiveModule } = useBacktestCenterStore();
   // 组件挂载时，仅在 activeModule 为空或无效时重置为默认模块
   useEffect(() => {

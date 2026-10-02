@@ -30,9 +30,8 @@ export interface MarketConfig {
   simulationUi?: 'standard' | 'jp_cash';
   stockSearch?: 'local' | 'gateway';
   stockTerminal?: { market: string; adjustments: ('none' | 'qfq' | 'hfq')[]; requestTimeoutMs?: number };
-  backtestUi?: 'standard' | 'jp_cash';
   /** Optional request context for markets joining the common backtest pages. */
-  backtest?: { market: AppMarket; commission: number; requireModelMarket: boolean; dealPrice?: 'open' | 'close' };
+  backtest?: { market: AppMarket; commission: number; requireModelMarket: boolean; dealPrice?: 'open' | 'close'; dealPrices?: ('open' | 'close')[] };
   analysis?: { benchmarks: Array<{ id: string; name: string }> };
   tradeRecordsUi?: 'standard' | 'jp_cash';
   portfolioChartsUi?: 'standard' | 'jp_cash';
@@ -50,8 +49,7 @@ export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
     simulationUi: 'jp_cash',
     stockSearch: 'gateway',
     stockTerminal: { market: 'JP', adjustments: ['none', 'qfq'], requestTimeoutMs: 120000 },
-    backtestUi: 'jp_cash',
-    backtest: { market: 'JP', commission: 0, requireModelMarket: true, dealPrice: 'open' },
+    backtest: { market: 'JP', commission: 0, requireModelMarket: true, dealPrice: 'open', dealPrices: ['open'] },
     analysis: { benchmarks: [{ id: 'TOPIX', name: 'TOPIX 价格指数' }] },
     tradeRecordsUi: 'jp_cash',
     portfolioChartsUi: 'jp_cash',

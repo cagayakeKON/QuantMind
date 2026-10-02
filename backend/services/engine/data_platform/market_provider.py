@@ -15,6 +15,7 @@ class LocalMarketProvider:
     benchmark_price_loader: str | None = None
     position_info_loader: str | None = None
     style_feature_loader_factory: str | None = None
+    backtest_result_adapter: str | None = None
 
     def open(self):
         cls = getattr(importlib.import_module(self.module), self.hub_class)
@@ -31,5 +32,18 @@ LOCAL_MARKET_PROVIDERS = {
         benchmark_price_loader="backend.services.simulation.jp.analysis_data.read_benchmark_prices",
         position_info_loader="backend.services.simulation.jp.analysis_data.read_position_info",
         style_feature_loader_factory="backend.services.simulation.jp.analysis_data.create_style_feature_loader",
+        backtest_result_adapter="backend.services.simulation.jp.analysis_data.public_legacy_result_view",
     ),
 }
+
+
+def adapt_backtest_result_payload(payload):
+    """Optional read-only projection of a registered market's historical report."""
+    config = payload.get("config")
+    config = config if isinstance(config, dict) else {}
+    market = payload.get("market") or config.get("market")
+    provider = LOCAL_MARKET_PROVIDERS.get(market) if isinstance(market, str) else None
+    if provider and provider.backtest_result_adapter:
+        module, function = provider.backtest_result_adapter.rsplit(".", 1)
+        return getattr(importlib.import_module(module), function)(payload)
+    return payload

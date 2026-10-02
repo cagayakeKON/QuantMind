@@ -6,6 +6,10 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestResult
+from backend.services.engine.data_platform.market_provider import (
+    LOCAL_MARKET_PROVIDERS,
+    adapt_backtest_result_payload,
+)
 from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
 from backend.shared.utils import normalize_user_id
 from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
@@ -95,7 +99,13 @@ class QlibBacktestServiceQueryMixin:
     def _normalize_result_trades(self, result: QlibBacktestResult | None) -> QlibBacktestResult | None:
         if result is None:
             return None
-        if getattr(result, "market", None) == "JP":
+        market = getattr(result, "market", None)
+        provider = LOCAL_MARKET_PROVIDERS.get(market) if isinstance(market, str) else None
+        if provider and provider.backtest_result_adapter:
+            payload = result.model_dump()
+            projected = adapt_backtest_result_payload(payload)
+            if projected is not payload:
+                return result.model_copy(update=projected)
             return result
         try:
             trades = getattr(result, "trades", None)

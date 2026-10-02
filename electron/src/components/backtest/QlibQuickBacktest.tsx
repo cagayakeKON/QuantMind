@@ -99,6 +99,7 @@ export const QlibQuickBacktest: React.FC = () => {
   const clearQuickBacktestPrefill = useBacktestCenterStore((state) => state.clearQuickBacktestPrefill);
   const currentMarket = useAppSelector(selectCurrentMarket);
   const marketConfig = getMarketConfig(currentMarket);
+  const [marketCommission, setMarketCommission] = useState(marketConfig.backtest?.commission ?? 0);
   const UNIVERSE_PRESETS = useMemo(() => MARKET_UNIVERSE_PRESETS[currentMarket] || MARKET_UNIVERSE_PRESETS.CN, [currentMarket]);
   const MARKET_BENCHMARKS = useMemo(() => BACKTEST_CONFIG.QLIB.MARKET_BENCHMARKS[currentMarket] || BACKTEST_CONFIG.QLIB.MARKET_BENCHMARKS.CN, [currentMarket]);
 
@@ -129,6 +130,8 @@ export const QlibQuickBacktest: React.FC = () => {
 
   // 尾盘交易模式开关（持久化）
   const [tailTradeEnabled, setTailTradeEnabled] = useState<boolean>(() => getStoredTailTradeMode());
+  const tailTradeSupported = marketConfig.backtest?.dealPrices?.includes('close') ?? true;
+  const effectiveTailTrade = tailTradeEnabled && tailTradeSupported;
   const [showTailTradeTooltip, setShowTailTradeTooltip] = useState(false);
   const tailTradeTimerRef = useRef<number | null>(null);
 
@@ -295,6 +298,7 @@ export const QlibQuickBacktest: React.FC = () => {
   useEffect(() => {
     setBenchmark(marketConfig.benchmark);
     setUniversePath('all');
+    setMarketCommission(marketConfig.backtest?.commission ?? 0);
   }, [currentMarket]);
 
   const loadPendingStrategy = async (id: string) => {
@@ -424,9 +428,9 @@ export const QlibQuickBacktest: React.FC = () => {
         strategy_id: strategyInfo?.id,
         model_id: selectedModelId || undefined,
         seed: seed.trim() === '' ? undefined : Number(seed),
-        commission: marketConfig.backtest?.commission ?? 0.00025,
-        deal_price: getTailTradeDealPrice(tailTradeEnabled),
-        signal_lag_days: getTailTradeSignalLagDays(tailTradeEnabled),
+        commission: marketConfig.backtest ? marketCommission : 0.00025,
+        deal_price: getTailTradeDealPrice(effectiveTailTrade),
+        signal_lag_days: getTailTradeSignalLagDays(effectiveTailTrade),
         allow_feature_signal_fallback: ALLOW_FEATURE_SIGNAL_FALLBACK,
         qlib_provider_uri: marketConfig.qlibProviderUri,
         qlib_region: marketConfig.qlibRegion,
@@ -819,24 +823,26 @@ export const QlibQuickBacktest: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setTailTradeEnabled(!tailTradeEnabled)}
+                  disabled={!tailTradeSupported}
+                  title={!tailTradeSupported ? '当前市场仅支持开盘成交' : undefined}
                   className={`flex items-center gap-2 px-2.5 py-1 rounded-full border transition-all duration-200 ${
-                    tailTradeEnabled
+                    effectiveTailTrade
                       ? 'bg-blue-50 border-blue-200 text-blue-700'
                       : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'
                   }`}
                 >
                   <span className="text-[11px] font-bold">尾盘交易</span>
                   <span className={`px-1.5 py-0.5 rounded-lg text-[9px] font-black min-w-[28px] text-center transition-all ${
-                    tailTradeEnabled
+                    effectiveTailTrade
                       ? 'bg-blue-600 text-white'
                       : 'bg-white text-gray-500 border border-gray-100 shadow-sm'
                   }`}>
-                    {tailTradeEnabled ? 'ON' : 'OFF'}
+                    {effectiveTailTrade ? 'ON' : 'OFF'}
                   </span>
                 </button>
                 {showTailTradeTooltip && (
                   <div className="absolute top-full right-0 mt-2 px-2.5 py-1.5 bg-gray-900 text-white text-[11px] rounded-lg whitespace-nowrap z-50 shadow-lg">
-                    {tailTradeEnabled
+                    {!tailTradeSupported ? '当前市场仅支持开盘成交' : tailTradeEnabled
                       ? '尾盘交易：T日信号+T+1收盘成交'
                       : '标准口径：T日信号+T+1开盘成交'}
                     <div className="absolute bottom-full right-3 border-4 border-transparent border-b-gray-900" />
@@ -965,15 +971,16 @@ export const QlibQuickBacktest: React.FC = () => {
                   <label className="text-sm font-medium text-gray-600">成交价格 (Deal Price)</label>
                 </div>
                 <select
-                  value={getTailTradeDealPrice(tailTradeEnabled)}
+                  value={getTailTradeDealPrice(effectiveTailTrade)}
                   onChange={(e) => setDealPrice(e.target.value as 'open' | 'close')}
-                  disabled={tailTradeEnabled}
+                  disabled={effectiveTailTrade}
                   className={`w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:outline-none focus:border-blue-500 ${
-                    tailTradeEnabled ? 'text-gray-400 cursor-not-allowed' : ''
+                    effectiveTailTrade ? 'text-gray-400 cursor-not-allowed' : ''
                   }`}
                 >
-                  <option value="open">开盘价成交 (Open)</option>
-                  <option value="close">收盘价成交 (Close)</option>
+                  {(marketConfig.backtest?.dealPrices ?? ['open', 'close']).map(price => (
+                    <option key={price} value={price}>{price === 'open' ? '开盘价成交 (Open)' : '收盘价成交 (Close)'}</option>
+                  ))}
                 </select>
               </div>
             </div>
@@ -990,6 +997,11 @@ export const QlibQuickBacktest: React.FC = () => {
               params={strategyParams}
               onChange={setStrategyParams}
               strategyCode={strategyInfo?.code}
+              commission={marketConfig.backtest ? {
+                rate: marketCommission,
+                label: `${marketConfig.label} · ${marketConfig.currency}`,
+                onChange: setMarketCommission,
+              } : undefined}
             />
           </motion.div>
 
