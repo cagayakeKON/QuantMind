@@ -5,8 +5,8 @@ P1 范围：
 2. GET /industries 行业列表（过滤下拉用）
 3. GET /profile   个股概况聚合（详情 + 估值 + 宽基归属 + 概念板块）
 
-数据全部来自本地 QuantDB parquet（instrument_detail / technical_indicators /
-valuation / index_weights / sector_concept），无外部依赖。
+数据来自本地 QuantDB parquet（instrument_detail / technical_indicators /
+valuation / index_weights / sector_concept）或已注册的本地市场数据源。
 
 K 线数据复用既有 /api/v1/market/kline 与 /api/v1/market/index-kline，
 本模块不重复实现。
@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from backend.services.api.stock_terminal_sources import terminal_source
 from backend.services.api.user_app.middleware.auth import get_current_user
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.logging_config import get_logger
@@ -1104,7 +1105,8 @@ async def stock_minute_kline(
 ):
     _ = current_user
     sym = symbol.upper().strip()
-    if not _SYMBOL_RE.match(sym):
+    source = terminal_source(symbol=sym)
+    if not _SYMBOL_RE.match(sym) and source is None:
         raise HTTPException(status_code=400, detail=f"非法代码 {sym}")
 
     def _run() -> pd.DataFrame:
@@ -1122,13 +1124,23 @@ async def stock_minute_kline(
 
     import asyncio
 
-    df = await asyncio.to_thread(_run)
+    if source is not None:
+        if freq not in {"min1", "min5"}:
+            raise HTTPException(status_code=400, detail=f"非法分钟周期 {freq}")
+        df = await asyncio.to_thread(source.minute, sym, freq, days)
+    else:
+        df = await asyncio.to_thread(_run)
     if df.empty:
         return {"success": True, "data": {"items": [], "available": False}}
-    df = df.sort_values("time").tail(days * 48)
+    if source is None:
+        df = df.sort_values("time").tail(days * 48)
     items = [
         {
-            "date": str(r.get("time"))[:16].replace(" ", " "),
+            "date": (
+                pd.Timestamp(r.get("time")).isoformat()
+                if source is not None
+                else str(r.get("time"))[:16].replace(" ", " ")
+            ),
             "open": _safe_f(r.get("open")),
             "high": _safe_f(r.get("high")),
             "low": _safe_f(r.get("low")),
@@ -1327,7 +1339,9 @@ def _cap_tier_of(mv_yi) -> str:
     return "超大盘"
 
 
-async def _trend_map(model: str | None, before=None) -> dict[str, str]:
+async def _trend_map(
+    model: str | None, before=None, market: str | None = None
+) -> dict[str, str]:
     """每股最近 3 个信号日的分数趋势（symbol 纯数字 -> 趋势标签）。
 
     before: date 对象时，取 before 及之前的最近 3 个信号日（日历点选历史日联动）。
@@ -1337,6 +1351,10 @@ async def _trend_map(model: str | None, before=None) -> dict[str, str]:
     async with get_session() as session:
         mwhere = "AND run_id IN (SELECT run_id FROM qm_model_inference_runs WHERE model_id = :m)" if model else ""
         params: dict = {"m": model} if model else {}
+        source = terminal_source(market=market)
+        if source is not None:
+            mwhere += " AND symbol LIKE :market_prefix"
+            params["market_prefix"] = f"{source.market}%"
         bwhere = ""
         if before is not None:
             bwhere = "AND trade_date <= :b"
@@ -1401,7 +1419,7 @@ async def _trend_map(model: str | None, before=None) -> dict[str, str]:
 
 @router.get("/list")
 async def list_stocks(
-    market: str = Query("ALL", description="SH / SZ / BJ / ALL"),
+    market: str = Query("ALL", description="SH / SZ / BJ / JP / ALL"),
     industry: str | None = Query(None, description="行业名称（rs_hyname）"),
     q: str | None = Query(None, description="代码/名称模糊检索"),
     only_st: bool = Query(False, description="仅 ST 股"),
@@ -1429,7 +1447,19 @@ async def list_stocks(
     # 日历点选历史日时 close/pct_change 也读该日快照（左右整页随日期联动）
     # _load_universe 同步读 parquet+merge，跑在 event loop 上会阻塞全部并发请求
     # （单 worker uvicorn），挪到线程池执行，list 接口并发不再互相排队
-    df, trade_date = await asyncio.to_thread(_load_universe, asof=date)
+    source = terminal_source(market=market)
+    if source is not None:
+        df, trade_date = await asyncio.to_thread(source.universe, date)
+    else:
+        df, trade_date = await asyncio.to_thread(_load_universe, asof=date)
+    market_params = {"market_prefix": f"{source.market}%"} if source else {}
+    market_where = " AND symbol LIKE :market_prefix" if source else ""
+    market_join = " AND e.symbol LIKE :market_prefix" if source else ""
+    if source is not None and (concept or index_code or tag):
+        raise HTTPException(
+            status_code=422,
+            detail="当前数据源未提供概念、指数成分或智能标签筛选数据",
+        )
 
     m = market.upper()
     if m in ("SH", "SZ", "BJ"):
@@ -1438,6 +1468,11 @@ async def list_stocks(
         df = df[df["rs_hyname"] == industry]
     if q and q.strip():
         kw = q.strip()
+        if source is not None:
+            from backend.shared.stock_utils import StockCodeUtil
+
+            if StockCodeUtil.is_jp_symbol(kw):
+                kw = StockCodeUtil.to_suffix(kw, market=source.market)
         df = df[df["Symbol"].str.contains(kw, case=False, regex=False, na=False) | df["Name"].astype(str).str.contains(kw, case=False, regex=False, na=False)]
     if only_st:
         df = df[_st_mask(df)]
@@ -1497,6 +1532,9 @@ async def list_stocks(
 
         mwhere = "AND run_id IN (SELECT run_id FROM qm_model_inference_runs WHERE model_id = :m)" if model else ""
         mparams: dict = {"m": model} if model else {}
+        if source is not None:
+            mwhere += " AND symbol LIKE :market_prefix"
+            mparams["market_prefix"] = f"{source.market}%"
         params: dict = {}
         if date:
             _signal_date = _date2.fromisoformat(date)
@@ -1536,6 +1574,9 @@ async def list_stocks(
         if latest is not None:
             where = "tenant_id = 'default' AND trade_date = :d"
             params: dict = {"d": latest}
+            if source is not None:
+                where += " AND symbol LIKE :market_prefix"
+                params["market_prefix"] = f"{source.market}%"
             if model:
                 # model_version 列恒为 'inference_script'（历史遗留），真实模型标识
                 # 在 qm_model_inference_runs.model_id，按 run_id 关联过滤
@@ -1559,6 +1600,8 @@ async def list_stocks(
                 rows = (await session.execute(_txt(sql), params)).fetchall()
             for r in rows:
                 sym = str(r[0])
+                if source is not None:
+                    sym = source.symbol_key(sym)
                 # engine_signal_scores.symbol 为纯数字 600519（不带市场后缀）
                 sfx = sym if "." in sym else sym
                 pos = None
@@ -1583,12 +1626,19 @@ async def list_stocks(
     # 模型在该信号日无分数则返回空集，不能静默回退成全市场
     if model:
         if score_info:
-            df = df[df["Symbol"].str.split(".").str[0].isin(score_info.keys())]
+            codes = (
+                df["Symbol"].map(source.symbol_key)
+                if source else df["Symbol"].str.split(".").str[0]
+            )
+            df = df[codes.isin(score_info.keys())]
         else:
             df = df.iloc[0:0]
 
     if score_info:
-        df["_code"] = df["Symbol"].str.split(".").str[0]
+        df["_code"] = (
+            df["Symbol"].map(source.symbol_key)
+            if source else df["Symbol"].str.split(".").str[0]
+        )
         df["_fusion"] = df["_code"].map(lambda c: (score_info.get(c) or {}).get("fusion"))
         df["_side"] = df["_code"].map(lambda c: (score_info.get(c) or {}).get("side"))
         if score_min is not None:
@@ -1606,7 +1656,11 @@ async def list_stocks(
     trend_map: dict[str, str] = {}
     if score_info:
         try:
-            trend_map = await _trend_map(model, before=latest)
+            if source is not None:
+                trend_map = await _trend_map(model, before=latest, market=source.market)
+                trend_map = {source.symbol_key(k): v for k, v in trend_map.items()}
+            else:
+                trend_map = await _trend_map(model, before=latest)
         except Exception as exc:  # noqa: BLE001
             logger.warning("trend map failed: %s", exc)
     if trend and trend_map:
@@ -1622,7 +1676,15 @@ async def list_stocks(
         if wanted:
             norm: set[str] = set()
             for s in wanted:
-                if "." in s:
+                if source is not None:
+                    from backend.shared.stock_utils import StockCodeUtil
+
+                    try:
+                        norm.add(StockCodeUtil.to_suffix(s, market=source.market))
+                    except ValueError:
+                        # A user's favorites can include other markets.
+                        continue
+                elif "." in s:
                     norm.add(s)
                 elif s[:2] in ("SH", "SZ", "BJ"):
                     norm.add(f"{s[2:]}.{s[:2]}")
@@ -1635,9 +1697,19 @@ async def list_stocks(
     # 定位选中股票在当前排序中的名次（列表自动跳转：切日期后名次可能掉到几千名）
     find_rank: int | None = None
     if find_symbol and total:
-        code = find_symbol.split(".")[0]
+        if source is not None:
+            from backend.shared.stock_utils import StockCodeUtil
+
+            try:
+                code = StockCodeUtil.to_suffix(find_symbol, market=source.market)
+            except ValueError:
+                code = ""
+            candidates = df["Symbol"]
+        else:
+            code = find_symbol.split(".")[0]
+            candidates = df["Symbol"].str.split(".").str[0]
         # df 过滤后 index 是非连续标签，必须用位置索引（0-based）而非 index 标签
-        pos = (df["Symbol"].str.split(".").str[0] == code).to_numpy().nonzero()[0]
+        pos = (candidates == code).to_numpy().nonzero()[0]
         if len(pos):
             find_rank = int(pos[0]) + 1  # 0-based 位置 -> 1-based 名次
 
@@ -1650,7 +1722,7 @@ async def list_stocks(
     if with_counts:
         try:
             for dim, col, opts in (
-                ("board", "board", BOARD_OPTIONS),
+                ("board", "board", sorted(base_df["board"].dropna().unique()) if source else BOARD_OPTIONS),
                 ("capTier", None, [c["value"] for c in CAP_TIER_OPTIONS]),
                 ("trend", None, [t["value"] for t in TREND_OPTIONS]),
             ):
@@ -1662,7 +1734,10 @@ async def list_stocks(
                         mv = pd.to_numeric(base_df["Zsz"], errors="coerce")
                         n = int((_cap_mask(mv, optv)).sum())
                     else:
-                        codes = base_df["Symbol"].str.split(".").str[0]
+                        codes = (
+                            base_df["Symbol"].map(source.symbol_key)
+                            if source else base_df["Symbol"].str.split(".").str[0]
+                        )
                         n = int((codes.map(trend_map) == optv).sum())
                     counts[optv] = n
                 option_counts[dim] = counts
@@ -1675,7 +1750,8 @@ async def list_stocks(
 
                         _d1 = (
                             await _s2.execute(
-                                _txt("SELECT MAX(trade_date) FROM engine_signal_scores WHERE tenant_id='default'")
+                                _txt(f"SELECT MAX(trade_date) FROM engine_signal_scores WHERE tenant_id='default'{market_where}"),
+                                **({"params": market_params} if source else {}),
                             )
                         ).scalar_one_or_none()
                         if _d1 is not None:
@@ -1684,10 +1760,10 @@ async def list_stocks(
                                     _txt(
                                         "SELECT r.model_id, COUNT(*) c FROM engine_signal_scores e "
                                         "JOIN qm_model_inference_runs r ON r.run_id = e.run_id "
-                                        "WHERE e.tenant_id='default' AND e.trade_date = :d "
+                                        f"WHERE e.tenant_id='default' AND e.trade_date = :d {market_join} "
                                         "GROUP BY r.model_id"
                                     ),
-                                    {"d": _d1},
+                                    {"d": _d1, **market_params},
                                 )
                             ).fetchall()
                             model_counts = {str(m): int(c) for m, c in _mr}
@@ -1718,9 +1794,10 @@ async def list_stocks(
     # 真实模型标识在 qm_model_inference_runs.model_id（同 model_training history 逻辑）。
     # JOIN+GROUP BY 全表 2.3s/次，结果按日频更新——缓存 _UNIVERSE_TTL 消除重复开销
     model_options: list[dict[str, Any]] = []
+    model_cache = _model_options_cache if source is None else {"v": None, "ts": 0.0}
     _now = time.time()
-    if not model and _model_options_cache["v"] is not None and _now - _model_options_cache["ts"] < _UNIVERSE_TTL:
-        model_options = _model_options_cache["v"]
+    if not model and model_cache["v"] is not None and _now - model_cache["ts"] < _UNIVERSE_TTL:
+        model_options = model_cache["v"]
     elif not model:
         try:
             async with get_session() as _s:
@@ -1728,9 +1805,12 @@ async def list_stocks(
 
                 _date_sql = (
                     "SELECT DISTINCT trade_date FROM engine_signal_scores "
-                    "WHERE tenant_id='default' ORDER BY trade_date DESC LIMIT 1"
+                    f"WHERE tenant_id='default' {market_where} ORDER BY trade_date DESC LIMIT 1"
                 )
-                _latest_date = (await _s.execute(_txt(_date_sql))).scalar_one_or_none()
+                _latest_date = (await _s.execute(
+                    _txt(_date_sql),
+                    **({"params": market_params} if source else {}),
+                )).scalar_one_or_none()
                 if _latest_date is not None:
                     _from = _latest_date - _timedelta(days=90)
                     _mrows = (
@@ -1740,13 +1820,13 @@ async def list_stocks(
                                 "FROM engine_signal_scores e "
                                 "JOIN qm_model_inference_runs r ON r.run_id = e.run_id "
                                 "LEFT JOIN qm_user_models u ON u.model_id = r.model_id "
-                                "WHERE e.tenant_id='default' AND e.trade_date >= :d_from "
+                                f"WHERE e.tenant_id='default' AND e.trade_date >= :d_from {market_join} "
                                 "AND (u.status IS NULL OR u.status <> 'archived') "
                                 "GROUP BY r.model_id "
                                 "ORDER BY MAX(u.is_default::int) DESC NULLS LAST, "
                                 "MAX(e.trade_date) DESC LIMIT 200"
                             ),
-                            {"d_from": _from},
+                            {"d_from": _from, **market_params},
                         )
                     ).fetchall()
                     _mids = [str(_r[0]) for _r in _mrows]
@@ -1771,7 +1851,7 @@ async def list_stocks(
                             "model_id": str(_mid),
                             "display_name": _meta_map.get(str(_mid), ""),
                         })
-                _model_options_cache.update({"v": model_options, "ts": time.time()})
+                model_cache.update({"v": model_options, "ts": time.time()})
         except Exception as exc:  # noqa: BLE001
             logger.warning("model options for list failed: %s", exc)
 
@@ -1780,7 +1860,11 @@ async def list_stocks(
     st_mask_series = _st_mask(df)
 
     def _item(r: pd.Series) -> dict[str, Any]:
-        info = score_info.get(str(r.get("Symbol")).split(".")[0]) if score_info else {}
+        code = (
+            source.symbol_key(r.get("Symbol"))
+            if source else str(r.get("Symbol")).split(".")[0]
+        )
+        info = score_info.get(code) if score_info else {}
         return {
             "symbol": r.get("Symbol"),
             "name": r.get("Name"),
@@ -1790,7 +1874,7 @@ async def list_stocks(
             "pct_change": _safe_f(r.get("pct_change")),
             "total_mv": _safe_f(r.get("Zsz")),      # 亿元
             "float_mv": _safe_f(r.get("Ltsz")),     # 亿元
-            "pe": _safe_f(r.get("DynaPE")),
+            "pe": _safe_f(r.get("pe_ttm") if source is not None else r.get("DynaPE")),
             "pb": _safe_f(r.get("PB_MRQ")),
             "is_st": bool(st_mask_series.loc[r.name]) if r.name in st_mask_series.index else False,
             "fusion": (info.get("fusion") if info else None),
@@ -1805,7 +1889,7 @@ async def list_stocks(
             "market_empty": (info.get("market_empty") if info else None),
             "cap_tier": _cap_tier_of(r.get("Zsz")),
             "trend": (
-                trend_map.get(str(r.get("Symbol")).split(".")[0], "-")
+                trend_map.get(code, "-")
                 if trend_map else "-"
             ),
         }
@@ -2016,7 +2100,14 @@ async def stock_profile(
 ):
     _ = current_user
     sym = symbol.upper().strip()
-    df, trade_date = await asyncio.to_thread(_load_universe, asof=date)
+    source = terminal_source(symbol=sym)
+    if source is not None:
+        from backend.shared.stock_utils import StockCodeUtil
+
+        sym = StockCodeUtil.to_suffix(sym, market=source.market)
+        df, trade_date = await asyncio.to_thread(source.universe, date)
+    else:
+        df, trade_date = await asyncio.to_thread(_load_universe, asof=date)
     hits = df[df["Symbol"] == sym]
     if hits.empty:
         raise HTTPException(status_code=404, detail=f"未找到 {sym}")
@@ -2034,6 +2125,16 @@ async def stock_profile(
     def _read_valuation() -> tuple[dict[str, Any], float | None]:
         valuation: dict[str, Any] = {}
         dividend_yield: float | None = None
+        if source is not None:
+            raw = source.valuation(sym, date)
+            fields = {
+                "pe_ttm", "pb", "total_mv", "float_mv", "dividend_rate",
+                "ps_ttm", "net_profit_ttm", "revenue_ttm", "equity",
+            }
+            valuation = {
+                key: _safe_f(value) for key, value in raw.items() if key in fields
+            }
+            return valuation, _norm_dividend(raw.get("dividend_rate"))
         d = _quantdb_dir()
         v_file = _partition_on(d / "5_technical_derived" / "valuation", date) if date else _latest_partition(d / "5_technical_derived" / "valuation")
         if v_file is not None:
@@ -2064,12 +2165,17 @@ async def stock_profile(
             return await asyncio.to_thread(_l2_features_for, sym, feat_date), sig
         return None, sig
 
-    (valuation, dividend_yield), _idx, _concepts, _l2_res = await asyncio.gather(
-        asyncio.to_thread(_read_valuation),
-        asyncio.to_thread(_index_membership, sym),
-        asyncio.to_thread(_concepts_of, sym),
-        _resolve_l2(),
-    )
+    if source is not None:
+        valuation, dividend_yield = await asyncio.to_thread(_read_valuation)
+        # This publication contains no index memberships, concepts or Level 2.
+        _idx, _concepts, _l2_res = [], [], (None, None)
+    else:
+        (valuation, dividend_yield), _idx, _concepts, _l2_res = await asyncio.gather(
+            asyncio.to_thread(_read_valuation),
+            asyncio.to_thread(_index_membership, sym),
+            asyncio.to_thread(_concepts_of, sym),
+            _resolve_l2(),
+        )
 
     l2_features, signal_date = _l2_res if _l2_res is not None else (None, None)
 
@@ -2107,4 +2213,9 @@ async def stock_profile(
         "l2_features": l2_features,
         "signal_date": signal_date,
     }
+    if source is not None:
+        profile.update(
+            market=source.market, currency=source.provider.currency,
+            frequency="daily", data_version=source.hub.data_dir.name,
+        )
     return {"success": True, "data": profile}
