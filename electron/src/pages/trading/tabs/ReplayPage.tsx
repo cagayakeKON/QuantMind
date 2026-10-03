@@ -11,6 +11,7 @@
 
 import { useAppSelector } from '../../../store';
 import { selectCurrentMarket } from '../../../store/slices/uiSlice';
+import { getMarketConfig } from '../../../config/marketConfig';
 import React, { useState, useEffect, useCallback, useReducer } from 'react';
 import {
     Clock, Play, Trash2, Plus, Loader2, AlertTriangle,
@@ -28,11 +29,13 @@ import {
     listSessions, createSession,
     stepSession, deleteSession, proposeSession,
     listStrategyTemplates,
+    getExecutionRules,
 } from '../../../services/replayService';
 import { modelTrainingService, type SystemModelRecord, type UserModelRecord } from '../../../services/modelTrainingService';
 import { modelDisplayName, getMeta, getMetrics, extractModelTypeShort } from '../../modelRegistryUtils';
 import { useAutoAdvance, type AutoAdvanceSpeed, type DailyRecord } from '../../../hooks/useAutoAdvance';
 import ReplayReportPage from './ReplayReportPage';
+import { replayContext, replayCreateParams, replayVisibleSessions, validatedReplayUnits } from '../../../services/replayMarketContext';
 import {
   StockPoolSelectField,
   type StockPoolSelection,
@@ -149,7 +152,7 @@ function CreateSessionForm({ onCreate }: { onCreate: (s: ReplaySession) => void 
         let cancelled = false;
         (async () => {
             try {
-                const tpls = await listStrategyTemplates();
+                const tpls = await listStrategyTemplates(currentMarket);
                 if (cancelled) return;
                 setTemplates(tpls);
                 // 默认选中「默认 Top-K 选股策略」，找不到时退回第一个模板
@@ -164,7 +167,7 @@ function CreateSessionForm({ onCreate }: { onCreate: (s: ReplaySession) => void 
             }
         })();
         return () => { cancelled = true; };
-    }, []);
+    }, [replayContext(currentMarket)?.market]);
 
     // When template changes, reset param overrides
     useEffect(() => {
@@ -213,7 +216,7 @@ function CreateSessionForm({ onCreate }: { onCreate: (s: ReplaySession) => void 
                 auto_trade: autoTrade,
                 stop_loss_pct: buildStopLossPct(),
             };
-            const session = await createSession(params);
+            const session = await createSession(replayCreateParams(params, currentMarket));
             onCreate(session);
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : '创建失败';
@@ -466,7 +469,7 @@ function CreateSessionForm({ onCreate }: { onCreate: (s: ReplaySession) => void 
                         <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className={inputClass} />
                     </div>
                     <div>
-                        <label className="block text-xs font-semibold text-slate-600 mb-1.5">初始资金</label>
+                        <label className="block text-xs font-semibold text-slate-600 mb-1.5">初始资金{replayContext(currentMarket) && ` (${replayContext(currentMarket)?.currency})`}</label>
                         <input type="number" value={initialCash} onChange={e => setInitialCash(e.target.value)} className={inputClass} />
                     </div>
                     <div>
@@ -692,7 +695,7 @@ interface ProposalRowState {
 type RowAction =
     | { type: 'RESET'; proposals: ProposalItem[] }
     | { type: 'TOGGLE'; idx: number; cancellable: boolean }
-    | { type: 'SET_QTY'; idx: number; raw: string; proposal: ProposalItem; lotSize: number }
+    | { type: 'SET_QTY'; idx: number; raw: string; proposal: ProposalItem; lotSize: number; datedUnit?: number }
     | { type: 'TOGGLE_ALL'; proposals: ProposalItem[] }
     | { type: 'SET_REJECT'; idx: number; reason: string | null };
 
@@ -721,7 +724,9 @@ function rowReducer(state: ProposalRowState[], action: RowAction): ProposalRowSt
                 next[action.idx] = { ...next[action.idx], quantity: 0, rejectReason: '数量无效' };
             } else if (val > action.proposal.quantity) {
                 next[action.idx] = { ...next[action.idx], quantity: action.proposal.quantity, rejectReason: `不能超过建议数量 ${action.proposal.quantity}` };
-            } else if (action.proposal.side === 'BUY' && val % action.lotSize !== 0) {
+            } else if (action.datedUnit && val % action.datedUnit !== 0) {
+                next[action.idx] = { ...next[action.idx], quantity: val, rejectReason: `须为当日交易单位（${action.datedUnit} 股）的倍数` };
+            } else if (!action.datedUnit && action.proposal.side === 'BUY' && val % action.lotSize !== 0) {
                 next[action.idx] = { ...next[action.idx], quantity: val, rejectReason: `买入须为整手（${action.lotSize} 的倍数）` };
             } else {
                 next[action.idx] = { ...next[action.idx], quantity: val, rejectReason: null };
@@ -745,12 +750,14 @@ function rowReducer(state: ProposalRowState[], action: RowAction): ProposalRowSt
 function ProposalTable({
     proposals,
     lotSize,
+    tradingUnits,
     onConfirm,
     onSkip,
     loading,
 }: {
     proposals: ProposalItem[];
     lotSize: number;
+    tradingUnits?: Record<string, number>;
     onConfirm: (orders: ConfirmedOrder[]) => void;
     onSkip: () => void;
     loading: boolean;
@@ -840,8 +847,8 @@ function ProposalTable({
                                             <input
                                                 type="number"
                                                 value={r.quantity}
-                                                onChange={e => dispatch({ type: 'SET_QTY', idx: i, raw: e.target.value, proposal: p, lotSize })}
-                                                step={isBuy ? lotSize : 1}
+                                                onChange={e => dispatch({ type: 'SET_QTY', idx: i, raw: e.target.value, proposal: p, lotSize, datedUnit: tradingUnits?.[p.symbol] })}
+                                                step={tradingUnits?.[p.symbol] ?? (isBuy ? lotSize : 1)}
                                                 min={0}
                                                 max={p.quantity}
                                                 className="w-20 px-2 py-1 text-right font-mono rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-100 focus:border-blue-500 font-semibold"
@@ -944,6 +951,7 @@ function SessionCard({
     const [stepping, setStepping] = useState(false);
     const [proposing, setProposing] = useState(false);
     const [proposal, setProposal] = useState<ProposalResponse | null>(null);
+    const [tradingUnits, setTradingUnits] = useState<Record<string, number> | undefined>();
     const [lastResult, setLastResult] = useState<StepResult | null>(null);
     const [stepError, setStepError] = useState<string | null>(null);
     const [showTrades, setShowTrades] = useState(false);
@@ -990,6 +998,10 @@ function SessionCard({
         setStepError(null);
         try {
             const resp = await proposeSession(session.session_id);
+            if (replayContext(session.strategy_params.market)) {
+                const rules = await getExecutionRules(session.session_id);
+                setTradingUnits(validatedReplayUnits(rules, resp, session));
+            }
             setProposal(resp);
             onRefresh();
         } catch (err: unknown) {
@@ -1053,6 +1065,8 @@ function SessionCard({
     const pnl = snap?.cum_pnl ?? 0;
     const dayPnl = snap?.day_pnl ?? 0;
     const lotSize = Number((session.strategy_params as Record<string, unknown>)?.lot_size) || 100;
+    const currency = replayContext(session.strategy_params.market)?.currency ?? '¥';
+    const priceUnit = replayContext(session.strategy_params.market)?.priceUnit ?? '元';
 
     return (
         <div className="border border-slate-200/80 bg-white/95 rounded-2xl shadow-xs overflow-hidden">
@@ -1249,12 +1263,12 @@ function SessionCard({
                     <div className="bg-slate-50/80 rounded-xl p-3.5 border border-slate-200/70 flex flex-col justify-between">
                         <div className="text-xs font-semibold text-slate-500 mb-0.5">当前总资产</div>
                         <div className="text-xl font-black text-slate-900 font-mono tracking-tight my-0.5 text-center">
-                            ¥ {(snap?.total_asset ?? session.initial_cash ?? 1000000).toLocaleString('zh-CN', { maximumFractionDigits: 0 })}
+                            {currency} {(snap?.total_asset ?? session.initial_cash ?? 1000000).toLocaleString('zh-CN', { maximumFractionDigits: 0 })}
                         </div>
                         <div className="text-[11px] text-slate-400">
                             {snap?.trade_date
                                 ? <>估值日: <b className="font-mono text-slate-600">{snap.trade_date}</b></>
-                                : <>初始本金: ¥ {(session.initial_cash ?? 1000000).toLocaleString('zh-CN', { maximumFractionDigits: 0 })}</>}
+                                : <>初始本金: {currency} {(session.initial_cash ?? 1000000).toLocaleString('zh-CN', { maximumFractionDigits: 0 })}</>}
                         </div>
                     </div>
 
@@ -1287,13 +1301,13 @@ function SessionCard({
                             <div className="flex items-center justify-between text-xs">
                                 <span className="text-slate-400">可用现金:</span>
                                 <span className="font-mono font-bold text-slate-700">
-                                    ¥ {(snap?.cash ?? session.initial_cash ?? 1000000).toLocaleString('zh-CN', { maximumFractionDigits: 0 })}
+                                    {currency} {(snap?.cash ?? session.initial_cash ?? 1000000).toLocaleString('zh-CN', { maximumFractionDigits: 0 })}
                                 </span>
                             </div>
                             <div className="flex items-center justify-between text-xs">
                                 <span className="text-slate-400">持仓市值:</span>
                                 <span className="font-mono font-bold text-slate-700">
-                                    ¥ {(snap?.market_value ?? 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 })}
+                                    {currency} {(snap?.market_value ?? 0).toLocaleString('zh-CN', { maximumFractionDigits: 0 })}
                                 </span>
                             </div>
                         </div>
@@ -1312,6 +1326,7 @@ function SessionCard({
                 {isManual && proposal && (
                     <ProposalTable
                         proposals={proposal.proposals}
+                        tradingUnits={tradingUnits}
                         lotSize={lotSize}
                         onConfirm={handleConfirm}
                         onSkip={handleSkip}
@@ -1349,9 +1364,9 @@ function SessionCard({
                                             <span className="font-mono font-semibold text-slate-800">{f.symbol}</span>
                                         </div>
                                         <span className="font-mono font-medium text-slate-700">
-                                            {f.quantity} 股 @ {f.price.toFixed(2)} 元
+                                            {f.quantity} 股 @ {f.price.toFixed(2)} {priceUnit}
                                         </span>
-                                        <span className="text-slate-400 font-mono">手续费 ¥{f.total_fee.toFixed(2)}</span>
+                                        <span className="text-slate-400 font-mono">手续费 {currency}{f.total_fee.toFixed(2)}</span>
                                     </div>
                                 ))}
                                 {lastResult.rejected.length > 0 && lastResult.rejected.map((r, i) => (
@@ -1377,7 +1392,8 @@ function SessionCard({
 // Main page
 // ---------------------------------------------------------------------------
 
-const ReplayPage: React.FC = () => {
+const ReplayWorkspace: React.FC = () => {
+    const currentMarket = useAppSelector(selectCurrentMarket);
     const [sessions, setSessions] = useState<ReplaySession[]>([]);
     const [loading, setLoading] = useState(true);
     const [showCreate, setShowCreate] = useState(false);
@@ -1386,7 +1402,7 @@ const ReplayPage: React.FC = () => {
 
     const loadSessions = useCallback(async () => {
         try {
-            const list = await listSessions();
+            const list = replayVisibleSessions(await listSessions(), currentMarket);
             setSessions(list);
             // If no selected session and sessions exist, select the first
             if (list.length > 0) {
@@ -1464,7 +1480,7 @@ const ReplayPage: React.FC = () => {
                                 {sessions.length} 个推演任务
                             </span>
                         </div>
-                        <p className="text-xs text-slate-400">A 股历史行情逐日仿真推演与策略决策执行</p>
+                        <p className="text-xs text-slate-400">{replayContext(currentMarket) ? getMarketConfig(currentMarket).label : 'A 股'}历史行情逐日仿真推演与策略决策执行</p>
                     </div>
                 </div>
 
@@ -1581,6 +1597,11 @@ const ReplayPage: React.FC = () => {
             </div>
         </div>
     );
+};
+
+const ReplayPage: React.FC = () => {
+    const market = useAppSelector(selectCurrentMarket);
+    return <ReplayWorkspace key={replayContext(market)?.market ?? 'legacy'} />;
 };
 
 export default ReplayPage;

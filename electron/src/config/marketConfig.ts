@@ -28,6 +28,7 @@ export interface MarketConfig {
   trainingDefaults?: { commissionRate: number; dealPrice: 'open' | 'close' };
   trainingCapabilities?: {dealPrices: ('open' | 'close')[]; industryFeature: boolean};
   simulationUi?: 'standard' | 'jp_cash';
+  replay?: {market: AppMarket; currency: string; priceUnit: string};
   stockSearch?: 'local' | 'gateway';
   stockTerminal?: { market: string; adjustments: ('none' | 'qfq' | 'hfq')[]; requestTimeoutMs?: number };
   /** Optional request context for markets joining the common backtest pages. */
@@ -47,6 +48,7 @@ export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
     trainingDefaults: { commissionRate: 0, dealPrice: 'open' },
     trainingCapabilities: {dealPrices: ['open'], industryFeature: false},
     simulationUi: 'jp_cash',
+    replay: {market: 'JP', currency: 'JPY', priceUnit: 'JPY'},
     stockSearch: 'gateway',
     stockTerminal: { market: 'JP', adjustments: ['none', 'qfq'], requestTimeoutMs: 120000 },
     backtest: { market: 'JP', commission: 0, requireModelMarket: true, dealPrice: 'open', dealPrices: ['open'] },

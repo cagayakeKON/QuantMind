@@ -709,6 +709,48 @@ async def propose_day(
     )
 
 
+@router.get("/sessions/{session_id}/execution-rules")
+async def get_execution_rules(
+    session_id: uuid.UUID,
+    auth: AuthContext = Depends(get_auth_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """Dated input metadata for the common manual form; no account writes."""
+    row = await _load_owned_session(db, session_id, auth)
+    context = await session_context_for_row(row)
+    if context is None:
+        return {"available": False}
+    if row.next_date is None or not row.pending_orders:
+        raise HTTPException(400, "请先生成当日提案")
+    if row.pending_orders.get("trade_date") != row.next_date.isoformat():
+        raise HTTPException(409, "提案与交易日不一致，请刷新会话")
+
+    def read_units():
+        execution = context.execution(row.next_date)
+        symbols = [
+            execution.symbol(p["symbol"])
+            for p in row.pending_orders.get("proposals", [])
+        ]
+        bars = context.reader.load_date(row.next_date, symbols) if symbols else {}
+        from backend.shared.stock_utils import StockCodeUtil
+
+        return {
+            StockCodeUtil.to_prefix(
+                symbol, market=context.cash_rules.market
+            ): execution.trading_unit(symbol, bars)
+            for symbol in symbols
+        }
+
+    return {
+        "available": True,
+        "market": context.cash_rules.market,
+        "currency": registered_session_provider(row.strategy_params).currency,
+        "trade_date": row.next_date.isoformat(),
+        "data_version": context.reader.data_version,
+        "trading_units": await asyncio.to_thread(read_units),
+    }
+
+
 @router.post("/sessions/{session_id}/step", response_model=StepResponse)
 async def step_session(
     session_id: uuid.UUID,
@@ -1184,6 +1226,7 @@ def _to_replay_params(tpl: Any) -> dict[str, Any]:
 @router.get("/strategy-templates", response_model=list[StrategyTemplateResponse])
 async def list_strategy_templates(
     auth: AuthContext = Depends(get_auth_context),
+    market: str | None = None,
 ):
     """列出可用策略模板。复用 qlib_app 的模板加载器（单一数据源）。"""
     try:
@@ -1201,9 +1244,13 @@ async def list_strategy_templates(
         raise HTTPException(500, f"读取策略模板失败: {exc}") from None
 
     out: list[StrategyTemplateResponse] = []
+    selected_adapter = "a_share"
+    provider = registered_session_provider({"market": market})
+    if provider and provider.strategy_template_market:
+        selected_adapter = provider.strategy_template_market
     for tpl in templates:
-        # 回放只支持 A 股（markets 空=全市场适用）
-        if tpl.markets and "a_share" not in tpl.markets:
+        # 未注册市场沿用原模板口径；空 markets 仍表示全市场适用。
+        if tpl.markets and selected_adapter not in tpl.markets:
             continue
         out.append(
             StrategyTemplateResponse(

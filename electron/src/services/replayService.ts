@@ -9,6 +9,8 @@
 import axios from 'axios';
 import { SERVICE_ENDPOINTS } from '../config/services';
 import { authService } from '../features/auth/services/authService';
+import { getMarketConfig } from '../config/marketConfig';
+import type { AppMarket } from '../store/slices/uiSlice';
 
 // SERVICE_ENDPOINTS.API_GATEWAY 已含 /api/v1，后端路由前缀为 /api/v1/replay
 const BASE = `${SERVICE_ENDPOINTS.API_GATEWAY}/replay`;
@@ -177,6 +179,20 @@ export async function proposeSession(sessionId: string): Promise<ProposalRespons
     return data;
 }
 
+export interface ReplayExecutionRules {
+    available: boolean;
+    market?: string;
+    currency?: string;
+    trade_date?: string;
+    data_version?: string;
+    trading_units?: Record<string, number>;
+}
+
+export async function getExecutionRules(sessionId: string): Promise<ReplayExecutionRules> {
+    const { data } = await axios.get(`${BASE}/sessions/${sessionId}/execution-rules`, {headers: getHeaders()});
+    return data;
+}
+
 /** 单步推演（auto 模式无参数；manual 模式传 confirmed/skip） */
 export async function stepSession(sessionId: string, params?: StepParams): Promise<StepResult> {
     const { data } = await axios.post(`${BASE}/sessions/${sessionId}/step`, params ?? {}, { headers: getHeaders() });
@@ -277,7 +293,8 @@ export interface StrategyTemplate {
 }
 
 /** 获取可用策略模板 */
-export async function listStrategyTemplates(): Promise<StrategyTemplate[]> {
-    const { data } = await axios.get(`${BASE}/strategy-templates`, { headers: getHeaders() });
+export async function listStrategyTemplates(market?: AppMarket): Promise<StrategyTemplate[]> {
+    const context = market ? getMarketConfig(market).replay : undefined;
+    const { data } = await axios.get(`${BASE}/strategy-templates`, { headers: getHeaders(), ...(context ? {params: {market: context.market}} : {}) });
     return data;
 }

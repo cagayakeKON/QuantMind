@@ -20,6 +20,7 @@ class LocalMarketProvider:
     replay_signal_input_loader: str | None = None
     replay_cash_rules_factory: str | None = None
     replay_session_input_preparer: str | None = None
+    strategy_template_market: str | None = None
 
     def open(self):
         cls = getattr(importlib.import_module(self.module), self.hub_class)
@@ -41,6 +42,7 @@ LOCAL_MARKET_PROVIDERS = {
         replay_signal_input_loader="backend.services.simulation.jp.replay_data.read_signal_input",
         replay_cash_rules_factory="backend.services.simulation.jp.replay_cash_rules.open_cash_rules",
         replay_session_input_preparer="backend.services.simulation.jp.replay_data.prepare_session_inputs",
+        strategy_template_market="japan",
     ),
 }
 
