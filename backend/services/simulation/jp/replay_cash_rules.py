@@ -74,6 +74,13 @@ class JapanReplayCashRules:
         ):
             raise ValueError("Replay cash settings differ from saved session")
 
+    def confirmation_quantity(self, side, quantity, unit):
+        if side not in {"BUY", "SELL"}:
+            raise ValueError("Invalid JP order side")
+        if quantity % unit:
+            raise ValueError(f"JP quantity must be a multiple of {unit}")
+        return quantity
+
     def validate_initial_cash(self, account, initial_cash):
         state = self._metadata(account)["state"]
         if money(state["initial_cash"]) != money(initial_cash):

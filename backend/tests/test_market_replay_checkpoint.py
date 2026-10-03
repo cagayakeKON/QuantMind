@@ -547,3 +547,65 @@ async def test_saved_settings_and_root_transaction_are_required_before_any_cash_
                 await execute(pg, db)
         assert await counts(db) == [0, 0, 0]
     assert pg.setup.redis.client.keys_touched == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("commission", ["0", ".0001"])
+async def test_common_confirmation_shadow_matches_the_actual_checkpointed_execution(
+    pg, commission
+):
+    from backend.services.simulation.jp.replay_cash_rules import JapanReplayCashRules
+    from backend.services.simulation.replay.confirmation import (
+        RegisteredReplayConfirmationRules,
+    )
+    from backend.services.simulation.replay.proposal import validate_confirmed
+
+    pg.setup.params["commission_rate"] = commission
+    pg.setup.rules = JapanReplayCashRules(
+        pg.setup.source, commission_rate=commission, slippage_bps="0"
+    )
+    async with pg.sessions() as db:
+        row = await db.get(ReplaySession, SESSION)
+        row.strategy_params = deepcopy(pg.setup.params)
+        await db.commit()
+        accounts = manager(pg.setup)
+        original = await load_checkpoint_account(db, row, accounts)
+        _, context = execution(pg.setup)
+        hooks = RegisteredReplayConfirmationRules(context, pg.setup.rules, original)
+        accepted, rejected = validate_confirmed(
+            [{"symbol": "JP72030", "side": "BUY", "quantity": 100}],
+            [
+                {
+                    "symbol": "JP72030",
+                    "side": "BUY",
+                    "quantity": 100,
+                    "est_price": 100,
+                    "origin": "signal",
+                    "cancellable": True,
+                }
+            ],
+            original,
+            rules=hooks,
+        )
+        assert rejected == [] and pg.setup.redis.client.values == {}
+        assert await counts(db) == [0, 0, 0]
+        result = await execute(pg, db, accounts=accounts, accepted=accepted)
+        await advance_cursor(db)
+        await db.commit()
+        actual = await load_checkpoint_account(db, row, manager(pg.setup))
+        assert actual == result.account
+        for field in ("cash", "market_value", "total_asset", "positions", "currency"):
+            assert actual[field] == hooks._account[field]
+        # Preview IDs are disposable; actual IDs reference the persisted orders.
+        expected = deepcopy(hooks._account["_market_cash_rules"]["state"])
+        observed = actual["_market_cash_rules"]["state"]
+        assert len(expected["fills"]) == len(observed["fills"]) == 1
+        preview_id = expected["fills"][0]["order_id"]
+        actual_id = observed["fills"][0]["order_id"]
+        trade = (await db.execute(select(ReplayTrade))).scalar_one()
+        assert actual_id == str(trade.order_id)
+        for item in expected["fills"] + expected["settlements"]:
+            assert item["order_id"] == preview_id
+            item["order_id"] = actual_id
+        assert expected == observed
+        assert await counts(db) == [1, 1, 1]
