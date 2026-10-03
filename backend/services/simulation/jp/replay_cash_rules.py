@@ -375,3 +375,40 @@ class JapanReplayCashRules:
                 raise ValueError("Invalid JP closing mark")
             metadata["state"]["positions"][canonical]["last_price"] = str(price)
         return self.project(updated)
+
+    def backtest_state(self, account):
+        """Read the exact cash journal without exposing mutable account state."""
+        return deepcopy(self._metadata(account)["state"])
+
+    def complete_backtest_day(self, account, day, orders, stale_symbols):
+        """Attach a closing journal to already matched/prepared cash metadata."""
+        updated = deepcopy(account)
+        metadata = self._metadata(updated)
+        state = metadata["state"]
+        if metadata["prepared_date"] != str(day) or (
+            state["cursor"] and str(day) <= state["cursor"]
+        ):
+            raise ValueError("Cash backtest journal requires a new prepared date")
+        cash = sum((money(fund["amount"]) for fund in state["cash_funds"]), Decimal(0))
+        market_value = sum(
+            (
+                money(position["last_price"])
+                * sum(lot["quantity"] for lot in position["lots"])
+                for position in state["positions"].values()
+            ),
+            Decimal(0),
+        )
+        state["orders"].extend(deepcopy(orders))
+        state["daily"].append(
+            {
+                "trade_date": str(day),
+                "cash": str(cash),
+                "settled_cash": state["settled_cash"],
+                "market_value": str(market_value),
+                "equity": str(cash + market_value),
+                "stale_symbols": deepcopy(stale_symbols),
+                "currency": "JPY",
+            }
+        )
+        state["cursor"] = str(day)
+        return self.project(updated)

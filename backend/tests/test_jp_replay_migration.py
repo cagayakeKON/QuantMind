@@ -14,7 +14,7 @@ import pandas as pd
 import duckdb
 from sqlalchemy import func, select, text
 
-from backend.services.simulation.jp.account import JPCashAccount
+from backend.tests.legacy_jp_cash_oracle import LegacyJPCashOracle
 from backend.services.simulation.jp.replay_migration import (
     bind_saved_model,
     prepare_replay_import,
@@ -95,7 +95,7 @@ def snapshot(snapshot_base):
 
 def legacy_record(setup, *, empty=False, completed_days=2, quantity=100):
     # Exercise the obsolete record producer as input, never as the target runner.
-    old = JPCashAccount.create(setup.source.calendar, "30000", slippage_bps=0)
+    old = LegacyJPCashOracle.create(setup.source.calendar, "30000", slippage_bps=0)
     old.state["next_date"] = str(DAY)
     if not empty:
         for day, signal_day, side in ((DAY, ANCHOR, "BUY"), (NEXT, DAY, "SELL"))[

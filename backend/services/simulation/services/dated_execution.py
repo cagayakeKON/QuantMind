@@ -5,6 +5,33 @@ import math
 from backend.shared.stock_utils import StockCodeUtil
 
 
+def match_registered_cash_order(
+    context, rules, account, *, symbol, side, quantity, bar, used_volume
+):
+    """Match one dated order using the same projected inventory in all callers."""
+    if rules.market != context.market or rules.data_version != context.data_version:
+        raise ValueError("Cash rules differ from the dated execution publication")
+    if (
+        isinstance(used_volume, bool)
+        or not isinstance(used_volume, int)
+        or used_volume < 0
+    ):
+        raise ValueError("Dated account must supply nonnegative integer fill volume")
+    canonical = context.symbol(symbol)
+    position = (account.get("positions") or {}).get(canonical) or {}
+    return context.match(
+        symbol=canonical,
+        quantity=quantity,
+        side=side,
+        bar=bar,
+        cfg=rules.match_config,
+        available_volume=position.get("available_volume", 0)
+        if side == "sell"
+        else None,
+        used_volume=used_volume,
+    )
+
+
 async def execute_registered_bar(engine, order, bar, market):
     from backend.services.simulation.services.execution_engine import ExecutionResult
 
@@ -36,17 +63,15 @@ async def execute_registered_bar(engine, order, bar, market):
     before = await manager.get_account(
         order.user_id, tenant_id=order.tenant_id, market=context.market
     )
-    position = (before.get("positions") or {}).get(symbol) or {}
     side = order.side.value
-    matched = context.match(
+    matched = match_registered_cash_order(
+        context,
+        manager.rules,
+        before,
         symbol=symbol,
         quantity=int(quantity),
         side=side,
         bar=bar,
-        cfg=manager.rules.match_config,
-        available_volume=position.get("available_volume", 0)
-        if side == "sell"
-        else None,
         used_volume=await context.executed_volume(manager, symbol),
     )
     if not matched.success:

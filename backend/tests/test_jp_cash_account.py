@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from backend.services.simulation.jp.account import JPCashAccount
+from backend.tests.dated_cash_backtest_fixture import CashBacktestFixture
 from backend.services.simulation.jp.rules import (
     RuleDataMissing,
     TradingCalendar,
@@ -88,7 +88,7 @@ def test_dated_ticks_and_session_extension():
 
 
 def test_buy_sell_cannot_rebuy_with_same_funds_but_can_switch_symbol():
-    account = JPCashAccount.create(calendar(), "10000", slippage_bps=0)
+    account = CashBacktestFixture.create(calendar(), "10000", slippage_bps=0)
     bars, master = market()
     result = account.step(
         date(2026, 9, 2),
@@ -114,7 +114,7 @@ def test_buy_sell_cannot_rebuy_with_same_funds_but_can_switch_symbol():
 
 
 def test_independent_cash_can_fund_repeated_same_symbol_buy():
-    account = JPCashAccount.create(calendar(), "20000", slippage_bps=0)
+    account = CashBacktestFixture.create(calendar(), "20000", slippage_bps=0)
     bars, master = market()
     result = account.step(
         date(2026, 9, 2),
@@ -132,7 +132,7 @@ def test_independent_cash_can_fund_repeated_same_symbol_buy():
 
 
 def test_sell_buy_sell_from_existing_stock_requires_independent_funding():
-    account = JPCashAccount.create(calendar(), "10000", slippage_bps=0)
+    account = CashBacktestFixture.create(calendar(), "10000", slippage_bps=0)
     bars, master = market()
     account.step(date(2026, 9, 2), bars, master, orders(("JP72030", "BUY", 100)))
     requests = orders(
@@ -145,7 +145,7 @@ def test_sell_buy_sell_from_existing_stock_requires_independent_funding():
 
 
 def test_missing_trade_does_not_use_previous_close_or_adjusted_price():
-    account = JPCashAccount.create(calendar(), slippage_bps=0)
+    account = CashBacktestFixture.create(calendar(), slippage_bps=0)
     bars, master = market()
     bars["JP72030"].update(open=None, close=None, volume=None)
     result = account.step(
@@ -156,7 +156,7 @@ def test_missing_trade_does_not_use_previous_close_or_adjusted_price():
 
 
 def test_orders_cannot_reuse_more_than_observed_daily_volume():
-    account = JPCashAccount.create(calendar(), "20000", slippage_bps=0)
+    account = CashBacktestFixture.create(calendar(), "20000", slippage_bps=0)
     bars, master = market()
     bars["JP72030"]["volume"] = 100
     result = account.step(
@@ -171,7 +171,7 @@ def test_orders_cannot_reuse_more_than_observed_daily_volume():
 
 
 def test_limit_touch_at_intraday_high_is_not_automatically_untradable():
-    account = JPCashAccount.create(calendar(), slippage_bps=0)
+    account = CashBacktestFixture.create(calendar(), slippage_bps=0)
     bars, master = market()
     bars["JP72030"].update(upper_limit_touched=True, high=150)
     result = account.step(
@@ -181,7 +181,7 @@ def test_limit_touch_at_intraday_high_is_not_automatically_untradable():
 
 
 def test_opening_limit_with_unknown_queue_rejects_fill():
-    account = JPCashAccount.create(calendar(), slippage_bps=0)
+    account = CashBacktestFixture.create(calendar(), slippage_bps=0)
     bars, master = market()
     bars["JP72030"].update(upper_limit_touched=True, open=150, high=150)
     result = account.step(
@@ -191,7 +191,7 @@ def test_opening_limit_with_unknown_queue_rejects_fill():
 
 
 def test_split_changes_quantity_not_cash_and_is_applied_once():
-    account = JPCashAccount.create(calendar(), "10000", slippage_bps=0)
+    account = CashBacktestFixture.create(calendar(), "10000", slippage_bps=0)
     bars, master = market()
     account.step(date(2026, 9, 2), bars, master, orders(("JP72030", "BUY", 100)))
     bars, master = market(50)
@@ -206,7 +206,7 @@ def test_split_changes_quantity_not_cash_and_is_applied_once():
 
 
 def test_rights_are_not_splits_and_abort_entire_day():
-    account = JPCashAccount.create(calendar(), slippage_bps=0)
+    account = CashBacktestFixture.create(calendar(), slippage_bps=0)
     bars, master = market()
     account.step(date(2026, 9, 2), bars, master, orders(("JP72030", "BUY", 100)))
     before = deepcopy(account.state)
@@ -217,7 +217,7 @@ def test_rights_are_not_splits_and_abort_entire_day():
 
 
 def test_same_day_signal_is_rejected_atomically():
-    account = JPCashAccount.create(calendar())
+    account = CashBacktestFixture.create(calendar())
     bars, master = market()
     requests = orders(("JP72030", "BUY", 100))
     requests[0]["signal_date"] = "2026-09-02"
@@ -228,10 +228,10 @@ def test_same_day_signal_is_rejected_atomically():
 
 
 def test_restart_state_preserves_provenance_and_settlement():
-    account = JPCashAccount.create(calendar(), "10000", slippage_bps=0)
+    account = CashBacktestFixture.create(calendar(), "10000", slippage_bps=0)
     bars, master = market()
     account.step(date(2026, 9, 2), bars, master, orders(("JP72030", "BUY", 100)))
-    restored = JPCashAccount(calendar(), account.state)
+    restored = CashBacktestFixture.restore(calendar(), account.checkpoint())
     for day in [date(2026, 9, 3), date(2026, 9, 4)]:
         account.step(day, bars, master, [])
         restored.step(day, bars, master, [])
@@ -240,7 +240,7 @@ def test_restart_state_preserves_provenance_and_settlement():
 
 
 def test_mixed_purchase_preserves_independently_funded_board_lot():
-    account = JPCashAccount.create(calendar(), "20000", slippage_bps=0)
+    account = CashBacktestFixture.create(calendar(), "20000", slippage_bps=0)
     bars, master = market()
     account.step(date(2026, 9, 2), bars, master, orders(("JP72030", "BUY", 100)))
     requests = orders(
@@ -265,7 +265,7 @@ def test_mixed_purchase_preserves_independently_funded_board_lot():
 
 
 def test_rounded_three_for_one_split_does_not_invent_fractional_shares():
-    account = JPCashAccount.create(calendar(), "10000", slippage_bps=0)
+    account = CashBacktestFixture.create(calendar(), "10000", slippage_bps=0)
     bars, master = market()
     account.step(date(2026, 9, 2), bars, master, orders(("JP72030", "BUY", 100)))
     bars["JP72030"].update(adj_factor=0.3333333, ex_rights_type="1", open=33, close=33)

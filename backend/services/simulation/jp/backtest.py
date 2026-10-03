@@ -16,7 +16,10 @@ from backend.shared.stock_pool.resolver import ResolveContext, resolver as pool_
 from backend.shared.stock_pool.schemas import PoolSnapshot
 from backend.shared.stock_utils import StockCodeUtil
 from backend.shared.utc_datetime import utc_now
-from .account import JPCashAccount, money
+from backend.services.simulation.services.dated_backtest_account import (
+    DatedCashBacktestAccount,
+)
+from .cash_rules import money
 from .model_signals import (
     labels_available_on,
     prediction_path,
@@ -163,9 +166,10 @@ def run_cash_backtest(
         known_after = labels_available_on(meta, data.calendar, anchor)
         pred = prediction_path(model_dir)
         scores, digest = read_test_scores(pred, anchor, end)
-    account = JPCashAccount.create(
-        data.calendar,
+    account = DatedCashBacktestAccount.create(
+        data,
         request.initial_capital,
+        market="JP",
         commission_rate=commission,
         slippage_bps=request.jp_slippage_bps,
     )
@@ -236,7 +240,7 @@ def run_cash_backtest(
             set(account.state["positions"]) | {order["symbol"] for order in orders}
         )
         bars, master = data.day(day, needed, list(account.state["positions"]))
-        result = account.step(day, bars, master, orders)
+        result = account.execute_day(day, orders)
         from .analysis_data import cash_position_snapshot
 
         position_history[pd.Timestamp(day)] = cash_position_snapshot(account.state)
@@ -296,7 +300,7 @@ def run_cash_backtest(
             "data_version": execution_version,
             "training_data_version": version,
             "prediction_sha256": digest,
-            "execution_engine": "jp_cash_ledger",
+            "execution_engine": "registered_cash_ledger",
             "currency": "JPY",
             "return_basis": "price_only",
             "signal_source": "model_pred_test" if metric is None else "feature_field",

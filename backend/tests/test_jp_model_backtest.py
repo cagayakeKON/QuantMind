@@ -106,7 +106,7 @@ def test_real_raw_fills_dated_settlement_and_topix_report(model_data):
     assert float(fill["price"]) == 50 and float(fill["fee"]) == 0
     assert fill["settlement_date"] == "2026-10-01"
     assert result.total_return == 0 and result.benchmark_return == 0
-    assert result.config["execution_engine"] == "jp_cash_ledger"
+    assert result.config["execution_engine"] == "registered_cash_ledger"
     assert len(result.config["prediction_sha256"]) == 64
     assert [row["date"] for row in result.equity_curve] == ["2026-09-28", "2026-09-29"]
 

@@ -1,8 +1,7 @@
-"""Deterministic JPY ledger with dated settlement and cash provenance.
+"""Frozen retired JP producer, used only as an independent historical oracle.
 
-Cash and price values serialize as decimal strings. No broker connection,
-Redis balance mutation, tax, dividend credit, borrowing or shorting occurs.
-An unsuccessful day leaves the previous state unchanged.
+Runtime code must never import this module. The old execution method is retained
+unchanged so migration tests do not produce their inputs with the target engine.
 """
 
 from __future__ import annotations
@@ -14,9 +13,9 @@ from fractions import Fraction
 
 from backend.shared.stock_utils import StockCodeUtil
 from backend.services.simulation.services.ashare_matcher import MatchConfig, match_order
-from .data import to_daily_bar
-from .matching_rules import JapanDailyMatchRules
-from .rules import (
+from backend.services.simulation.jp.data import to_daily_bar
+from backend.services.simulation.jp.matching_rules import JapanDailyMatchRules
+from backend.services.simulation.jp.rules import (
     RuleDataMissing,
     TradingCalendar,
     lot_size,
@@ -24,10 +23,10 @@ from .rules import (
 )
 
 
-from .cash_rules import JPCashRules, money
+from backend.services.simulation.jp.cash_rules import JPCashRules, money
 
 
-class JPCashAccount(JPCashRules):
+class LegacyJPCashOracle(JPCashRules):
     def step(self, day: date, bars: dict, metadata: dict, orders: list[dict]) -> dict:
         previous = deepcopy(self.state)
         try:

@@ -17,7 +17,7 @@ import pytest
 from redis.exceptions import WatchError
 
 from backend.services.engine.data_platform.jquants_import import import_jquants_snapshot
-from backend.services.simulation.jp.account import JPCashAccount
+from backend.tests.legacy_jp_cash_oracle import LegacyJPCashOracle
 from backend.services.simulation.jp.replay_cash_rules import METADATA_KEY
 from backend.services.simulation.jp.rules import RuleDataMissing
 from backend.services.simulation.replay.account import ReplayAccountManager
@@ -198,7 +198,7 @@ async def test_shared_fills_keep_same_funds_restrictions_and_original_cash_rule_
     assert [len(result.filled) for result in outcomes] == [1, 1, 0, 1]
     assert "same-funds" in outcomes[2].rejected[0]["reason"]
     actual = await setup.account.get()
-    old = JPCashAccount.create(setup.source.calendar, "10000", slippage_bps=0)
+    old = LegacyJPCashOracle.create(setup.source.calendar, "10000", slippage_bps=0)
     bars, info = setup.source.day(DAY, ["JP72030", "JP216A0"])
     requests = [
         {
