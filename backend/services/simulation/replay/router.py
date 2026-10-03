@@ -37,6 +37,15 @@ from backend.services.simulation.replay.analytics import (
 )
 from backend.services.simulation.replay.day_runner import ReplayDayRunner
 from backend.services.simulation.replay.proposal import validate_confirmed
+from backend.services.simulation.replay.persistence import load_checkpoint_account
+from backend.services.simulation.replay.session_context import (
+    ReplaySessionBusy,
+    lock_registered_session,
+    open_registered_session_context,
+    prepare_registered_session_inputs,
+    registered_session_provider,
+    session_context_for_row,
+)
 from backend.services.simulation.replay.signal_generator import (
     _find_pred_parquet,
 )
@@ -60,9 +69,7 @@ def _match_config_from_params(strategy_params: dict[str, Any]) -> MatchConfig:
     defaults = MatchConfig(price_mode="open")
     return MatchConfig(
         price_mode=str(strategy_params.get("price_mode", defaults.price_mode)),
-        slippage_bps=float(
-            strategy_params.get("slippage_bps", defaults.slippage_bps)
-        ),
+        slippage_bps=float(strategy_params.get("slippage_bps", defaults.slippage_bps)),
         commission_rate=float(
             strategy_params.get("commission_rate", defaults.commission_rate)
         ),
@@ -417,17 +424,46 @@ async def create_session(
     # 注意不能用 signal_generator._resolve_model_dir —— 它对无效 id 会静默
     # 回落到默认模型，用户以为在跑自选模型，实际跑的是默认模型。
     # code 模式模型可选（策略代码自带 universe，不依赖模型分数）。
+    try:
+        registered_inputs = await prepare_registered_session_inputs(req, auth)
+        registered_context = (
+            await asyncio.to_thread(
+                open_registered_session_context,
+                registered_inputs.params,
+                reader=registered_inputs.reader,
+            )
+            if registered_inputs
+            else None
+        )
+        if registered_context:
+            # Creation stores initial_cash in the existing PG session. The first
+            # execution restores it there; no uncommitted financial cache is made.
+            await asyncio.to_thread(
+                registered_context.cash_rules.initialize, req.initial_cash
+            )
+    except NotImplementedError as exc:
+        raise HTTPException(422, str(exc)) from None
+    except (ValueError, LookupError, OSError) as exc:
+        raise HTTPException(400, str(exc)) from None
     resolved_model_dir: Path | None = None
-    if req.model_id:
+    if registered_inputs:
+        resolved_model_dir = registered_inputs.model_dir
+    elif req.model_id:
         resolved_model_dir = await _resolve_model_dir_for_user(
             model_id=req.model_id,
             tenant_id=auth.tenant_id,
             user_id=auth.user_id,
         )
 
-    market_data = get_local_market_data()
+    market_data = (
+        registered_inputs.reader if registered_inputs else get_local_market_data()
+    )
     # 目录枚举虽已降到毫秒级，仍是同步磁盘 IO，放线程里跑，不占用事件循环
-    sessions = await asyncio.to_thread(market_data._sessions)
+    sessions = (
+        registered_context.sessions
+        if registered_context
+        else await asyncio.to_thread(market_data._sessions)
+    )
     if not sessions:
         raise HTTPException(503, "本地行情数据不可用")
 
@@ -439,7 +475,9 @@ async def create_session(
 
     # 固化模型目录到 strategy_params（下划线前缀，与策略参数区分）：
     # 推演时信号直读器按它定位模型目录的 pred.parquet，无需再解析注册表。
-    strategy_params = dict(req.strategy_params)
+    strategy_params = dict(
+        registered_inputs.params if registered_inputs else req.strategy_params
+    )
     if resolved_model_dir is not None:
         strategy_params["_model_dir"] = str(resolved_model_dir)
 
@@ -483,7 +521,7 @@ async def create_session(
         tenant_id=auth.tenant_id,
         user_id=int(auth.user_id) if auth.user_id.isdigit() else 0,
         name=req.name,
-        model_id=req.model_id,
+        model_id=registered_inputs.model_id if registered_inputs else req.model_id,
         strategy_params=strategy_params,
         initial_cash=req.initial_cash,
         start_date=req.start_date,
@@ -500,8 +538,9 @@ async def create_session(
     await db.flush()
 
     # 初始化回放账户
-    accounts = ReplayAccountManager(session_id=row.session_id)
-    await accounts.init(initial_cash=req.initial_cash)
+    if registered_context is None:
+        accounts = ReplayAccountManager(session_id=row.session_id)
+        await accounts.init(initial_cash=req.initial_cash)
 
     await db.commit()
 
@@ -586,6 +625,13 @@ async def propose_day(
     刷新页面后提案变化（信号虽固定，但账户可能已被其他操作改动）。
     """
     row = await _load_owned_session(db, session_id, auth)
+    if registered_session_provider(row.strategy_params):
+        try:
+            row = await lock_registered_session(db, row)
+        except ReplaySessionBusy:
+            await db.rollback()
+            raise HTTPException(409, "正在执行中，请稍候") from None
+    context = await session_context_for_row(row)
 
     if row.auto_trade:
         raise HTTPException(400, "自动模式无需提案，请直接调用 /step")
@@ -608,11 +654,22 @@ async def propose_day(
         return ProposalResponse(
             trade_date=cached.get("trade_date", row.next_date.isoformat()),
             signal_count=int(cached.get("signal_count") or 0),
-            proposals=[ProposalItem(**p) for p in cached.get("proposals", [])],
+            proposals=[
+                ProposalItem(**p)
+                for p in (
+                    context.public_orders(cached.get("proposals", []))
+                    if context
+                    else cached.get("proposals", [])
+                )
+            ],
         )
 
-    accounts = ReplayAccountManager(session_id=session_id)
-    runner = ReplayDayRunner()
+    accounts = (
+        context.accounts(session_id)
+        if context
+        else ReplayAccountManager(session_id=session_id)
+    )
+    runner = context.runner(row.next_date) if context else ReplayDayRunner()
     try:
         out = await runner.propose_day(
             db=db,
@@ -643,7 +700,12 @@ async def propose_day(
     return ProposalResponse(
         trade_date=out["trade_date"],
         signal_count=out["signal_count"],
-        proposals=[ProposalItem(**p) for p in out["proposals"]],
+        proposals=[
+            ProposalItem(**p)
+            for p in (
+                context.public_orders(out["proposals"]) if context else out["proposals"]
+            )
+        ],
     )
 
 
@@ -662,6 +724,13 @@ async def step_session(
     - auto_trade=false + confirmed → 服务端复校验后按清单执行
     """
     row = await _load_owned_session(db, session_id, auth)
+    if registered_session_provider(row.strategy_params):
+        try:
+            row = await lock_registered_session(db, row)
+        except ReplaySessionBusy:
+            await db.rollback()
+            raise HTTPException(409, "正在执行中，请勿重复点击") from None
+    context = await session_context_for_row(row)
 
     if row.status == ReplayStatus.STEPPING:
         raise HTTPException(409, "正在执行中，请勿重复点击")
@@ -696,22 +765,46 @@ async def step_session(
         if confirmed_in is None:
             raise HTTPException(400, "手动模式需提供 confirmed 确认清单")
         proposals = (row.pending_orders or {}).get("proposals") or []
-        account_data = await ReplayAccountManager(session_id=session_id).get() or {}
-        accepted, validation_rejected = validate_confirmed(
-            confirmed=confirmed_in,
-            proposals=proposals,
-            account_data=account_data,
-            lot_size=int((row.strategy_params or {}).get("lot_size", 100)),
-        )
+        if context:
+            account_data = await load_checkpoint_account(
+                db, row, context.accounts(session_id)
+            )
+            rules = await asyncio.to_thread(
+                context.confirmation, row.next_date, account_data
+            )
+            accepted, validation_rejected = await asyncio.to_thread(
+                validate_confirmed,
+                confirmed=confirmed_in,
+                proposals=proposals,
+                account_data=account_data,
+                rules=rules,
+            )
+        else:
+            account_data = await ReplayAccountManager(session_id=session_id).get() or {}
+            accepted, validation_rejected = validate_confirmed(
+                confirmed=confirmed_in,
+                proposals=proposals,
+                account_data=account_data,
+                lot_size=int((row.strategy_params or {}).get("lot_size", 100)),
+            )
 
     prev_status = row.status
     row.status = ReplayStatus.STEPPING
-    await db.commit()
+    if context is None:
+        await db.commit()
 
     try:
-        accounts = ReplayAccountManager(session_id=session_id)
-        runner = ReplayDayRunner()
-        cfg = _match_config_from_params(row.strategy_params or {})
+        accounts = (
+            context.accounts(session_id)
+            if context
+            else ReplayAccountManager(session_id=session_id)
+        )
+        runner = context.runner(row.next_date) if context else ReplayDayRunner()
+        cfg = (
+            context.cash_rules.match_config
+            if context
+            else _match_config_from_params(row.strategy_params or {})
+        )
         if manual:
             result = await runner.execute_day(
                 db=db,
@@ -757,8 +850,11 @@ async def step_session(
         result.rejected = validation_rejected + result.rejected
 
     # 更新游标
-    market_data = get_local_market_data()
-    sessions = await asyncio.to_thread(market_data._sessions)
+    if context:
+        sessions = context.sessions
+    else:
+        market_data = get_local_market_data()
+        sessions = await asyncio.to_thread(market_data._sessions)
     row.cursor_date = row.next_date
     row.sessions_done += 1
     row.next_date = _compute_next_date(
@@ -771,11 +867,15 @@ async def step_session(
     return StepResponse(
         trade_date=result.trade_date.isoformat(),
         signal_count=result.signal_count,
-        filled=result.filled,
-        rejected=result.rejected,
-        stop_loss_fills=result.stop_loss_fills,
-        account=result.account,
-        snapshot=result.snapshot,
+        filled=context.public_orders(result.filled) if context else result.filled,
+        rejected=context.public_orders(result.rejected) if context else result.rejected,
+        stop_loss_fills=context.public_orders(result.stop_loss_fills)
+        if context
+        else result.stop_loss_fills,
+        account=context.public_account(result.account) if context else result.account,
+        snapshot=context.public_account(result.snapshot)
+        if context
+        else result.snapshot,
         error=result.error,
     )
 
@@ -915,7 +1015,9 @@ async def get_trades(
                 total_fee=round(float(t.get("total_fee", 0)), 2),
                 realized_pnl=round(float(rpnl), 2) if rpnl is not None else None,
                 avg_cost_before=round(float(cost), 4) if cost is not None else None,
-                holding_days=int(t["holding_days"]) if t.get("holding_days") is not None else None,
+                holding_days=int(t["holding_days"])
+                if t.get("holding_days") is not None
+                else None,
                 return_pct=ret_pct,
             )
         )
@@ -1000,8 +1102,12 @@ async def _load_trades(
             "price": float(r.price),
             "trade_value": float(r.trade_value),
             "total_fee": float(r.total_fee),
-            "realized_pnl": float(r.realized_pnl) if r.realized_pnl is not None else None,
-            "avg_cost_before": float(r.avg_cost_before) if r.avg_cost_before is not None else None,
+            "realized_pnl": float(r.realized_pnl)
+            if r.realized_pnl is not None
+            else None,
+            "avg_cost_before": float(r.avg_cost_before)
+            if r.avg_cost_before is not None
+            else None,
             "holding_days": int(r.holding_days) if r.holding_days is not None else None,
         }
         for r in rows
