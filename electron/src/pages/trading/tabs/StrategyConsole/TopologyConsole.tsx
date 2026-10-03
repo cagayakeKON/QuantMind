@@ -4,6 +4,7 @@ import { Select } from 'antd';
 import { useAppSelector } from '../../../../store';
 import { selectCurrentMarket } from '../../../../store/slices/uiSlice';
 import type { StrategyFile } from '../../../../types/backtest/strategy';
+import type { DatedExecutionContext } from '../../../../types/liveTrading';
 import { useRuntimeOverview } from './hooks/useRuntimeOverview';
 import type { ConsoleTradingMode } from './hooks/useRuntimeOverview';
 import InputLayer from './layers/InputLayer';
@@ -17,6 +18,8 @@ interface TopologyConsoleProps {
     tenantId: string;
     userId: string;
     tradingMode?: 'real' | 'simulation';
+    executionContext?: DatedExecutionContext;
+    requiresExecutionInputs?: boolean;
     onDeploy: (
         strategyId: string,
         isShadow: boolean,
@@ -44,6 +47,8 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
     tenantId,
     userId,
     tradingMode,
+    executionContext,
+    requiresExecutionInputs,
     onDeploy,
     onStop,
     onOpenManualTask,
@@ -52,7 +57,7 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
     const currentMarket = useAppSelector(selectCurrentMarket);
     const mode: ConsoleTradingMode = tradingMode === 'simulation' ? 'simulation' : 'real';
     const isSim = mode === 'simulation';
-    const overview = useRuntimeOverview(tenantId, userId, mode, currentMarket, true);
+    const overview = useRuntimeOverview(tenantId, userId, mode, currentMarket, true, executionContext, requiresExecutionInputs);
     const { status, latestRun, defaultModel, runState, nodes, ready } = overview;
 
     const [selectedStrategyId, setSelectedStrategyId] = useState('');

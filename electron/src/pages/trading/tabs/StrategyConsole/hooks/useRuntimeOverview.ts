@@ -9,6 +9,7 @@ import type {
     UserModelRecord,
 } from '../../../../../services/modelTrainingService';
 import type { StrategyFile } from '../../../../../types/backtest/strategy';
+import type { DatedExecutionContext } from '../../../../../types/liveTrading';
 import { buildInputNodes, deriveRunState } from '../topologyTypes';
 import type { RunState, TopologyNode } from '../topologyTypes';
 import { sortTradingStrategies } from '../../../utils/sortTradingStrategies';
@@ -56,6 +57,8 @@ export function useRuntimeOverview(
     tradingMode: ConsoleTradingMode,
     market: string,
     enabled: boolean,
+    executionContext?: DatedExecutionContext,
+    requiresExecutionInputs = false,
 ): RuntimeOverview {
     const [status, setStatus] = useState<RealTradingStatus | null>(null);
     const [precheck, setPrecheck] = useState<TradingPrecheckResult | null>(null);
@@ -76,6 +79,14 @@ export function useRuntimeOverview(
     const fetchingRef = useRef({ status: false, precheck: false, model: false, orders: false });
     const readyRef = useRef<SectionReady>({ status: false, precheck: false, model: false });
     const strategiesFetchingRef = useRef(false);
+    // Only explicit dated inputs extend the original controller requests.
+    const executionScope = requiresExecutionInputs || executionContext
+        ? JSON.stringify([tenantId, userId, tradingMode, market, executionContext]) : '';
+    const mountedRef = useRef(true);
+    const scopeRef = useRef(executionScope);
+    scopeRef.current = executionScope;
+    const datedReady = !executionScope || (tradingMode === 'simulation' && executionContext?.market === market);
+    const loadersRef = useRef({ status: () => {}, precheck: () => {} });
     statusRef.current = status;
     marketRef.current = market;
 
@@ -86,35 +97,61 @@ export function useRuntimeOverview(
     };
 
     const loadStatus = useCallback(async () => {
+        if (!datedReady) return;
         if (fetchingRef.current.status) return;
         fetchingRef.current.status = true;
         try {
             const { realTradingService } = await import('../../../../../services/realTradingService');
-            const data = await realTradingService.getStatus(userId, tradingMode, tenantId);
+            const data = executionContext
+                ? await realTradingService.getStatus(userId, tradingMode, tenantId, market, executionContext)
+                : await realTradingService.getStatus(userId, tradingMode, tenantId);
+            if (scopeRef.current !== executionScope || (executionScope && !mountedRef.current)) return;
             setStatus(data);
             setLastUpdatedAt(new Date().toISOString());
         } catch (e) {
-            console.warn('[TopologyConsole] status failed', e);
+            if ((!executionScope || mountedRef.current) && scopeRef.current === executionScope) console.warn('[TopologyConsole] status failed', e);
         } finally {
             fetchingRef.current.status = false;
-            markReady('status');
+            if (!executionScope || mountedRef.current) {
+                if (scopeRef.current === executionScope) markReady('status');
+                else loadersRef.current.status();
+            }
         }
-    }, [tenantId, userId, tradingMode]);
+    }, [tenantId, userId, tradingMode, executionScope, datedReady]);
 
     const loadPrecheck = useCallback(async () => {
+        if (!datedReady) return;
         if (fetchingRef.current.precheck) return;
         fetchingRef.current.precheck = true;
         try {
             const { realTradingService } = await import('../../../../../services/realTradingService');
-            const data = await realTradingService.getTradingPrecheck(toDeployMode(tradingMode));
+            const data = executionContext
+                ? await realTradingService.getTradingPrecheck(toDeployMode(tradingMode), executionContext)
+                : await realTradingService.getTradingPrecheck(toDeployMode(tradingMode));
+            if (scopeRef.current !== executionScope || (executionScope && !mountedRef.current)) return;
             setPrecheck(data);
         } catch (e) {
-            console.warn('[TopologyConsole] precheck failed', e);
+            if ((!executionScope || mountedRef.current) && scopeRef.current === executionScope) console.warn('[TopologyConsole] precheck failed', e);
         } finally {
             fetchingRef.current.precheck = false;
-            markReady('precheck');
+            if (!executionScope || mountedRef.current) {
+                if (scopeRef.current === executionScope) markReady('precheck');
+                else loadersRef.current.precheck();
+            }
         }
-    }, [tradingMode]);
+    }, [tradingMode, executionScope, datedReady]);
+    loadersRef.current = { status: () => { void loadStatus(); }, precheck: () => { void loadPrecheck(); } };
+
+    useEffect(() => {
+        if (!executionScope) return;
+        setStatus(null);
+        setPrecheck(null);
+    }, [executionScope]);
+
+    useEffect(() => {
+        mountedRef.current = true;
+        return () => { mountedRef.current = false; };
+    }, []);
 
     const loadModelChain = useCallback(async () => {
         if (fetchingRef.current.model) return;

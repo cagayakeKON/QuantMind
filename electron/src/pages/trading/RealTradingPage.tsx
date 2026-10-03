@@ -524,11 +524,54 @@ export const StandardTradingPage: React.FC = () => {
             tenantId={tenantId}
             userId={userId}
             tradingMode={tradingMode}
+            {...(datedMarket ? { executionContext: selectedInputs?.execution_context, requiresExecutionInputs: true } : {})}
             onDeploy={handleDeploy}
             onStop={handleStop}
             onOpenManualTask={() => setActiveTab('manual-task')}
             onOpenHistory={() => setActiveTab('history')}
         />
+    );
+
+    const tradingContent = (
+        <>
+            {activeTab === 'manage' && strategyConsole}
+            {activeTab === 'manual-task' && (
+                <ManualTaskPage
+                    tenantId={tenantId} userId={userId} tradingMode={tradingMode}
+                    {...(datedMarket ? {
+                        executionContext: selectedInputs?.execution_context,
+                        executionCurrency: selectedInputs?.currency,
+                        requiresExecutionInputs: true,
+                    } : {})}
+                    onBack={() => setActiveTab('manage')}
+                />
+            )}
+            {activeTab === 'personal' && (
+                <PersonalCenter
+                    tenantId={tenantId}
+                    userId={userId}
+                    status={status}
+                    tradingMode={tradingMode}
+                />
+            )}
+            {activeTab === 'position' && (
+                <PositionMonitor
+                    userId={userId}
+                    isActive={activeTab === 'position'}
+                    accountInfo={accountInfo}
+                />
+            )}
+            {activeTab === 'history' && (
+                <TradingHistory
+                    userId={userId}
+                    isActive={activeTab === 'history'}
+                    tradingMode={tradingMode}
+                />
+            )}
+            {activeTab === 'settings' && <SettingsCenter userId={userId} isActive={activeTab === 'settings'} />}
+            {activeTab === 'replay' && <ReplayPage />}
+            {activeTab === 'jp' && <JPSimulationPage />}
+        </>
     );
 
     return (
@@ -577,48 +620,22 @@ export const StandardTradingPage: React.FC = () => {
 
                     {/* Right Content Area */}
                     <div className="flex-1 overflow-hidden relative bg-gray-50/50">
-                    {activeTab === 'manage' && (
-                        datedMarket ? <div className="h-full min-h-0 flex flex-col">
-                            <SimulationExecutionInputForm
-                                key={datedMarket}
-                                market={datedMarket} userId={userId} tenantId={tenantId}
-                                savedContext={(isRuntimeActive ? status?.execution_context : accountInfo?.execution_context)?.market === datedMarket
-                                    ? (isRuntimeActive ? status?.execution_context : accountInfo?.execution_context) : undefined}
-                                runtimeActive={isRuntimeActive}
-                                onChange={setExecutionInputs}
-                                onAccountReset={fetchData}
-                            />
-                            <div className="flex-1 min-h-0">{strategyConsole}</div>
-                        </div> : strategyConsole
-                    )}
-                    {activeTab === 'manual-task' && (
-                        <ManualTaskPage tenantId={tenantId} userId={userId} tradingMode={tradingMode} onBack={() => setActiveTab('manage')} />
-                    )}
-                    {activeTab === 'personal' && (
-                        <PersonalCenter
-                            tenantId={tenantId}
-                            userId={userId}
-                            status={status}
-                            tradingMode={tradingMode}
-                        />
-                    )}
-                    {activeTab === 'position' && (
-                        <PositionMonitor
-                            userId={userId}
-                            isActive={activeTab === 'position'}
-                            accountInfo={accountInfo}
-                        />
-                    )}
-                    {activeTab === 'history' && (
-                        <TradingHistory
-                            userId={userId}
-                            isActive={activeTab === 'history'}
-                            tradingMode={tradingMode}
-                        />
-                    )}
-                    {activeTab === 'settings' && <SettingsCenter userId={userId} isActive={activeTab === 'settings'} />}
-                    {activeTab === 'replay' && <ReplayPage />}
-                    {activeTab === 'jp' && <JPSimulationPage />}
+                    {datedMarket ? (
+                        <div className="h-full min-h-0 flex flex-col">
+                            <div hidden={activeTab !== 'manage' && activeTab !== 'manual-task'} className="shrink-0">
+                                <SimulationExecutionInputForm
+                                    key={datedMarket}
+                                    market={datedMarket} userId={userId} tenantId={tenantId}
+                                    savedContext={(isRuntimeActive ? status?.execution_context : accountInfo?.execution_context)?.market === datedMarket
+                                        ? (isRuntimeActive ? status?.execution_context : accountInfo?.execution_context) : undefined}
+                                    runtimeActive={isRuntimeActive}
+                                    onChange={setExecutionInputs}
+                                    onAccountReset={fetchData}
+                                />
+                            </div>
+                            <div className="flex-1 min-h-0">{tradingContent}</div>
+                        </div>
+                    ) : tradingContent}
                 </div>
             </div>
         </div>

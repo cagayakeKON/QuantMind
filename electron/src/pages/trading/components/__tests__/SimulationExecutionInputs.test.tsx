@@ -20,8 +20,8 @@ vi.mock('../../../../store', () => ({ useAppSelector: () => mocks.market }));
 vi.mock('../../../../hooks/useTradeWebSocket', () => ({ useTradeWebSocket: () => undefined }));
 vi.mock('../../../../components/backtest/StockPoolSelectField', () => ({ StockPoolSelectField: ({ market }: { market?: string }) => <div data-testid="pool-market">{market ?? 'CN'}</div> }));
 vi.mock('../TopBar', () => ({ default: () => null }));
-vi.mock('../../tabs/StrategyConsole/TopologyConsole', () => ({ default: ({ onDeploy }: { onDeploy: (id: string, shadow: boolean) => void }) => <button onClick={() => onDeploy('2', false)}>部署策略</button> }));
-vi.mock('../../tabs/ManualTaskPage', () => ({ default: () => null }));
+vi.mock('../../tabs/StrategyConsole/TopologyConsole', () => ({ default: ({ onDeploy, executionContext }: { onDeploy: (id: string, shadow: boolean) => void; executionContext?: unknown }) => <><button onClick={() => onDeploy('2', false)}>部署策略</button><div data-testid="console-context">{JSON.stringify(executionContext)}</div></> }));
+vi.mock('../../tabs/ManualTaskPage', () => ({ default: ({ executionContext, executionCurrency }: { executionContext?: unknown; executionCurrency?: string }) => <div data-testid="manual-context">{executionCurrency} {JSON.stringify(executionContext)}</div> }));
 vi.mock('../../tabs/PersonalCenter', () => ({ default: () => null }));
 vi.mock('../../tabs/PositionMonitor', () => ({ default: () => null }));
 vi.mock('../../tabs/TradingHistory', () => ({ default: () => null }));
@@ -69,6 +69,21 @@ describe('common simulation controller input flow', () => {
     mocks.start.mockResolvedValue({ status: 'success' });
     mocks.reset.mockResolvedValue({ currency: 'JPY' });
     localStorage.setItem('user', JSON.stringify({ user_id: '7' }));
+  });
+
+  it('shares selected inputs with the console and manual task without reloading them on tab switches', async () => {
+    render(<StandardTradingPage />);
+    await waitFor(() => expect(screen.getByTestId('console-context')).toHaveTextContent('2026-09-30'));
+    await chooseDate('2026-09-29');
+    await waitFor(() => expect(screen.getByTestId('console-context')).toHaveTextContent('2026-09-29'));
+    const requestCount = mocks.inputs.mock.calls.length;
+    fireEvent.click(screen.getByRole('button', { name: '手动任务' }));
+    expect(screen.getByTestId('manual-context')).toHaveTextContent('JPY');
+    expect(screen.getByTestId('manual-context')).toHaveTextContent('2026-09-29');
+    expect(screen.getByLabelText('模拟执行输入')).toBeVisible();
+    fireEvent.click(screen.getByRole('button', { name: '策略管理' }));
+    expect(screen.getByTestId('console-context')).toHaveTextContent('2026-09-29');
+    expect(mocks.inputs).toHaveBeenCalledTimes(requestCount);
   });
 
   it('passes one confirmed context through the actual wizard, precheck and final start', async () => {

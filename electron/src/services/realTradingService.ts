@@ -661,6 +661,7 @@ export const realTradingService = {
         strategy_id: string;
         trading_mode?: 'REAL' | 'SHADOW' | 'SIMULATION';
         note?: string;
+        execution_context?: DatedExecutionContext;
     }): Promise<ManualExecutionPreview> => {
         return await requestRealTradingWithFallback<ManualExecutionPreview>({
             method: 'post',
@@ -679,6 +680,7 @@ export const realTradingService = {
         trading_mode?: 'REAL' | 'SHADOW' | 'SIMULATION';
         preview_hash?: string;
         note?: string;
+        execution_context?: DatedExecutionContext;
     }): Promise<{ status: string; task_id: string; task?: ManualExecutionTaskRecord; preview_summary?: Record<string, unknown> }> => {
         return await requestRealTradingWithFallback<{
             status: string;
