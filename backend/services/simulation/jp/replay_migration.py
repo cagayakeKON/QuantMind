@@ -10,6 +10,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
+import re
 from types import SimpleNamespace
 from uuid import UUID, uuid5
 
@@ -28,6 +29,13 @@ def source_digest(record):
 
 
 def _utc_instant(value):
+    # PostgreSQL JSON trims trailing fractional zeros. Python 3.10 accepts
+    # only 3/6 digits, so preserve the same instant at microsecond precision.
+    value = re.sub(
+        r"\.([0-9]{1,5})(?=Z$|[+-][0-9]{2}:[0-9]{2}$)",
+        lambda match: "." + match[1].ljust(6, "0"),
+        value,
+    )
     instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if instant.tzinfo is None:
         raise ValueError("A legacy execution instant requires an explicit UTC offset")

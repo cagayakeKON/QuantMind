@@ -27,7 +27,6 @@ export interface MarketConfig {
   adapterId: string;
   trainingDefaults?: { commissionRate: number; dealPrice: 'open' | 'close' };
   trainingCapabilities?: {dealPrices: ('open' | 'close')[]; industryFeature: boolean};
-  simulationUi?: 'standard' | 'jp_cash';
   simulationExecution?: 'dated_daily';
   simulationTimeZone?: string;
   stockCodePattern?: RegExp;
@@ -47,7 +46,6 @@ export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
     currency: 'JPY', calendar: 'XTKS', adapterId: 'japan',
     trainingDefaults: { commissionRate: 0, dealPrice: 'open' },
     trainingCapabilities: {dealPrices: ['open'], industryFeature: false},
-    simulationUi: 'jp_cash',
     simulationExecution: 'dated_daily',
     simulationTimeZone: 'Asia/Tokyo',
     stockCodePattern: /^JP\d[A-Z0-9]{3}\d$/,

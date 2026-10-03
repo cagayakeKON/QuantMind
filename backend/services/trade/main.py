@@ -22,7 +22,6 @@ from backend.services.trade.routers import (
     trading_orders,
 )
 from backend.services.simulation.replay.router import router as replay_router
-from backend.services.simulation.jp.router import router as jp_simulation_router
 from backend.shared.config_manager import init_unified_config
 from backend.shared.cors import resolve_cors_origins
 from backend.shared.error_contract import install_error_contract_handlers
@@ -60,7 +59,6 @@ async def lifespan(app: FastAPI):
     simulation_pending_order_task = None
     corp_action_task = None
     simulation_eod_task = None
-    jp_daily_task = None
 
     try:
         await init_unified_config(service_name="quantmind-trade")
@@ -215,8 +213,6 @@ async def lifespan(app: FastAPI):
                 name="simulation-eod-worker",
             )
             logger.info("Simulation EOD worker scheduled")
-            from backend.services.simulation.jp.worker import run_daily_worker
-            jp_daily_task = asyncio.create_task(run_daily_worker(), name="jp-daily-settlement")
         except Exception as e:
             logger.error("trade simulation EOD worker start failed: %s", e, exc_info=True)
         # 模拟盘持久化权益结算（对账确权→行情重估→权益持久化，默认 30s 周期，
@@ -368,7 +364,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("trade risk trigger scanner stop failed: %s", e)
 
-    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, t1_unlock_task, simulation_pending_order_task, corp_action_task, simulation_eod_task, jp_daily_task):
+    for task in (scanner_task, margin_task, snapshot_task, ledger_settlement_task, manual_execution_task, sandbox_signal_task, tdx_account_sync_task, qmt_account_sync_task, qmt_exec_poller_task, mirror_queue_drainer_task, t1_unlock_task, simulation_pending_order_task, corp_action_task, simulation_eod_task):
         if task is None:
             continue
         task.cancel()
@@ -481,7 +477,6 @@ app.include_router(simulation_history.router, prefix="/api/v1/simulation", tags=
 app.include_router(simulation_batch.router)
 app.include_router(internal_strategy.router)
 app.include_router(replay_router)
-app.include_router(jp_simulation_router)
 
 from backend.services.trade.routers.tdx_config import router as tdx_config_router
 from backend.services.trade.routers.broker_config import router as broker_config_router

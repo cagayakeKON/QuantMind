@@ -26,8 +26,7 @@ vi.mock('../../tabs/PersonalCenter', () => ({ default: () => null }));
 vi.mock('../../tabs/PositionMonitor', () => ({ default: () => null }));
 vi.mock('../../tabs/TradingHistory', () => ({ default: () => null }));
 vi.mock('../../tabs/SettingsCenter', () => ({ default: () => null }));
-vi.mock('../../tabs/ReplayPage', () => ({ default: () => null }));
-vi.mock('../../tabs/JPSimulationPage', () => ({ default: () => <div>待迁移的旧会话入口</div> }));
+vi.mock('../../tabs/ReplayPage', () => ({ default: () => <div>共用回放入口</div> }));
 
 import SimulationExecutionInputForm from '../SimulationExecutionInputForm';
 import RealTradingPage, { StandardTradingPage } from '../../RealTradingPage';
@@ -121,10 +120,13 @@ describe('common simulation controller input flow', () => {
     expect(mocks.reset).not.toHaveBeenCalled();
   });
 
-  it('does not switch the production page before old session migration', () => {
+  it('uses the common production controller and replay entry after migration', async () => {
     render(<RealTradingPage />);
-    expect(screen.getByText('待迁移的旧会话入口')).toBeInTheDocument();
-    expect(mocks.inputs).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByTestId('console-context')).toHaveTextContent('2026-09-30'));
+    expect(screen.queryByRole('button', {name: '日股模拟'})).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', {name: '时光回放'}));
+    expect(screen.getByText('共用回放入口')).toBeInTheDocument();
+    expect(mocks.reset).not.toHaveBeenCalled();
   });
 
   it('retains a saved publication and fee inputs when loading the form', async () => {
