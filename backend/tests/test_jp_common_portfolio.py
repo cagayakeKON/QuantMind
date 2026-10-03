@@ -1,13 +1,14 @@
 """JP snapshots use the shared portfolio policies with dated trading units."""
 
 from copy import deepcopy
-from datetime import date, timedelta
+from dataclasses import replace
+from datetime import date
 from decimal import Decimal
 
 import pytest
 
-from backend.services.simulation.jp.model_portfolio import portfolio_orders
-from backend.services.simulation.jp.rules import RuleDataMissing
+from backend.services.simulation.jp.rules import RuleDataMissing, lot_size
+from backend.services.simulation.jp.strategy_snapshot import strategy_snapshot
 from backend.services.simulation.services.rebalance_calculator import (
     Quote,
     RebalanceCalculator,
@@ -16,6 +17,7 @@ from backend.services.simulation.services.rebalance_calculator import (
     WeightMode,
 )
 from backend.services.simulation.services.signal_loader import SignalScore
+from backend.shared.stock_utils import StockCodeUtil
 
 
 A, B, C, D = "JP72030", "JP67580", "JP216A0", "JP99840"
@@ -23,32 +25,68 @@ DAY = date(2026, 9, 28)
 
 
 def plan(scores, held=None, *, strategy=None, cash="100000", day=DAY, **kwargs):
-    state = {
-        "cash_funds": [{"amount": cash}],
-        "positions": {
-            symbol: {"lots": [{"quantity": qty}]}
-            for symbol, qty in (held or {}).items()
-        },
-    }
     symbols = {symbol for symbol, score in scores} | set(held or {})
     bars = {symbol: {"close": 100, "volume": 10000} for symbol in symbols}
     master = {symbol: {} for symbol in symbols}
-    return portfolio_orders(
-        state,
-        [{"symbol": symbol, "score": score} for symbol, score in scores],
-        kwargs.pop("bars", bars),
-        kwargs.pop("master", master),
-        day,
-        day + timedelta(days=1),
-        topk=strategy.topk if strategy else 5,
-        exposure=Decimal("1"),
-        strategy=strategy,
-        **kwargs,
+    bars, master = kwargs.pop("bars", bars), kwargs.pop("master", master)
+    config = replace(
+        strategy
+        or StrategyConfig(
+            topk=5,
+            max_position_pct=1.0,
+            enable_min_score=True,
+            deterministic_buy_order=True,
+        ),
+        custom_weights={
+            StockCodeUtil.to_suffix(symbol): weight
+            for symbol, weight in (strategy.custom_weights if strategy else {}).items()
+        },
     )
+    # Exercise the original calculator directly with dated quote/unit inputs.
+    # The retired JP-specific order planner is not a test producer or runtime.
+    signals = [
+        SignalScore(StockCodeUtil.to_suffix(symbol), score, day, "model", "", "")
+        for symbol, score in sorted(scores, key=lambda item: (-item[1], item[0]))
+    ]
+    quotes = {
+        StockCodeUtil.to_suffix(symbol): Quote(
+            StockCodeUtil.to_suffix(symbol),
+            bar.get("close", 0),
+            is_suspended=not bar.get("close")
+            or not bar.get("volume")
+            or symbol not in master,
+        )
+        for symbol, bar in bars.items()
+    }
+    for symbol in held or {}:
+        if symbol not in bars or not bars[symbol].get("close"):
+            raise RuleDataMissing(
+                f"Exact prior-close valuation required for held {symbol}"
+            )
+    account = SimulationAccount(
+        float(cash),
+        float(
+            Decimal(cash)
+            + sum(
+                Decimal(str(bars[symbol]["close"])) * qty
+                for symbol, qty in (held or {}).items()
+            )
+        ),
+        {
+            StockCodeUtil.to_suffix(symbol): {"volume": qty}
+            for symbol, qty in (held or {}).items()
+        },
+    )
+    return RebalanceCalculator(
+        trading_unit=lambda code: lot_size(day, master[StockCodeUtil.to_prefix(code)])
+    ).calculate(signals, config, quotes, account, **kwargs)
 
 
 def quantities(orders):
-    return [(order["side"], order["symbol"], order["quantity"]) for order in orders]
+    return [
+        (order.side, StockCodeUtil.to_prefix(order.symbol), order.quantity)
+        for order in orders
+    ]
 
 
 def test_sparse_jp_universe_keeps_empty_topk_slots_as_cash():
@@ -125,15 +163,12 @@ def test_plan_preserves_funded_lots_and_saved_cash_history():
         "fills": [{"order_id": "saved-fill"}],
     }
     before = deepcopy(state)
-    portfolio_orders(
+    strategy_snapshot(
         state,
         [{"symbol": A, "score": 1}],
         {A: {"close": 100, "volume": 10000}, B: {"close": 100, "volume": 10000}},
         {A: {}, B: {}},
         DAY,
-        DAY + timedelta(days=1),
-        topk=5,
-        exposure=Decimal("0.95"),
     )
     assert state == before
 

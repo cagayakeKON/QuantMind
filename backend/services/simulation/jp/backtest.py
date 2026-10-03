@@ -5,13 +5,10 @@ from datetime import date
 from pathlib import Path
 from uuid import uuid4
 
-import pandas as pd
-
 from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestResult
 from backend.services.simulation.services.market_execution_data import (
     open_market_execution_data,
 )
-from backend.shared.stock_pool.filters import filter_signals_by_pool
 from backend.shared.stock_pool.resolver import ResolveContext, resolver as pool_resolver
 from backend.shared.stock_pool.schemas import PoolSnapshot
 from backend.shared.stock_utils import StockCodeUtil
@@ -27,10 +24,9 @@ from .model_signals import (
     resolve_model,
 )
 from .rules import RuleDataMissing
-from .strategy_snapshot import (
-    execution_orders,
-    strategy_snapshot,
-    executed_account_snapshot,
+from backend.services.engine.qlib_app.services.dated_strategy_backtest import (
+    open_dated_strategy_inputs,
+    run_dated_strategy_series,
 )
 
 
@@ -44,7 +40,6 @@ def run_cash_backtest(
 ) -> QlibBacktestResult:
     started = time.monotonic()
     from backend.services.engine.qlib_app.services.dated_strategy import (
-        DatedStrategyRunner,
         build_dated_strategy,
         requested_feature_metric,
     )
@@ -173,122 +168,21 @@ def run_cash_backtest(
         commission_rate=commission,
         slippage_bps=request.jp_slippage_bps,
     )
-    benchmark = data.hub.fetch_index_kline("TOPIX", start, end).set_index("trade_date")
-    first_open = (
-        money(benchmark.loc[pd.Timestamp(start), "open"])
-        if not benchmark.empty
-        else money(0)
-    )
-    if first_open <= 0:
-        raise RuleDataMissing("Exact TOPIX opening benchmark is unavailable")
-    previous = anchor
-    equity_curve = [
-        {
-            "date": str(anchor),
-            "value": float(request.initial_capital),
-            "benchmark_value": float(request.initial_capital),
-        }
-    ]
-    strategy_runner = DatedStrategyRunner(
-        strategy_config,
-        data.calendar.sessions,
-        start,
-        end,
-        commission,
+    series = run_dated_strategy_series(
+        inputs=open_dated_strategy_inputs("JP", data),
+        account=account,
+        strategy_config=strategy_config,
+        sessions=sessions,
+        anchor=anchor,
+        initial_capital=request.initial_capital,
+        commission=commission,
+        scores=scores if metric is None else None,
+        pool_snapshot=pool_snapshot,
         strategy_context=strategy_context,
     )
-    position_history, position_info = {}, {}
-    for day_index, day in enumerate(sessions):
-        daily_scores = []
-        if metric is None:
-            if previous not in scores:
-                raise RuleDataMissing(
-                    f"Exact JP test-split signals are missing on {previous}"
-                )
-            outcome = filter_signals_by_pool(scores[previous], pool_snapshot)
-            if outcome.empty_pool or outcome.empty_result:
-                raise RuleDataMissing(
-                    f"Stock pool has no JP model signals on {previous}: "
-                    + "; ".join(outcome.warnings)
-                )
-            daily_scores = outcome.kept
-        symbols = sorted(
-            {r["symbol"] for r in daily_scores} | set(account.state["positions"])
-        )
-        if not strategy_runner.uses_snapshot_signal:
-            # Native signals need quotes for the resolved universe, not merely
-            # securities present in an optional auxiliary model prediction.
-            if pool_snapshot is not None and not pool_snapshot.unfiltered:
-                members = pool_snapshot.api_symbols
-            else:
-                members = data.hub.fetch_stock_list(as_of=previous).get("symbol", [])
-            symbols = sorted(
-                set(symbols)
-                | {StockCodeUtil.to_prefix(code, market="JP") for code in members}
-            )
-        prior_bars, prior_master = data.day(
-            previous, symbols, list(account.state["positions"])
-        )
-        decisions = strategy_runner.decide(
-            step=day_index,
-            **strategy_snapshot(
-                account.state, daily_scores, prior_bars, prior_master, previous
-            ),
-        )
-        orders = execution_orders(decisions, previous, day)
-        needed = sorted(
-            set(account.state["positions"]) | {order["symbol"] for order in orders}
-        )
-        bars, master = data.day(day, needed, list(account.state["positions"]))
-        result = account.execute_day(day, orders)
-        from .analysis_data import cash_position_snapshot
-
-        position_history[pd.Timestamp(day)] = cash_position_snapshot(account.state)
-        position_info[str(day)] = {
-            symbol: {
-                key: value
-                for key, value in {
-                    "name": master[symbol].get("stock_name"),
-                    "industry": master[symbol].get("industry_name"),
-                }.items()
-                if pd.notna(value)
-            }
-            for symbol, position in account.state["positions"].items()
-            if position["lots"]
-        }
-        filled = {
-            order["order_id"]: order["fill"]
-            for order in result["orders"]
-            if order["status"] == "filled"
-        }
-        strategy_runner.record_fills(
-            {
-                id(decision): filled[order["order_id"]]
-                for decision, order in zip(decisions, orders, strict=True)
-                if order["order_id"] in filled
-            },
-            post_snapshot=(
-                executed_account_snapshot(account.state)
-                if strategy_context is not None
-                else None
-            ),
-        )
-        if pd.Timestamp(day) not in benchmark.index:
-            raise RuleDataMissing(f"Exact TOPIX benchmark missing on {day}")
-        benchmark_close = money(benchmark.loc[pd.Timestamp(day), "close"])
-        if benchmark_close <= 0:
-            raise RuleDataMissing(f"Invalid TOPIX benchmark on {day}")
-        equity_curve.append(
-            {
-                "date": str(day),
-                "value": float(result["snapshot"]["equity"]),
-                "benchmark_value": float(
-                    money(request.initial_capital) * benchmark_close / first_open
-                ),
-                "stale_symbols": result["snapshot"]["stale_symbols"],
-            }
-        )
-        previous = day
+    strategy_runner = series.runner
+    equity_curve = series.equity_curve
+    position_history, position_info = series.position_history, series.position_info
     config = request.model_dump(mode="json")
     config.update(
         {

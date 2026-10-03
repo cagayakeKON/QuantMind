@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from qlib.backtest.decision import Order
+import pandas as pd
 
 from backend.services.engine.qlib_app.services.dated_strategy import DecisionQuote
 from backend.shared.stock_utils import StockCodeUtil
@@ -67,26 +67,32 @@ def executed_account_snapshot(state):
     }
 
 
-def execution_orders(decisions, signal_day, execution_day):
-    orders = []
-    for index, decision in enumerate(decisions):
-        symbol = StockCodeUtil.to_prefix(decision.stock_id, market="JP")
-        if decision.direction not in (Order.BUY, Order.SELL):
-            raise ValueError("JP cash execution does not support this order direction")
-        quantity = money(decision.amount)
-        if quantity <= 0:
-            raise ValueError("JP strategy quantities must be positive")
-        if quantity != int(quantity):
-            raise ValueError("JP strategy orders must use whole raw shares")
-        orders.append(
-            {
-                "order_id": f"strategy:{signal_day}:{index}:{symbol}",
-                "symbol": symbol,
-                "side": "BUY" if decision.direction == Order.BUY else "SELL",
-                "quantity": int(quantity),
-                "signal_date": str(signal_day),
-                "execution_date": str(execution_day),
-                "order_type": "MARKET",
-            }
-        )
-    return orders
+def position_information(state, master):
+    return {
+        symbol: {
+            key: value
+            for key, value in {
+                "name": master[symbol].get("stock_name"),
+                "industry": master[symbol].get("industry_name"),
+            }.items()
+            if pd.notna(value)
+        }
+        for symbol, position in state["positions"].items()
+        if position["lots"]
+    }
+
+
+def open_backtest_inputs(reader):
+    from backend.services.engine.qlib_app.services.dated_strategy_backtest import (
+        DatedStrategyDataInputs,
+    )
+    from .analysis_data import cash_position_snapshot
+
+    return DatedStrategyDataInputs(
+        market="JP",
+        reader=reader,
+        decision_snapshot=strategy_snapshot,
+        executed_snapshot=executed_account_snapshot,
+        position_snapshot=cash_position_snapshot,
+        position_information=position_information,
+    )

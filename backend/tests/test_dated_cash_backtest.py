@@ -18,6 +18,42 @@ from backend.tests.test_jp_cash_account import calendar, market, orders
 DAY = date(2026, 9, 2)
 
 
+def test_missing_price_row_does_not_bypass_required_security_master():
+    reader = FixtureReader(calendar())
+    account = DatedCashBacktestAccount.create(reader, "100000", market="JP")
+    before = account.checkpoint()
+    with pytest.raises(RuleDataMissing, match="master/units"):
+        account.execute_day(DAY, orders(("JP72030", "BUY", 100)))
+    assert account.checkpoint() == before
+
+
+def test_missing_price_row_with_valid_master_is_rejected_without_filling():
+    reader = FixtureReader(calendar())
+    _, master = market()
+    reader.set_day({}, master)
+    account = DatedCashBacktestAccount.create(reader, "100000", market="JP")
+    requests = orders(("JP72030", "BUY", 100))
+    result = account.execute_day(DAY, requests)
+    old = LegacyJPCashOracle.create(calendar(), "100000")
+    assert result == old.step(DAY, {}, master, requests)
+    assert account.state == old.state
+    assert result["orders"][0]["status"] == "rejected"
+    assert "No daily trade/bar" in result["orders"][0]["reason"]
+    assert account.state["fills"] == [] and account.state["positions"] == {}
+    assert account.state["settled_cash"] == "100000"
+
+
+def test_missing_price_row_still_requires_historical_units():
+    current = CashBacktestFixture.create(calendar(date(2017, 9, 1)), "200000")
+    _, master = market()
+    requests = orders(("JP72030", "BUY", 1000))
+    requests[0]["signal_date"] = "2017-09-11"
+    before = current.checkpoint()
+    with pytest.raises(RuleDataMissing, match="Historical trading unit"):
+        current.step(date(2017, 9, 12), {}, master, requests)
+    assert current.checkpoint() == before
+
+
 @pytest.mark.parametrize(
     "capital,spec,fee,slip,price,volume",
     [

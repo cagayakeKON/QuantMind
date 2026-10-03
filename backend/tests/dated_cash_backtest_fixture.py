@@ -30,6 +30,8 @@ class FixtureReader:
 
     def get_bar(self, symbol, day):
         symbol = StockCodeUtil.to_prefix(symbol, market="JP")
+        if symbol not in self.bars:
+            return None
         if symbol not in self.metadata:
             raise RuleDataMissing(f"Missing dated master/units: {symbol} on {day}")
         return to_daily_bar(
@@ -38,6 +40,8 @@ class FixtureReader:
 
     def matching_rules(self, symbol, day, *, used_volume=0):
         symbol = StockCodeUtil.to_prefix(symbol, market="JP")
+        if symbol not in self.metadata:
+            raise RuleDataMissing(f"Missing dated master/units: {symbol} on {day}")
         return JapanDailyMatchRules(
             self.metadata[symbol], self.bars.get(symbol, {}), used_volume
         )

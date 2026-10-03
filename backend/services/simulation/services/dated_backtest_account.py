@@ -15,6 +15,7 @@ from backend.services.simulation.services.dated_execution import (
     match_registered_cash_order,
 )
 from backend.shared.stock_utils import StockCodeUtil
+from backend.services.simulation.services.local_market_data import DailyBar
 
 
 class DatedCashBacktestAccount:
@@ -114,35 +115,52 @@ class DatedCashBacktestAccount:
             }
             bar = self.reader.get_bar(symbol, day)
             if bar is None:
-                result["reason"] = "NO_MARKET_DATA"
-            else:
-                unit = context.trading_unit(symbol, {symbol: bar})
-                self.rules.confirmation_quantity(side, quantity, unit)
-                matched = match_registered_cash_order(
-                    context,
-                    self.rules,
-                    staged,
+                # A missing price row does not waive required security metadata.
+                # This empty dated bar is only a non-tradable rule input; the
+                # registered matcher must reject absent raw opening liquidity.
+                bar = DailyBar(
                     symbol=symbol,
-                    side=side.lower(),
-                    quantity=quantity,
-                    bar=bar,
-                    used_volume=self.rules.filled_volume(staged, day, symbol),
+                    trade_date=day,
+                    open=0,
+                    high=0,
+                    low=0,
+                    close=0,
+                    volume=0,
+                    amount=0,
+                    vwap=0,
+                    pre_close=0,
+                    limit_up=float("inf"),
+                    limit_down=0,
+                    is_st=False,
+                    suspended=False,
                 )
-                if not matched.success:
-                    result["reason"] = matched.reason
+            unit = context.trading_unit(symbol, {symbol: bar})
+            self.rules.confirmation_quantity(side, quantity, unit)
+            matched = match_registered_cash_order(
+                context,
+                self.rules,
+                staged,
+                symbol=symbol,
+                side=side.lower(),
+                quantity=quantity,
+                bar=bar,
+                used_volume=self.rules.filled_volume(staged, day, symbol),
+            )
+            if not matched.success:
+                result["reason"] = matched.reason
+            else:
+                try:
+                    updated = self.rules.apply_fill(
+                        staged, day, symbol, side.lower(), matched, order_id
+                    )
+                except ValueError as error:
+                    if isinstance(error, self.reader.execution_data_errors):
+                        raise
+                    result["reason"] = str(error)
                 else:
-                    try:
-                        updated = self.rules.apply_fill(
-                            staged, day, symbol, side.lower(), matched, order_id
-                        )
-                    except ValueError as error:
-                        if isinstance(error, self.reader.execution_data_errors):
-                            raise
-                        result["reason"] = str(error)
-                    else:
-                        staged = updated
-                        fill = self.rules.backtest_state(staged)["fills"][-1]
-                        result.update(status="filled", fill=fill)
+                    staged = updated
+                    fill = self.rules.backtest_state(staged)["fills"][-1]
+                    result.update(status="filled", fill=fill)
             results.append(result)
         projection = deepcopy(staged)
         stale = []

@@ -25,6 +25,7 @@ class LocalMarketProvider:
     simulation_cycle_input_preparer: str | None = None
     simulation_account_input_adapter: str | None = None
     fundamental_snapshot_reader_factory: str | None = None
+    dated_strategy_input_factory: str | None = None
 
     def open(self, data_version: str | None = None):
         if data_version is not None:
@@ -62,6 +63,7 @@ LOCAL_MARKET_PROVIDERS = {
         simulation_cycle_input_preparer="backend.services.simulation.jp.cycle_data.prepare_cycle_inputs",
         simulation_account_input_adapter="backend.services.simulation.jp.account_data.open_account_input_adapter",
         fundamental_snapshot_reader_factory="backend.services.simulation.jp.feature_snapshot.create_reader",
+        dated_strategy_input_factory="backend.services.simulation.jp.strategy_snapshot.open_backtest_inputs",
     ),
 }
 

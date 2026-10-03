@@ -20,7 +20,14 @@ from backend.services.engine.qlib_app.services.backtest_service import (
 )
 from backend.services.simulation.jp import backtest
 from backend.services.simulation.jp.model_signals import model_registry_service
-from backend.services.simulation.jp.model_portfolio import portfolio_orders
+from backend.services.simulation.jp.strategy_snapshot import strategy_snapshot
+from backend.services.engine.qlib_app.services.dated_strategy import (
+    DatedStrategyRunner,
+    build_dated_strategy,
+)
+from backend.services.engine.qlib_app.services.dated_strategy_backtest import (
+    dated_strategy_orders,
+)
 from backend.services.simulation.jp.rules import RuleDataMissing
 
 pytest_plugins = ["backend.tests.test_jp_data_platform"]
@@ -178,22 +185,38 @@ def test_prior_close_sizing_sells_first_without_using_future_open():
         "JP67580": {"close": 1000, "volume": 10000},
         "JP72030": {"close": 500, "volume": 10000, "open": 1},
     }
-    master = {"JP72030": {}}
-    orders = portfolio_orders(
-        state,
-        [{"symbol": "JP72030", "score": 1}],
-        bars,
-        master,
-        date(2026, 9, 28),
-        date(2026, 9, 29),
-        topk=2,
-        exposure=backtest.money("0.95"),
+    master = {code: {"product_category": "011"} for code in bars}
+    signal, execution = date(2026, 9, 28), date(2026, 9, 29)
+    request = QlibBacktestRequest(
+        strategy_type="TopkDropout",
+        strategy_params={"topk": 5, "n_drop": 1},
+        strategy_total_position=0.95,
+    )
+    runner = DatedStrategyRunner(
+        build_dated_strategy(request),
+        [signal, execution],
+        execution,
+        execution,
+        0,
+    )
+    snapshot = strategy_snapshot(
+        state, [{"symbol": "JP72030", "score": 1}], bars, master, signal
+    )
+    orders = dated_strategy_orders(
+        runner.decide(step=0, **snapshot), signal, execution, market="JP"
     )
     assert [(row["side"], row["symbol"], row["quantity"]) for row in orders] == [
         ("SELL", "JP67580", 100),
-        ("BUY", "JP72030", 100),
+        ("BUY", "JP72030", 300),
     ]
     assert all(row["signal_date"] == "2026-09-28" for row in orders)
+    bars["JP72030"]["open"] = 99999
+    assert (
+        strategy_snapshot(
+            state, [{"symbol": "JP72030", "score": 1}], bars, master, signal
+        )
+        == snapshot
+    )
 
 
 @pytest.mark.asyncio
