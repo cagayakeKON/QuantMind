@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from copy import deepcopy
 import csv
 import io
+from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -16,18 +17,21 @@ from backend.services.engine.data_platform.market_provider import (
 from backend.services.engine.qlib_app import get_qlib_service
 from backend.services.engine.qlib_app.api import export, history
 from backend.services.engine.qlib_app.services import backtest_persistence as storage
-from backend.services.simulation.jp import backtest
+from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestResult
 
 pytest_plugins = ["backend.tests.test_jp_model_backtest"]
 
 
 @pytest.fixture
-def legacy_result(model_data):
-    request, model, meta = model_data
-    request.user_id = "alice"
-    request.tenant_id = "tenant-a"
-    request.jp_commission_rate = 0.001
-    return backtest.run_cash_backtest(request, model, meta)
+def legacy_result():
+    # Captured from the retired runner using the controlled model_data fixture,
+    # before deleting its execution branch. Only generated identifiers, dates,
+    # elapsed time and publication digests were made stable; no real dataset.
+    return QlibBacktestResult.model_validate_json(
+        (Path(__file__).parent / "fixtures/jp_legacy_report.json").read_text(
+            encoding="utf-8"
+        )
+    )
 
 
 def test_old_cash_view_preserves_report_metrics_and_ledger_values(legacy_result):

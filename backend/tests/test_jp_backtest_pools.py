@@ -203,18 +203,22 @@ async def test_changed_member_file_changes_checksum_and_traded_symbols(
 async def test_running_backtest_keeps_resolved_snapshot_when_members_change(
     registered, tmp_path, monkeypatch, runtime_factory
 ):
+    from backend.services.engine.qlib_app.services import isolated_strategy_execution
+
     request, _, _ = registered
     path = tmp_path / "members.txt"
     path.write_text("JP216A0\n", encoding="utf-8")
     request.pool_id = f"file:{path}"
-    original = backtest.run_cash_backtest
+    original = isolated_strategy_execution.execute_isolated_strategy
 
-    def execute(*args, **kwargs):
+    async def execute(*args, **kwargs):
         # A concurrent save must only affect subsequent runs.
         path.write_text("JP72030\n", encoding="utf-8")
-        return original(*args, **kwargs)
+        return await original(*args, **kwargs)
 
-    monkeypatch.setattr(backtest, "run_cash_backtest", execute)
+    monkeypatch.setattr(
+        isolated_strategy_execution, "execute_isolated_strategy", execute
+    )
     result = await runtime_factory(Store()).run_backtest(request)
     assert {fill["symbol"] for fill in result.trades} == {"JP216A0"}
     assert result.config["pool_snapshot"]["api_symbols"] == ["JP216A0"]

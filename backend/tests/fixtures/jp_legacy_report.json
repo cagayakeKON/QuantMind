@@ -1,0 +1,222 @@
+{
+  "backtest_id": "legacy-jp-report",
+  "market": "JP",
+  "currency": "JPY",
+  "data_version": "test-publication",
+  "user_id": "alice",
+  "tenant_id": "tenant-a",
+  "status": "completed",
+  "created_at": "2026-09-29T01:00:00Z",
+  "completed_at": "2026-09-29T01:00:00Z",
+  "progress": null,
+  "config": {
+    "market": "JP",
+    "jp_commission_rate": 0.001,
+    "jp_slippage_bps": 0.0,
+    "jp_data_version": null,
+    "strategy_type": "jp_cash_topk",
+    "strategy_params": {
+      "topk": 5,
+      "short_topk": 50,
+      "n_drop": 10,
+      "signal": "<PRED>",
+      "min_score": 0.0,
+      "max_weight": 1.0,
+      "long_exposure": 1.0,
+      "short_exposure": 1.0,
+      "momentum_period": 20,
+      "riskmodel_root": null,
+      "market": "all",
+      "topk_sectors": 5,
+      "lookback_days": 20,
+      "vol_lookback": 20,
+      "stop_loss": -0.08,
+      "take_profit": 0.15,
+      "rebalance_days": 3,
+      "enable_short_selling": false,
+      "margin_stock_pool": null,
+      "financing_rate": 0.08,
+      "borrow_rate": 0.08,
+      "max_short_exposure": 1.0,
+      "max_leverage": 1.0,
+      "account_stop_loss": 0.2
+    },
+    "strategy_content": null,
+    "template_mode": false,
+    "template_params": {},
+    "model_id": "jp-test",
+    "is_third_party": false,
+    "start_date": "2026-09-29",
+    "end_date": "2026-09-29",
+    "use_vectorized": false,
+    "initial_capital": 100000.0,
+    "benchmark": "TOPIX",
+    "universe": "all",
+    "pool_id": null,
+    "pool_checksum": null,
+    "pool_warnings": [],
+    "commission": 0.001,
+    "min_commission": 0,
+    "stamp_duty": 0,
+    "transfer_fee": 0,
+    "min_transfer_fee": 0,
+    "impact_cost_coefficient": 0,
+    "buy_cost": null,
+    "sell_cost": null,
+    "user_id": "alice",
+    "tenant_id": "tenant-a",
+    "dynamic_position": false,
+    "style": null,
+    "market_state_symbol": null,
+    "market_state_window": 20,
+    "strategy_total_position": 0.95,
+    "seed": null,
+    "deal_price": "open",
+    "signal_lag_days": 1,
+    "allow_feature_signal_fallback": false,
+    "risk_free_rate": 0.0,
+    "qlib_provider_uri": null,
+    "qlib_region": null,
+    "backtest_id": null,
+    "strategy_id": null,
+    "history_source": "manual",
+    "data_version": "test-publication",
+    "training_data_version": "test-publication",
+    "prediction_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "execution_engine": "jp_cash_ledger",
+    "currency": "JPY",
+    "return_basis": "price_only",
+    "signal_source": "model_pred_test",
+    "training_labels_available_on": "2026-09-28",
+    "benchmark_entry": "first_execution_open",
+    "pool_snapshot": null
+  },
+  "task_id": null,
+  "model_name": null,
+  "analysis_ready": null,
+  "annual_return": -0.012521263414662087,
+  "sharpe_ratio": null,
+  "max_drawdown": 4.999999999999449e-05,
+  "alpha": null,
+  "total_return": -4.999999999999449e-05,
+  "volatility": 0.0,
+  "beta": null,
+  "information_ratio": null,
+  "benchmark_return": 0.0,
+  "benchmark_symbol": "TOPIX",
+  "long_short_is_theoretical": false,
+  "signal_lag_days": 1,
+  "deal_price": "open",
+  "total_trades": 1,
+  "win_rate": null,
+  "profit_factor": null,
+  "avg_win": null,
+  "avg_loss": null,
+  "avg_holding_period": null,
+  "portfolio_metrics": null,
+  "equity_curve": [
+    {
+      "date": "2026-09-28",
+      "value": 100000.0,
+      "benchmark_value": 100000.0
+    },
+    {
+      "date": "2026-09-29",
+      "value": 99995.0,
+      "benchmark_value": 100000.0,
+      "stale_symbols": []
+    }
+  ],
+  "drawdown_curve": [
+    {
+      "date": "2026-09-28",
+      "value": 0.0
+    },
+    {
+      "date": "2026-09-29",
+      "value": 4.999999999999449e-05
+    }
+  ],
+  "trades": [
+    {
+      "order_id": "model:2026-09-28:JP72030:BUY",
+      "symbol": "JP72030",
+      "side": "BUY",
+      "quantity": 100,
+      "price": "50.0",
+      "fee": "5",
+      "realized_pnl": null,
+      "executed_at": "2026-09-29T00:00:00Z",
+      "trade_date": "2026-09-29",
+      "settlement_date": "2026-10-01"
+    }
+  ],
+  "positions": [
+    {
+      "symbol": "JP72030",
+      "lots": [
+        {
+          "quantity": 100,
+          "cost": "5005.0",
+          "funding": [
+            {
+              "amount": "5005.0",
+              "settles_on": null,
+              "history": [
+                [
+                  "JP72030",
+                  "BUY"
+                ]
+              ]
+            }
+          ]
+        }
+      ],
+      "last_price": "50.0"
+    }
+  ],
+  "factor_metrics": null,
+  "stratified_returns": null,
+  "style_attribution": null,
+  "rebalance_suggestions": null,
+  "advanced_stats": {
+    "orders": [
+      {
+        "order_id": "model:2026-09-28:JP72030:BUY",
+        "symbol": "JP72030",
+        "side": "BUY",
+        "quantity": 100,
+        "signal_date": "2026-09-28",
+        "execution_date": "2026-09-29",
+        "order_type": "MARKET",
+        "trade_date": "2026-09-29",
+        "settlement_date": "2026-10-01",
+        "status": "filled",
+        "fill": {
+          "order_id": "model:2026-09-28:JP72030:BUY",
+          "symbol": "JP72030",
+          "side": "BUY",
+          "quantity": 100,
+          "price": "50.0",
+          "fee": "5",
+          "realized_pnl": null,
+          "executed_at": "2026-09-29T00:00:00Z",
+          "trade_date": "2026-09-29",
+          "settlement_date": "2026-10-01"
+        }
+      }
+    ],
+    "settled_cash": "100000.0",
+    "cash_funds": [
+      {
+        "amount": "94995.0",
+        "settles_on": null,
+        "history": []
+      }
+    ],
+    "price_only": true
+  },
+  "execution_time": 0.0,
+  "error_message": null,
+  "full_error": null
+}

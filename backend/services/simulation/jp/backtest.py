@@ -1,17 +1,13 @@
 """Model-driven backtests through the same strict JP cash execution ledger."""
 
-import asyncio
-import math
 import time
 from datetime import date
 from pathlib import Path
 from uuid import uuid4
 
-import numpy as np
 import pandas as pd
 
 from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestResult
-from backend.services.simulation.services.rebalance_calculator import StrategyConfig
 from backend.services.simulation.services.market_execution_data import (
     open_market_execution_data,
 )
@@ -21,7 +17,6 @@ from backend.shared.stock_pool.schemas import PoolSnapshot
 from backend.shared.stock_utils import StockCodeUtil
 from backend.shared.utc_datetime import utc_now
 from .account import JPCashAccount, money
-from .model_portfolio import portfolio_orders
 from .model_signals import (
     labels_available_on,
     prediction_path,
@@ -54,8 +49,10 @@ def run_cash_backtest(
         extract_backtest_dates,
     )
 
-    if request.strategy_type == "jp_cash_topk" and request.strategy_content:
-        raise ValueError("Legacy JP cash execution does not support strategy code")
+    if request.strategy_type == "jp_cash_topk":
+        raise ValueError(
+            "Select a shared strategy template instead of retired jp_cash_topk"
+        )
     if request.strategy_content:
         code_dates = extract_backtest_dates(request.strategy_content)
         if code_dates:
@@ -84,11 +81,7 @@ def run_cash_backtest(
         raise ValueError(
             "CN-specific costs do not apply to JP; use its commission and slippage fields"
         )
-    metric = (
-        None
-        if request.strategy_type == "jp_cash_topk"
-        else requested_feature_metric(request)
-    )
+    metric = requested_feature_metric(request)
     if request.use_vectorized or (
         request.allow_feature_signal_fallback and metric is None
     ):
@@ -161,12 +154,8 @@ def run_cash_backtest(
         if metric is not None
         else None
     )
-    strategy_config = (
-        None
-        if request.strategy_type == "jp_cash_topk"
-        else build_dated_strategy(
-            request, strategy_context=strategy_context, signal_data=signal_data
-        )
+    strategy_config = build_dated_strategy(
+        request, strategy_context=strategy_context, signal_data=signal_data
     )
     known_after = digest = None
     scores = {}
@@ -196,25 +185,13 @@ def run_cash_backtest(
             "benchmark_value": float(request.initial_capital),
         }
     ]
-    params = request.strategy_params
-    strategy = StrategyConfig(
-        topk=params.topk,
-        min_score=params.min_score,
-        max_position_pct=params.max_weight,
-        enable_min_score=True,
-        deterministic_buy_order=True,
-    )
-    strategy_runner = (
-        DatedStrategyRunner(
-            strategy_config,
-            data.calendar.sessions,
-            start,
-            end,
-            commission,
-            strategy_context=strategy_context,
-        )
-        if strategy_config is not None
-        else None
+    strategy_runner = DatedStrategyRunner(
+        strategy_config,
+        data.calendar.sessions,
+        start,
+        end,
+        commission,
+        strategy_context=strategy_context,
     )
     position_history, position_info = {}, {}
     for day_index, day in enumerate(sessions):
@@ -234,7 +211,7 @@ def run_cash_backtest(
         symbols = sorted(
             {r["symbol"] for r in daily_scores} | set(account.state["positions"])
         )
-        if strategy_runner is not None and not strategy_runner.uses_snapshot_signal:
+        if not strategy_runner.uses_snapshot_signal:
             # Native signals need quotes for the resolved universe, not merely
             # securities present in an optional auxiliary model prediction.
             if pool_snapshot is not None and not pool_snapshot.unfiltered:
@@ -248,68 +225,50 @@ def run_cash_backtest(
         prior_bars, prior_master = data.day(
             previous, symbols, list(account.state["positions"])
         )
-        if strategy_runner is not None:
-            decisions = strategy_runner.decide(
-                step=day_index,
-                **strategy_snapshot(
-                    account.state, daily_scores, prior_bars, prior_master, previous
-                ),
-            )
-            orders = execution_orders(decisions, previous, day)
-        else:
-            # Existing JP sessions retain their old sizing until session migration.
-            orders = portfolio_orders(
-                account.state,
-                daily_scores,
-                prior_bars,
-                prior_master,
-                previous,
-                day,
-                topk=request.strategy_params.topk,
-                exposure=money(request.strategy_total_position),
-                min_score=request.strategy_params.min_score,
-                strategy=strategy,
-                day_index=day_index,
-            )
+        decisions = strategy_runner.decide(
+            step=day_index,
+            **strategy_snapshot(
+                account.state, daily_scores, prior_bars, prior_master, previous
+            ),
+        )
+        orders = execution_orders(decisions, previous, day)
         needed = sorted(
             set(account.state["positions"]) | {order["symbol"] for order in orders}
         )
         bars, master = data.day(day, needed, list(account.state["positions"]))
         result = account.step(day, bars, master, orders)
-        if request.strategy_type != "jp_cash_topk":
-            from .analysis_data import cash_position_snapshot
+        from .analysis_data import cash_position_snapshot
 
-            position_history[pd.Timestamp(day)] = cash_position_snapshot(account.state)
-            position_info[str(day)] = {
-                symbol: {
-                    key: value
-                    for key, value in {
-                        "name": master[symbol].get("stock_name"),
-                        "industry": master[symbol].get("industry_name"),
-                    }.items()
-                    if pd.notna(value)
-                }
-                for symbol, position in account.state["positions"].items()
-                if position["lots"]
+        position_history[pd.Timestamp(day)] = cash_position_snapshot(account.state)
+        position_info[str(day)] = {
+            symbol: {
+                key: value
+                for key, value in {
+                    "name": master[symbol].get("stock_name"),
+                    "industry": master[symbol].get("industry_name"),
+                }.items()
+                if pd.notna(value)
             }
-        if strategy_runner is not None:
-            filled = {
-                order["order_id"]: order["fill"]
-                for order in result["orders"]
-                if order["status"] == "filled"
-            }
-            strategy_runner.record_fills(
-                {
-                    id(decision): filled[order["order_id"]]
-                    for decision, order in zip(decisions, orders, strict=True)
-                    if order["order_id"] in filled
-                },
-                post_snapshot=(
-                    executed_account_snapshot(account.state)
-                    if strategy_context is not None
-                    else None
-                ),
-            )
+            for symbol, position in account.state["positions"].items()
+            if position["lots"]
+        }
+        filled = {
+            order["order_id"]: order["fill"]
+            for order in result["orders"]
+            if order["status"] == "filled"
+        }
+        strategy_runner.record_fills(
+            {
+                id(decision): filled[order["order_id"]]
+                for decision, order in zip(decisions, orders, strict=True)
+                if order["order_id"] in filled
+            },
+            post_snapshot=(
+                executed_account_snapshot(account.state)
+                if strategy_context is not None
+                else None
+            ),
+        )
         if pd.Timestamp(day) not in benchmark.index:
             raise RuleDataMissing(f"Exact TOPIX benchmark missing on {day}")
         benchmark_close = money(benchmark.loc[pd.Timestamp(day), "close"])
@@ -326,25 +285,6 @@ def run_cash_backtest(
             }
         )
         previous = day
-    legacy_metrics = {}
-    drawdowns = []
-    if request.strategy_type == "jp_cash_topk":
-        values = np.array([row["value"] for row in equity_curve])
-        returns = values[1:] / values[:-1] - 1
-        total = float(values[-1] / values[0] - 1)
-        volatility = float(np.std(returns, ddof=1)) if len(returns) > 1 else 0
-        drawdowns = 1 - values / np.maximum.accumulate(values)
-        legacy_metrics = {
-            "total_return": total,
-            "annual_return": float((1 + total) ** (252 / len(sessions)) - 1),
-            "sharpe_ratio": float(
-                (np.mean(returns) - risk_free / 252) / volatility * math.sqrt(252)
-            )
-            if volatility
-            else None,
-            "volatility": volatility * math.sqrt(252),
-            "max_drawdown": float(max(drawdowns)),
-        }
     config = request.model_dump(mode="json")
     config.update(
         {
@@ -373,11 +313,7 @@ def run_cash_backtest(
             else None,
             **({"signal_feature": metric} if metric is not None else {}),
             "benchmark_entry": "first_execution_open",
-            **(
-                {"strategy_decision_class": type(strategy_runner.strategy).__name__}
-                if strategy_config is not None
-                else {}
-            ),
+            **({"strategy_decision_class": type(strategy_runner.strategy).__name__}),
             **(
                 {
                     "strategy_data_version": strategy_context.spec.data_version,
@@ -400,21 +336,12 @@ def run_cash_backtest(
             else None,
         }
     )
-    # Public strategy results use the common signed drawdown contract. Keep the
-    # old cash entry's report unchanged until its sessions are migrated.
-    common_drawdowns = None
-    trades = account.state["fills"]
-    positions = [
-        {"symbol": symbol, **position}
-        for symbol, position in account.state["positions"].items()
-    ]
-    if request.strategy_type != "jp_cash_topk":
-        from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
-        from .analysis_data import public_positions, public_trades
+    from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
+    from .analysis_data import public_positions, public_trades
 
-        common_drawdowns = RiskAnalyzer._build_drawdown_curve(equity_curve)
-        trades = public_trades(trades)
-        positions = public_positions(position_history)
+    common_drawdowns = RiskAnalyzer._build_drawdown_curve(equity_curve)
+    trades = public_trades(account.state["fills"])
+    positions = public_positions(position_history)
     report = QlibBacktestResult(
         backtest_id=request.backtest_id or uuid4().hex,
         user_id=request.user_id,
@@ -425,7 +352,6 @@ def run_cash_backtest(
         market="JP",
         currency="JPY",
         data_version=execution_version,
-        **legacy_metrics,
         benchmark_symbol="TOPIX",
         benchmark_return=equity_curve[-1]["benchmark_value"]
         / float(request.initial_capital)
@@ -435,12 +361,7 @@ def run_cash_backtest(
         long_short_is_theoretical=False,
         total_trades=len(account.state["fills"]),
         equity_curve=equity_curve,
-        drawdown_curve=common_drawdowns
-        if common_drawdowns is not None
-        else [
-            {"date": row["date"], "value": float(value)}
-            for row, value in zip(equity_curve, drawdowns, strict=True)
-        ],
+        drawdown_curve=common_drawdowns,
         trades=trades,
         positions=positions,
         advanced_stats={
@@ -455,28 +376,25 @@ def run_cash_backtest(
                         "by_date": position_info,
                     }
                 }
-                if request.strategy_type != "jp_cash_topk"
-                else {}
             ),
         },
         execution_time=time.monotonic() - started,
     )
-    if request.strategy_type != "jp_cash_topk":
-        from .analysis_data import (
-            public_factor_metrics,
-            public_report_metrics,
-            save_style_features,
-        )
+    from .analysis_data import (
+        public_factor_metrics,
+        public_report_metrics,
+        save_style_features,
+    )
 
-        report = report.model_copy(update=public_report_metrics(report, request))
-        report = report.model_copy(
-            update=public_factor_metrics(
-                report, request, strategy_runner.analysis_signals(), strategy_context
-            )
+    report = report.model_copy(update=public_report_metrics(report, request))
+    report = report.model_copy(
+        update=public_factor_metrics(
+            report, request, strategy_runner.analysis_signals(), strategy_context
         )
-        report.advanced_stats["style_features"] = save_style_features(
-            report, request, strategy_context
-        )
+    )
+    report.advanced_stats["style_features"] = save_style_features(
+        report, request, strategy_context
+    )
     return report
 
 
@@ -485,11 +403,7 @@ async def execute_backtest(request):
         requested_feature_metric,
     )
 
-    metric = (
-        None
-        if request.strategy_type == "jp_cash_topk"
-        else requested_feature_metric(request)
-    )
+    metric = requested_feature_metric(request)
     model_dir, meta = (
         await resolve_model(
             request.tenant_id,
@@ -528,12 +442,7 @@ async def execute_backtest(request):
         execute_isolated_strategy,
     )
 
-    if request.strategy_type != "jp_cash_topk":
-        return await execute_isolated_strategy(request, model_dir, meta, pool)
-    result = await asyncio.to_thread(
-        run_cash_backtest, request, model_dir, meta, pool_snapshot=pool
-    )
-    return result
+    return await execute_isolated_strategy(request, model_dir, meta, pool)
 
 
 def _validate_pool(pool: PoolSnapshot):

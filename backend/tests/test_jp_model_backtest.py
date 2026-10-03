@@ -82,7 +82,7 @@ def model_data(snapshot, tmp_path, monkeypatch):
     }
     request = QlibBacktestRequest(
         market="JP",
-        strategy_type="jp_cash_topk",
+        strategy_type="TopkDropout",
         model_id="jp-test",
         start_date="2026-09-29",
         end_date="2026-09-29",
@@ -102,7 +102,7 @@ def test_real_raw_fills_dated_settlement_and_topix_report(model_data):
     assert result.market == "JP" and result.currency == "JPY"
     assert result.total_trades == 1
     fill = result.trades[0]
-    assert fill["symbol"] == "JP72030" and fill["quantity"] == 100
+    assert fill["symbol"] == "JP72030" and fill["quantity"] == 900
     assert float(fill["price"]) == 50 and float(fill["fee"]) == 0
     assert fill["settlement_date"] == "2026-10-01"
     assert result.total_return == 0 and result.benchmark_return == 0
@@ -152,13 +152,20 @@ def test_no_training_split_signals_or_cn_strategy_fallback(model_data):
     request.strategy_type = "CustomStrategy"
     with pytest.raises(ValueError, match="isolated market data-provider"):
         backtest.run_cash_backtest(request, model, meta)
-    request.strategy_type = "jp_cash_topk"
+    request.strategy_type = "TopkDropout"
     with pytest.raises(ValueError, match="availability"):
         backtest.run_cash_backtest(request, model, {**meta, "train_end": "2026-09-28"})
     frame = pd.read_parquet(model / "pred.parquet")
     frame["split"] = "train"
     frame.to_parquet(model / "pred.parquet")
     with pytest.raises(RuleDataMissing, match="signals are missing"):
+        backtest.run_cash_backtest(request, model, meta)
+
+
+def test_retired_private_strategy_cannot_execute_new_backtests(model_data):
+    request, model, meta = model_data
+    request.strategy_type = "jp_cash_topk"
+    with pytest.raises(ValueError, match="shared strategy template"):
         backtest.run_cash_backtest(request, model, meta)
 
 
