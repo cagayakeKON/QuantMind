@@ -34,6 +34,7 @@ export interface TradeRecordExportRow {
   价格: string;
   金额: number;
   状态: string;
+  币种?: string;
 }
 
 export class ExcelExporter {
@@ -218,6 +219,8 @@ export const exportTradeRecordsToExcel = async (
   const worksheet = workbook.addWorksheet('交易记录');
 
   const headers: (keyof TradeRecordExportRow)[] = ['时间', '方向', '代码', '名称', '数量', '价格', '金额', '状态'];
+  const includeCurrency = rows.some(row => row.币种 !== undefined);
+  if (includeCurrency) headers.push('币种');
   worksheet.addRow(headers);
   rows.forEach((row) => {
     worksheet.addRow(headers.map((header) => row[header]));
@@ -233,6 +236,7 @@ export const exportTradeRecordsToExcel = async (
     { width: 14 },
     { width: 12 },
   ];
+  if (includeCurrency) worksheet.getColumn(headers.length).width = 10;
 
   const buffer = await workbook.xlsx.writeBuffer();
   const blob = new Blob([buffer], {

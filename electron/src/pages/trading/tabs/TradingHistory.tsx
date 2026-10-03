@@ -7,8 +7,10 @@ import type { Order } from '../../../services/realTradingService';
 import { marketDataService } from '../../../services/marketDataService';
 import { csvExporter } from '../../../services/export';
 import { exportTradeRecordsToExcel } from '../../../utils/excelExport';
-import { formatBackendDateTime, formatBackendTime } from '../../../utils/format';
 import type { TradeRecordExportRow } from '../../../utils/excelExport';
+import { getMarketConfig } from '../../../config/marketConfig';
+import { registeredStockMarket, formatMarketTimestamp } from '../../../utils/marketPresentation';
+import { normalizeStockCode } from '../../../utils/portfolioUtils';
 
 interface TradingHistoryProps {
     userId: string;
@@ -72,6 +74,8 @@ const buildDateRange = (timeRange: 'today' | 'week' | 'month' | 'all'): OrdersRa
 
 // 与后端 market_rules.infer_market 同口径的简化推断（交易记录按市场过滤用）
 function inferMarketOfSymbol(symbol: string): string {
+    const registered = registeredStockMarket(symbol);
+    if (registered) return registered;
     const s = String(symbol || '').toUpperCase().trim();
     if (/^\d{1,5}\.HK$/.test(s)) return 'HK';
     if (/^\d{6}\.(SH|SZ|BJ)$/.test(s) || /^\d{6}$/.test(s)) return 'CN';
@@ -83,6 +87,10 @@ function inferMarketOfSymbol(symbol: string): string {
 
 const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradingMode }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
+    const marketConfig = getMarketConfig(currentMarket);
+    const datedMarket = marketConfig.simulationExecution ? currentMarket : undefined;
+    const displayTimeZone = datedMarket ? marketConfig.simulationTimeZone : undefined;
+    const moneyPrefix = datedMarket ? `${marketConfig.currency} ` : '¥';
     const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month' | 'all'>('all');
     const [searchTerm, setSearchTerm] = useState('');
     const [statusFilter, setStatusFilter] = useState<string>('all');
@@ -94,6 +102,12 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
     const stockNamesRef = useRef<Record<string, string>>({});
     const failedCodesRef = useRef<Set<string>>(new Set());
     const loadingRef = useRef(false);
+    const datedScope = datedMarket || '';
+    const scopeRef = useRef(datedScope);
+    scopeRef.current = datedScope;
+    const previousScopeRef = useRef(datedScope);
+    const latestLoadRef = useRef(() => {});
+    const mountedRef = useRef(true);
     const itemsPerPage = 50;
 
     React.useEffect(() => {
@@ -124,6 +138,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                 }
                 offset += PAGE_SIZE;
             }
+            if (scopeRef.current !== datedScope || (datedScope && !mountedRef.current)) return;
 
             // 按当前市场过滤订单（symbol 格式推断，与后端 market_rules 同口径）
             const marketFilteredOrders = allOrders.filter(
@@ -194,9 +209,9 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                 return {
                     id: order.id.toString(),
                     createdAt: order.submitted_at || order.created_at,
-                    time: formatBackendTime(order.submitted_at || order.created_at, { withSeconds: true }),
+                    time: formatMarketTimestamp(order.submitted_at || order.created_at, displayTimeZone),
                     direction: String(order.side || '').toLowerCase(),
-                    code: order.symbol,
+                    code: registeredStockMarket(order.symbol) ? normalizeStockCode(order.symbol) : order.symbol,
                     name: order.symbol_name || stockNamesRef.current[order.symbol] || order.symbol,
                     quantity: order.quantity,
                     filledQty,
@@ -210,13 +225,25 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                     commission: Number((order as any).commission ?? (order as any).fee ?? 0),
                 };
             });
-            setTrades(mapped);
+            if (scopeRef.current === datedScope && (!datedScope || mountedRef.current)) setTrades(mapped);
         } catch (e) {
             console.error("Failed to load orders", e);
         } finally {
             loadingRef.current = false;
+            if (scopeRef.current !== datedScope && mountedRef.current) latestLoadRef.current();
         }
-    }, [timeRange, tradingMode, userId]);
+    }, [timeRange, tradingMode, userId, datedMarket]);
+    latestLoadRef.current = () => { void loadOrders(); };
+
+    React.useEffect(() => {
+        if (datedScope !== previousScopeRef.current && (datedScope || previousScopeRef.current)) setTrades([]);
+        previousScopeRef.current = datedScope;
+    }, [datedScope]);
+
+    React.useEffect(() => {
+        mountedRef.current = true;
+        return () => { mountedRef.current = false; };
+    }, []);
 
     React.useEffect(() => {
         if (isActive && userId) {
@@ -326,7 +353,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
     }, []);
 
     const buildExportRows = useCallback((rows: TradeRow[]) => rows.map((trade) => ({
-        时间: formatBackendDateTime(trade.createdAt),
+        时间: formatMarketTimestamp(trade.createdAt, displayTimeZone, true),
         方向: trade.direction === 'buy' ? '买入' : '卖出',
         操作: trade.tradeAction,
         代码: trade.code,
@@ -339,7 +366,8 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
         成交金额: trade.filledValue.toFixed(2),
         状态: getStatusText(trade.status),
         交易所委托号: trade.exchangeOrderId,
-    })), [getStatusText]);
+        ...(datedMarket ? { 币种: marketConfig.currency } : {}),
+    })), [getStatusText, datedMarket]);
 
     const handleExport = useCallback(async (format: ExportFormat, scope: ExportScope) => {
         const sourceTrades = scope === 'current' ? paginatedTrades : filteredTrades;
@@ -371,6 +399,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                     价格: row.成交均价 !== '0.00' ? row.成交均价 : row.委托价格,
                     金额: Number(row.成交金额) || Number(row.委托金额) || 0,
                     状态: row.状态,
+                    ...(datedMarket ? { 币种: marketConfig.currency } : {}),
                 }));
                 await exportTradeRecordsToExcel(excelRows, `${filenameBase}.xlsx`);
             }
@@ -382,7 +411,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
         } finally {
             setExporting(false);
         }
-    }, [buildExportRows, exporting, filteredTrades, getStatusText, paginatedTrades, timeRange]);
+    }, [buildExportRows, exporting, filteredTrades, getStatusText, paginatedTrades, timeRange, datedMarket]);
 
     const exportMenuItems = useMemo(() => ([
         { key: 'csv-current', label: '导出当前页 CSV' },
@@ -561,21 +590,21 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                                             )}
                                         </td>
                                         <td className="px-3 py-2 text-center font-semibold text-gray-900">
-                                            {(isFilled || isPartial) && trade.avgPrice > 0 ? `¥${trade.avgPrice.toFixed(2)}` : (
-                                                <span className="text-gray-400">¥{trade.price.toFixed(2)}</span>
+                                            {(isFilled || isPartial) && trade.avgPrice > 0 ? `${moneyPrefix}${trade.avgPrice.toFixed(2)}` : (
+                                                <span className="text-gray-400">{moneyPrefix}{trade.price.toFixed(2)}</span>
                                             )}
                                         </td>
                                         <td className="px-3 py-2 text-center font-bold text-gray-900">
                                             {(isFilled || isPartial) && trade.filledValue > 0 ? (
                                                 trade.filledValue >= 10000
-                                                    ? `¥${(trade.filledValue / 10000).toFixed(2)}万`
-                                                    : `¥${trade.filledValue.toFixed(2)}`
+                                                    ? `${moneyPrefix}${(trade.filledValue / 10000).toFixed(2)}万`
+                                                    : `${moneyPrefix}${trade.filledValue.toFixed(2)}`
                                             ) : (
                                                 <span className="text-gray-300">--</span>
                                             )}
                                         </td>
                                         <td className="px-3 py-2 text-center font-medium text-amber-600">
-                                            {trade.commission > 0 ? `¥${trade.commission.toFixed(2)}` : '--'}
+                                            {trade.commission > 0 ? `${moneyPrefix}${trade.commission.toFixed(2)}` : '--'}
                                         </td>
                                         <td className="px-3 py-2">
                                             <div className="flex items-center justify-center gap-1">
@@ -667,21 +696,21 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                             <div className="flex flex-col items-center min-w-[92px] shrink-0">
                                 <span className="text-gray-500 text-[10px] mb-1 font-bold whitespace-nowrap">买入金额</span>
                                 <span className="font-bold text-red-600 text-sm tabular-nums whitespace-nowrap">
-                                    {stats.buyAmount >= 10000 ? `¥${(stats.buyAmount / 10000).toFixed(2)}万` : `¥${stats.buyAmount.toFixed(2)}`}
+                                    {stats.buyAmount >= 10000 ? `${moneyPrefix}${(stats.buyAmount / 10000).toFixed(2)}万` : `${moneyPrefix}${stats.buyAmount.toFixed(2)}`}
                                 </span>
                             </div>
 
                             <div className="flex flex-col items-center min-w-[92px] shrink-0">
                                 <span className="text-gray-500 text-[10px] mb-1 font-bold whitespace-nowrap">卖出金额</span>
                                 <span className="font-bold text-green-600 text-sm tabular-nums whitespace-nowrap">
-                                    {stats.sellAmount >= 10000 ? `¥${(stats.sellAmount / 10000).toFixed(2)}万` : `¥${stats.sellAmount.toFixed(2)}`}
+                                    {stats.sellAmount >= 10000 ? `${moneyPrefix}${(stats.sellAmount / 10000).toFixed(2)}万` : `${moneyPrefix}${stats.sellAmount.toFixed(2)}`}
                                 </span>
                             </div>
 
                             <div className="flex flex-col items-center min-w-[92px] shrink-0">
                                 <span className="text-gray-500 text-[10px] mb-1 font-bold whitespace-nowrap">净买入</span>
                                 <span className={`font-bold text-sm tabular-nums whitespace-nowrap ${stats.netBuy >= 0 ? 'text-red-600' : 'text-green-600'}`}>
-                                    {Math.abs(stats.netBuy) >= 10000 ? `¥${(Math.abs(stats.netBuy) / 10000).toFixed(2)}万` : `¥${Math.abs(stats.netBuy).toFixed(2)}`}
+                                    {Math.abs(stats.netBuy) >= 10000 ? `${moneyPrefix}${(Math.abs(stats.netBuy) / 10000).toFixed(2)}万` : `${moneyPrefix}${Math.abs(stats.netBuy).toFixed(2)}`}
                                 </span>
                             </div>
 
@@ -690,7 +719,7 @@ const TradingHistory: React.FC<TradingHistoryProps> = ({ userId, isActive, tradi
                             <div className="flex flex-col items-center min-w-[92px] shrink-0">
                                 <span className="text-gray-500 text-[10px] mb-1 font-bold whitespace-nowrap">累计费用</span>
                                 <span className="font-bold text-amber-600 text-sm tabular-nums whitespace-nowrap">
-                                    ¥{stats.totalCommission.toFixed(2)}
+                                    {moneyPrefix}{stats.totalCommission.toFixed(2)}
                                 </span>
                             </div>
                         </div>
