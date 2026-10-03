@@ -19,6 +19,7 @@ from backend.services.simulation.jp.replay_migration import (
     source_digest,
 )
 from backend.services.simulation.replay.legacy_migration import stage_replay_import
+from backend.services.simulation.models.replay_import import ReplayImportReceipt
 from backend.shared.database_manager_v2 import DatabaseConfig
 
 
@@ -51,6 +52,13 @@ async def migrate(backup_path, *, apply=False):
                 await asyncio.to_thread(prepare_replay_import, row) for row in source
             ]
             plans = [await bind_saved_model(plan) for plan in plans]
+            if apply:
+                connection = await db.connection()
+                await connection.run_sync(
+                    lambda sync: ReplayImportReceipt.__table__.create(
+                        sync, checkfirst=True
+                    )
+                )
             for plan in plans:
                 inserted = await stage_replay_import(db, plan) if apply else None
                 summary.append(

@@ -4,10 +4,12 @@ from copy import deepcopy
 from datetime import date, datetime, timezone
 import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
+import pytest_asyncio
 import pandas as pd
 import duckdb
 from sqlalchemy import func, select, text
@@ -23,6 +25,7 @@ from backend.services.simulation.models.replay import (
     ReplaySession,
     ReplayTrade,
 )
+from backend.services.simulation.models.replay_import import ReplayImportReceipt
 from backend.services.simulation.replay.account import ReplayAccountManager
 from backend.services.simulation.replay.legacy_migration import stage_replay_import
 from backend.services.simulation.replay.persistence import load_checkpoint_account
@@ -40,12 +43,47 @@ from backend.shared.model_registry import model_registry_service
 cash_setup = cash_setup_fixture
 published = published_fixture
 snapshot_base = snapshot_fixture
-pg = pg_fixture
+pg_base = pg_fixture
 SESSION = UUID(int=5101)
 ANCHOR = date(2026, 9, 25)
 DAY = date(2026, 9, 28)
 NEXT = date(2026, 9, 29)
 END = date(2026, 9, 30)
+
+
+@pytest_asyncio.fixture
+async def pg(pg_base):
+    # Import receipts belong only to this new one-time migration test scope.
+    async with pg_base.sessions() as db:
+        # Exercise the exact appended startup DDL twice, not merely ORM create.
+        ddl = (Path(__file__).parents[1] / "shared/db_init.sql").read_text(
+            encoding="utf-8"
+        )
+        ddl = (
+            "CREATE TABLE IF NOT EXISTS replay_import_receipts ("
+            + ddl.split("CREATE TABLE IF NOT EXISTS replay_import_receipts (", 1)[1]
+        )
+        await db.execute(text(ddl))
+        await db.execute(text(ddl))
+        assert (
+            await db.scalar(
+                text(
+                    "SELECT data_type FROM information_schema.columns "
+                    "WHERE table_schema=current_schema() "
+                    "AND table_name='replay_import_receipts' AND column_name='created_at'"
+                )
+            )
+            == "timestamp with time zone"
+        )
+        assert not await db.scalar(
+            text(
+                "SELECT count(*) FROM information_schema.table_constraints "
+                "WHERE table_schema=current_schema() "
+                "AND table_name='replay_import_receipts' AND constraint_type='FOREIGN KEY'"
+            )
+        )
+        await db.commit()
+    return pg_base
 
 
 @pytest.fixture
@@ -267,12 +305,19 @@ async def test_import_rollback_rerun_restore_and_continue_in_original_runner(
     async with pg.sessions() as db:
         assert await counts(db) == [0, 0, 0]
         assert await db.get(ReplaySession, SESSION) is None
+        assert await db.get(ReplayImportReceipt, SESSION) is None
         assert await stage_replay_import(db, plan)
         await db.commit()
     assert pg.setup.redis.client.keys_touched == []
     async with pg.sessions() as db:
         assert not await stage_replay_import(db, plan)
         row = await db.get(ReplaySession, SESSION)
+        receipt = await db.get(ReplayImportReceipt, SESSION)
+        assert (
+            receipt.source_sha256
+            == plan["session"]["signal_progress"]["legacy_import"]["source_sha256"]
+        )
+        assert receipt.created_at.tzinfo is not None
         restored = await load_checkpoint_account(db, row, accounts(pg.setup))
         assert restored["_market_cash_rules"]["state"] == source["state"]
         result = await session_context.runner(NEXT).execute_day(
@@ -300,6 +345,17 @@ async def test_import_rollback_rerun_restore_and_continue_in_original_runner(
         assert not await stage_replay_import(db, plan)
         assert row.cursor_date == NEXT and row.status == "ready"
         await db.rollback()
+    # An already verified pre-receipt import can gain its durable receipt,
+    # without changing its later cursor or replay history.
+    async with pg.sessions() as db:
+        await db.delete(await db.get(ReplayImportReceipt, SESSION))
+        await db.commit()
+    async with pg.sessions() as db:
+        assert not await stage_replay_import(db, plan)
+        assert (await db.get(ReplaySession, SESSION)).cursor_date == NEXT
+        assert await counts(db) == [1, 1, 2]
+        assert await db.get(ReplayImportReceipt, SESSION) is not None
+        await db.commit()
 
 
 @pytest.mark.asyncio
@@ -333,7 +389,9 @@ async def test_import_does_not_bypass_existing_unresolved_action_block(pg):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fault", ["owner", "source", "history"])
+@pytest.mark.parametrize(
+    "fault", ["owner", "source", "history", "receipt", "plan_digest"]
+)
 async def test_existing_target_conflicts_do_not_overwrite_data(pg, fault):
     plan = prepare_replay_import(legacy_record(pg.setup), context=context(pg.setup))
     async with pg.sessions() as db:
@@ -345,12 +403,22 @@ async def test_existing_target_conflicts_do_not_overwrite_data(pg, fault):
             row.user_id = 8
         elif fault == "source":
             row.signal_progress = {}
-        else:
+        elif fault == "history":
             trade = (await db.execute(select(ReplayTrade))).scalars().first()
             trade.price += 1
+        elif fault == "receipt":
+            receipt = await db.get(ReplayImportReceipt, SESSION)
+            receipt.source_sha256 = "changed"
+        else:
+            plan["session"]["signal_progress"]["legacy_import"]["source_sha256"] = (
+                "changed"
+            )
         await db.commit()
     async with pg.sessions() as db:
-        with pytest.raises(ValueError, match="Existing replay"):
+        with pytest.raises(
+            ValueError,
+            match="source digest" if fault == "plan_digest" else "Existing replay",
+        ):
             await stage_replay_import(db, plan)
         await db.rollback()
         assert await counts(db) == [2, 2, 2]
@@ -434,6 +502,7 @@ async def test_cli_target_conflict_rolls_back_the_entire_inventory(
         await cli.migrate(backup, apply=True)
     async with pg.sessions() as db:
         assert await db.get(ReplaySession, UUID(int=1)) is None
+        assert await db.get(ReplayImportReceipt, UUID(int=1)) is None
         assert await counts(db) == [0, 0, 0]
         assert (
             await db.scalar(text("SELECT count(*) FROM jp_simulation_sessions"))

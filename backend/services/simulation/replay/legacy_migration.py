@@ -1,6 +1,11 @@
-"""One-time imports into the existing replay tables; no account/cache writes."""
+"""One-time replay imports and durable receipts; no account/cache writes."""
+
+import hashlib
+import json
 
 from sqlalchemy import select
+
+from backend.services.simulation.models.replay_import import ReplayImportReceipt
 
 from backend.services.simulation.models.replay import (
     ReplayEquitySnapshot,
@@ -8,6 +13,35 @@ from backend.services.simulation.models.replay import (
     ReplaySession,
     ReplayTrade,
 )
+
+
+def _receipt_values(plan):
+    values = plan["session"]
+    marker = values["signal_progress"]["legacy_import"]
+    digest = hashlib.sha256(
+        json.dumps(
+            marker["source"], sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode()
+    ).hexdigest()
+    if digest != marker["source_sha256"]:
+        raise ValueError("Replay import source digest does not match its record")
+    return {
+        "session_id": values["session_id"],
+        "tenant_id": values["tenant_id"],
+        "user_id": values["user_id"],
+        "market": values["strategy_params"]["market"],
+        "data_version": values["strategy_params"]["data_version"],
+        "source_format": marker["format"],
+        "source_sha256": digest,
+    }
+
+
+async def _record_receipt(db, existing, values):
+    # Called only after every target history row has been verified or flushed.
+    # Its commit/rollback is owned by the exact same outer import transaction.
+    if existing is None:
+        db.add(ReplayImportReceipt(**values))
+        await db.flush()
 
 
 async def stage_replay_import(db, plan):
@@ -18,6 +52,14 @@ async def stage_replay_import(db, plan):
     """
     values = plan["session"]
     session_id = values["session_id"]
+    receipt_values = _receipt_values(plan)
+    receipt = await db.get(
+        ReplayImportReceipt, session_id, with_for_update={"nowait": True}
+    )
+    if receipt is not None and any(
+        getattr(receipt, key) != value for key, value in receipt_values.items()
+    ):
+        raise ValueError("Existing replay import receipt differs from the source")
     row = (
         await db.execute(
             select(ReplaySession)
@@ -66,10 +108,16 @@ async def stage_replay_import(db, plan):
                     getattr(existing, key) != value for key, value in expected.items()
                 ):
                     raise ValueError("Existing replay history differs from the import")
+        await _record_receipt(db, receipt, receipt_values)
         return False
+    if receipt is not None:
+        raise ValueError(
+            "Imported replay session was discarded; refusing to recreate it"
+        )
     db.add(ReplaySession(**values))
     await db.flush()
     for model, group, _ in groups:
         db.add_all(model(**values) for values in plan[group])
         await db.flush()
+    await _record_receipt(db, receipt, receipt_values)
     return True

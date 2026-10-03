@@ -2705,3 +2705,16 @@ CREATE TABLE IF NOT EXISTS jp_simulation_sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_jp_simulation_scope
     ON jp_simulation_sessions (tenant_id, user_id, mode);
+
+-- One-time replay import provenance survives the original session DELETE/CASCADE.
+-- No foreign key to a disposable replay session and no ordinary account state.
+CREATE TABLE IF NOT EXISTS replay_import_receipts (
+    session_id UUID PRIMARY KEY,
+    tenant_id VARCHAR(64) NOT NULL,
+    user_id INTEGER NOT NULL,
+    market VARCHAR(16) NOT NULL,
+    data_version VARCHAR(96) NOT NULL,
+    source_format VARCHAR(64) NOT NULL,
+    source_sha256 VARCHAR(64) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

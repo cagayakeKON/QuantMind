@@ -6,6 +6,7 @@ from uuid import UUID
 from sqlalchemy import text
 
 from backend.services.simulation.models.replay import ReplaySession
+from backend.services.simulation.models.replay_import import ReplayImportReceipt
 from backend.services.simulation.jp.replay_migration import source_digest
 from backend.services.simulation.replay.cash_rules import (
     open_registered_replay_cash_rules,
@@ -54,9 +55,22 @@ async def legacy_history_exists(db, *, tenant_id, user_ids):
             or not isinstance(state.get("daily"), list)
         ):
             return True
-        target = await db.get(ReplaySession, UUID(source["session_id"]))
-        if target is None:
+        identity = UUID(source["session_id"])
+        receipt = await db.get(ReplayImportReceipt, identity)
+        if receipt is None or (
+            receipt.tenant_id != source["tenant_id"]
+            or receipt.user_id != int(source["user_id"])
+            or receipt.market != "JP"
+            or receipt.data_version != source["data_version"]
+            or receipt.source_format != "jp_simulation_sessions_v1"
+            or receipt.source_sha256 != source_digest(source)
+        ):
             return True
+        target = await db.get(ReplaySession, identity)
+        if target is None:
+            # The retained source and durable receipt still prove migration.
+            # Discarding a replay follows its original independent lifecycle.
+            continue
         marker = (target.signal_progress or {}).get("legacy_import")
         cursor = state.get("cursor")
         try:
