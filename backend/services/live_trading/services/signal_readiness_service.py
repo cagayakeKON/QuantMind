@@ -62,14 +62,28 @@ class SignalReadinessService:
         tenant_id: str,
         user_id: str,
         mode: str,
+        execution_context=None,
     ) -> dict[str, Any]:
         normalized_mode = str(mode or "REAL").strip().upper()
         tenant = (tenant_id or "").strip() or "default"
         uid = str(user_id or "").strip()
 
+        dated_kwargs = {}
+        if execution_context is not None:
+            from .hosted_execution_context import validate_hosted_inputs
+
+            inputs = validate_hosted_inputs(
+                execution_context,
+                mode=normalized_mode,
+                execution_config=None,
+                live_trade_config=None,
+            )
+            dated_kwargs = {"market": inputs.market, "trade_date": inputs.trade_date}
+
         hosted_status = await manual_execution_service.get_default_model_hosted_status(
             tenant_id=tenant,
             user_id=uid,
+            **dated_kwargs,
         )
         result = {
             "available": bool(hosted_status.get("available")),

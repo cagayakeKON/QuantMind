@@ -373,10 +373,23 @@ async def run_trading_readiness_precheck(
     user_id: str,
     tenant_id: str,
     market: str = "CN",
+    execution_context=None,
 ) -> dict[str, Any]:
     normalized_mode = str(mode or "REAL").strip().upper()
     if normalized_mode not in {"REAL", "SHADOW", "SIMULATION"}:
         raise ValueError(f"unsupported trading mode: {mode}")
+
+    dated_inputs = None
+    if execution_context is not None:
+        from backend.services.live_trading.services.hosted_readiness_inputs import (
+            parse_hosted_readiness_inputs,
+        )
+
+        dated_inputs = parse_hosted_readiness_inputs(
+            execution_context,
+            mode=normalized_mode,
+            market=market,
+        )
 
     if normalized_mode == "SIMULATION":
         # 模拟盘精简自检：只保留决定能否启动/自动成交的 5 项。
@@ -424,11 +437,19 @@ async def run_trading_readiness_precheck(
             default_model = await model_registry_service.get_default_model(
                 tenant_id=tenant_id,
                 user_id=user_id,
+                **(
+                    {"market": dated_inputs.market}
+                    if dated_inputs is not None else {}
+                ),
             )
             if not default_model:
                 try:
                     candidates = await model_registry_service.list_models(
-                        tenant_id=tenant_id, user_id=user_id, include_archived=False
+                        tenant_id=tenant_id, user_id=user_id, include_archived=False,
+                        **(
+                            {"market": dated_inputs.market}
+                            if dated_inputs is not None else {}
+                        ),
                     )
                     avail = [
                         m
@@ -506,16 +527,26 @@ async def run_trading_readiness_precheck(
                 check_stream_series_freshness,
             )
 
-            res = await asyncio.to_thread(
-                check_stream_series_freshness,
-                redis_client=redis_client,
-                allow_quantdb_fallback=False,
-                market=market,
-            )
-            is_trading_hours = _is_cn_trading_hours()
+            if dated_inputs is not None:
+                from backend.services.live_trading.services.hosted_readiness_inputs import (
+                    check_hosted_dated_quotes,
+                )
+
+                res = await check_hosted_dated_quotes(dated_inputs)
+            else:
+                res = await asyncio.to_thread(
+                    check_stream_series_freshness,
+                    redis_client=redis_client,
+                    allow_quantdb_fallback=False,
+                    market=market,
+                )
+            is_trading_hours = _is_cn_trading_hours() if dated_inputs is None else False
             if res.get("ok"):
                 quote_ok = True
                 quote_detail = str(res.get("message") or "远程行情新鲜")
+            elif dated_inputs is not None:
+                quote_ok = False
+                quote_detail = f"[阻断] {res.get('message') or '日期开盘行情不可用'}"
             elif is_trading_hours:
                 quote_ok = False
                 quote_detail = (
@@ -537,15 +568,15 @@ async def run_trading_readiness_precheck(
                 )
             )
         except Exception as exc:
-            is_trading_hours = _is_cn_trading_hours()
+            is_trading_hours = _is_cn_trading_hours() if dated_inputs is None else False
             checks.append(
                 _build_check(
                     "stream_series_freshness",
                     "行情就绪",
-                    not is_trading_hours,
+                    not is_trading_hours and dated_inputs is None,
                     (
                         f"[阻断] quote_probe_error={exc}"
-                        if is_trading_hours
+                        if is_trading_hours or dated_inputs is not None
                         else f"[WARNING] quote_probe_error={exc}"
                     ),
                 )
@@ -559,6 +590,10 @@ async def run_trading_readiness_precheck(
                 tenant_id=tenant_id,
                 user_id=user_id,
                 mode=normalized_mode,
+                **(
+                    {"execution_context": dated_inputs}
+                    if dated_inputs is not None else {}
+                ),
             )
         except Exception as exc:
             signal_readiness = {
