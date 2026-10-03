@@ -24,6 +24,7 @@ class LocalMarketProvider:
     hosted_schedule_factory: str | None = None
     simulation_cycle_input_preparer: str | None = None
     simulation_account_input_adapter: str | None = None
+    fundamental_snapshot_reader_factory: str | None = None
 
     def open(self):
         cls = getattr(importlib.import_module(self.module), self.hub_class)
@@ -49,6 +50,7 @@ LOCAL_MARKET_PROVIDERS = {
         hosted_schedule_factory="backend.services.simulation.jp.schedule.open_schedule_context",
         simulation_cycle_input_preparer="backend.services.simulation.jp.cycle_data.prepare_cycle_inputs",
         simulation_account_input_adapter="backend.services.simulation.jp.account_data.open_account_input_adapter",
+        fundamental_snapshot_reader_factory="backend.services.simulation.jp.feature_snapshot.create_reader",
     ),
 }
 

@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from backend.services.trade_shared.deps import AuthContext, get_auth_context
 from backend.services.live_trading.services.manual_execution_service import manual_execution_service
+from backend.services.live_trading.services.manual_execution_context import DatedManualInputs
 
 router = APIRouter(prefix="/manual-executions", tags=["Manual Executions"])
 
@@ -18,6 +19,7 @@ class ManualExecutionCreateRequest(BaseModel):
     trading_mode: str = Field("SIMULATION", description="REAL / SHADOW / SIMULATION，手动任务实盘与模拟盘均可执行")
     preview_hash: str | None = Field(None, description="调仓预案摘要哈希")
     note: str | None = Field(None, description="备注")
+    execution_context: DatedManualInputs | None = None
 
 
 class ManualExecutionPreviewRequest(BaseModel):
@@ -26,6 +28,7 @@ class ManualExecutionPreviewRequest(BaseModel):
     strategy_id: str = Field(..., description="策略 ID")
     trading_mode: str = Field("SIMULATION", description="REAL / SHADOW / SIMULATION，手动任务实盘与模拟盘均可执行")
     note: str | None = Field(None, description="备注")
+    execution_context: DatedManualInputs | None = None
 
 
 @router.post("/preview")
@@ -41,6 +44,7 @@ async def preview_manual_execution(
         strategy_id=payload.strategy_id,
         trading_mode=payload.trading_mode,
         note=payload.note,
+        **({"execution_context": payload.execution_context} if payload.execution_context is not None else {}),
     )
 
 
@@ -58,6 +62,7 @@ async def create_manual_execution(
         trading_mode=payload.trading_mode,
         preview_hash=payload.preview_hash,
         note=payload.note,
+        **({"execution_context": payload.execution_context} if payload.execution_context is not None else {}),
     )
     return {"status": "success", **result}
 
