@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 import os
 import time
 from typing import Any, Dict, List
@@ -10,6 +11,7 @@ from backend.shared.stock_utils import StockCodeUtil
 from backend.services.trade.sandbox.registered_account_reader import (
     read_sandbox_simulation_account,
     registered_sandbox_market,
+    validate_sandbox_execution_inputs,
 )
 
 
@@ -27,6 +29,7 @@ class SandboxContext:
         run_id: str,
         exec_config: dict,
         live_trade_config: dict | None = None,
+        *, execution_context: dict | None = None,
     ):
         self.tenant_id = tenant_id
         self.user_id = user_id
@@ -34,6 +37,15 @@ class SandboxContext:
         self.run_id = run_id
         self.exec_config = exec_config
         self.live_trade_config = live_trade_config or {}
+        self.execution_context = None
+        if execution_context is not None:
+            inputs = validate_sandbox_execution_inputs(
+                execution_context, mode="SIMULATION", execution_config=exec_config,
+                live_trade_config=live_trade_config,
+            )
+            self.execution_context = inputs.model_dump(mode="json")
+            self.exec_config = {**(exec_config or {}), "market": inputs.market}
+            self.live_trade_config = {**(live_trade_config or {}), "market": inputs.market}
         self.signals_queue: list[dict[str, Any]] = []
         self._current_time: float = time.time()
         self._redis: redis.Redis | None = None
@@ -111,6 +123,8 @@ class SandboxContext:
             "timestamp": self._current_time,
             "data": {"symbol": symbol, "quantity": quantity, "price": price, "side": side, "order_type": order_type},
         }
+        if self.execution_context is not None:
+            signal["execution_context"] = deepcopy(self.execution_context)
         self.signals_queue.append(signal)
 
     def order(self, symbol: str, quantity: int, price: float, side: str, order_type: str = "limit"):
@@ -131,6 +145,8 @@ class SandboxContext:
             "timestamp": self._current_time,
             "data": {"symbol": symbol, "target_percent": target_percent},
         }
+        if self.execution_context is not None:
+            signal["execution_context"] = deepcopy(self.execution_context)
         self.signals_queue.append(signal)
 
     def get_position(self, symbol: str) -> dict[str, Any]:
@@ -186,5 +202,9 @@ def create_sandbox_context(
     run_id: str,
     exec_config: dict,
     live_trade_config: dict | None = None,
+    *, execution_context: dict | None = None,
 ) -> SandboxContext:
-    return SandboxContext(tenant_id, user_id, strategy_id, run_id, exec_config, live_trade_config)
+    return SandboxContext(
+        tenant_id, user_id, strategy_id, run_id, exec_config, live_trade_config,
+        **({"execution_context": execution_context} if execution_context is not None else {}),
+    )

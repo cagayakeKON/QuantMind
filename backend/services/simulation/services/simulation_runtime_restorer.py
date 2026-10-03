@@ -119,6 +119,14 @@ class SimulationRuntimeRestorer:
             if isinstance(active_data.get("live_trade_config"), dict)
             else {}
         )
+        dated_kwargs = {}
+        if active_data.get("execution_context") is not None:
+            from backend.services.trade.sandbox.registered_account_reader import validate_sandbox_execution_inputs
+
+            dated_kwargs["execution_context"] = validate_sandbox_execution_inputs(
+                active_data["execution_context"], mode=active_data.get("mode"),
+                execution_config=exec_config, live_trade_config=live_trade_config,
+            ).model_dump(mode="json")
         sandbox_run_id = sandbox_manager.submit_strategy(
             tenant_id=tenant_id,
             user_id=user_id,
@@ -126,6 +134,7 @@ class SimulationRuntimeRestorer:
             code_str=code_str,
             exec_config=exec_config,
             live_trade_config=live_trade_config,
+            **dated_kwargs,
         )
         active_data["sandbox_restored_run_id"] = sandbox_run_id
         # 保留原始 started_at 锚点，不覆盖，避免 5 日等调仓节奏漂移

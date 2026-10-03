@@ -125,7 +125,11 @@ def sandbox_worker_main(task_queue: Queue):
             code_str = task.get("code_str", "")
 
             # 构建沙箱上下文 SDK
-            ctx = create_sandbox_context(tenant_id, user_id, strategy_id, run_id, exec_config, live_trade_config)
+            ctx = create_sandbox_context(
+                tenant_id, user_id, strategy_id, run_id, exec_config, live_trade_config,
+                **({"execution_context": task["execution_context"]}
+                   if task.get("execution_context") is not None else {}),
+            )
 
             print(f"[Sandbox Worker {os.getpid()}] Starting strategy {strategy_id} for user {user_id}")
 

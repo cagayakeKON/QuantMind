@@ -138,7 +138,7 @@ class SandboxSignalConsumer:
             logger.info("[Sandbox Log %s] %s", strategy_id, sig.get("message"))
             return
 
-        if await self._is_observe_only(tenant_id, user_id):
+        if await self._is_observe_only(tenant_id, user_id, signal=sig):
             logger.info(
                 "[SandboxSignalConsumer] 观察态跳过下单信号: tenant=%s user=%s strategy=%s type=%s",
                 tenant_id,
@@ -148,14 +148,23 @@ class SandboxSignalConsumer:
             )
             return
 
+        dated_kwargs = {}
+        if sig.get("execution_context") is not None and sig_type in {"order", "order_target_percent"}:
+            from backend.services.trade.services.sandbox_execution_inputs import prepare_sandbox_order_inputs
+
+            raw = _read_active_strategy_raw(tenant_id, user_id)
+            active = json.loads(raw) if raw else None
+            context = await prepare_sandbox_order_inputs(sig, active, redis_client)
+            dated_kwargs["execution_context"] = context
+
         if sig_type == "order_target_percent":
-            await self._handle_order_target_percent(sig, tenant_id, user_id, strategy_id)
+            await self._handle_order_target_percent(sig, tenant_id, user_id, strategy_id, **dated_kwargs)
         elif sig_type == "order":
-            await self._handle_direct_order(sig, tenant_id, user_id, strategy_id)
+            await self._handle_direct_order(sig, tenant_id, user_id, strategy_id, **dated_kwargs)
         else:
             logger.debug("[SandboxSignalConsumer] 未知信号类型: %s", sig_type)
 
-    async def _is_observe_only(self, tenant_id: str, user_id: str) -> bool:
+    async def _is_observe_only(self, tenant_id: str, user_id: str, *, signal=None) -> bool:
         if not redis_client.client:
             return False
         try:
@@ -167,6 +176,13 @@ class SandboxSignalConsumer:
             data = json.loads(raw)
             if not isinstance(data, dict):
                 return False
+            if (
+                data.get("execution_context") is not None
+                and signal is not None
+                and signal.get("execution_context") is None
+            ):
+                logger.warning("Dated sandbox signal has no execution inputs; skipping")
+                return True
             permission = str(data.get("trading_permission") or "").strip().lower()
             if permission == "observe_only":
                 return True
@@ -180,7 +196,8 @@ class SandboxSignalConsumer:
             return False
 
     async def _handle_order_target_percent(
-        self, sig: dict[str, Any], tenant_id: str, user_id: str, strategy_id: int | None
+        self, sig: dict[str, Any], tenant_id: str, user_id: str, strategy_id: int | None,
+        *, execution_context=None,
     ):
         """
         处理 order_target_percent 信号：
@@ -204,7 +221,10 @@ class SandboxSignalConsumer:
             return
 
         # 获取账户状态
-        account = await self._account_manager.get_account(user_id_int, tenant_id=tenant_id)
+        account = (
+            await self._account_manager.get_account(user_id_int, tenant_id=tenant_id)
+            if execution_context is None else execution_context.account
+        )
         if not account:
             logger.warning("[SandboxSignalConsumer] 账户不存在: tenant=%s user=%s", tenant_id, user_id)
             return
@@ -216,27 +236,39 @@ class SandboxSignalConsumer:
 
         # 获取当前持仓（先于价格查询，供回退使用）
         positions = account.get("positions", {})
+        if execution_context is not None:
+            symbol = execution_context.symbol
         current_pos = positions.get(symbol.upper())
         current_volume = int(float(current_pos.get("volume", 0))) if current_pos else 0
 
         # 获取当前价格（Redis 实时优先，HTTP 次之；取不到直接跳过，
         # 禁止用持仓成本价回退成交，避免虚假价格污染账户）
-        current_price = await self._get_current_price(symbol)
+        current_price = (
+            await self._get_current_price(symbol)
+            if execution_context is None else execution_context.price
+        )
         if current_price <= 0:
             logger.warning("[SandboxSignalConsumer] 无法获取 %s 的价格，跳过下单", symbol)
             return
 
-        # 计算目标持仓数量（A 股 100 股整数倍）
+        # 保留原目标仓位公式，日期输入提供对应证券的交易单位。
         target_value = total_asset * target_percent
-        target_volume = int(target_value / current_price / 100) * 100
+        trading_unit = 100 if execution_context is None else execution_context.trading_unit
+        target_volume = int(target_value / current_price / trading_unit) * trading_unit
 
         # 计算需要交易的量
         delta = target_volume - current_volume
-        if abs(delta) < 100:
-            logger.debug(
-                "[SandboxSignalConsumer] %s 调仓量不足 100 股 (delta=%d)，跳过",
-                symbol, delta,
-            )
+        if abs(delta) < trading_unit:
+            if execution_context is None:
+                logger.debug(
+                    "[SandboxSignalConsumer] %s 调仓量不足 100 股 (delta=%d)，跳过",
+                    symbol, delta,
+                )
+            else:
+                logger.debug(
+                    "[SandboxSignalConsumer] %s 调仓量不足 %d 股 (delta=%d)，跳过",
+                    symbol, trading_unit, delta,
+                )
             return
 
         # 确定买卖方向
@@ -262,10 +294,12 @@ class SandboxSignalConsumer:
             quantity=quantity,
             price=current_price,
             run_id=run_id,
+            **({"execution_context": execution_context} if execution_context is not None else {}),
         )
 
     async def _handle_direct_order(
-        self, sig: dict[str, Any], tenant_id: str, user_id: str, strategy_id: int | None
+        self, sig: dict[str, Any], tenant_id: str, user_id: str, strategy_id: int | None,
+        *, execution_context=None,
     ):
         """处理直接下单信号"""
         data = sig.get("data", {})
@@ -284,6 +318,11 @@ class SandboxSignalConsumer:
             return
 
         side = OrderSide.BUY if side_str.upper() == "BUY" else OrderSide.SELL
+        if execution_context is not None:
+            if str(data.get("order_type") or "").lower() != "market":
+                raise NotImplementedError("Dated sandbox execution requires explicit market orders")
+            symbol = execution_context.symbol
+            price = execution_context.price
 
         await self._create_and_execute_order(
             tenant_id=tenant_id,
@@ -294,6 +333,7 @@ class SandboxSignalConsumer:
             quantity=quantity,
             price=price if price > 0 else await self._get_current_price(symbol),
             run_id=run_id,
+            **({"execution_context": execution_context} if execution_context is not None else {}),
         )
 
     async def _create_and_execute_order(
@@ -306,11 +346,16 @@ class SandboxSignalConsumer:
         quantity: int,
         price: float,
         run_id: str,
+        *, execution_context=None,
     ):
         """创建订单并执行"""
         async with get_session() as db:
             order_service = SimOrderService(db)
-            exec_engine = SimulationExecutionEngine(db, self._account_manager)
+            exec_engine = SimulationExecutionEngine(
+                db,
+                self._account_manager if execution_context is None else execution_context.accounts(db, redis_client),
+                **({"execution_context": execution_context.execution} if execution_context is not None else {}),
+            )
 
             # 创建订单
             order_create = SimOrderCreate(
@@ -328,11 +373,21 @@ class SandboxSignalConsumer:
             # 提交订单
             from backend.services.simulation.models.order import OrderStatus
             order.status = OrderStatus.SUBMITTED
-            order.submitted_at = datetime.now()
+            if execution_context is None:
+                order.submitted_at = datetime.now()
+            else:
+                from backend.shared.utc_datetime import utc_now
+
+                order.submitted_at = utc_now()
             await db.commit()
 
             # 执行订单
-            result = await exec_engine.execute_order(order)
+            result = (
+                await exec_engine.execute_order(order)
+                if execution_context is None else await exec_engine.execute_from_bar(
+                    order, execution_context.bar, execution_context.execution.market,
+                )
+            )
             if result.success:
                 trade = await exec_engine.apply_filled(order, result)
                 logger.info(

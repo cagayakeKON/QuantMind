@@ -26,6 +26,25 @@ def registered_sandbox_market(execution_config, live_trade_config):
     return market if provider and provider.simulation_account_input_adapter else None
 
 
+def validate_sandbox_execution_inputs(
+    inputs, *, mode, execution_config, live_trade_config
+):
+    from backend.services.live_trading.services.hosted_execution_context import (
+        validate_hosted_inputs,
+    )
+
+    inputs = validate_hosted_inputs(
+        inputs,
+        mode=mode,
+        execution_config=execution_config,
+        live_trade_config=live_trade_config,
+    )
+    provider = LOCAL_MARKET_PROVIDERS.get(inputs.market)
+    if not provider or not provider.simulation_account_input_adapter:
+        raise ValueError("Sandbox dated account inputs are not registered")
+    return inputs
+
+
 def read_sandbox_simulation_account(*, market, tenant_id, user_id):
     from backend.services.trade_shared.simulation_manager import canonical_sim_uid
     from backend.shared.auth import get_internal_call_secret
