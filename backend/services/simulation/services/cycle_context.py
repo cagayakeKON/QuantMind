@@ -37,6 +37,7 @@ class SimulationCycleContext:
     trade_date: date
     signal_input: object
     cash_rules: object
+    hosted_signals: object | None = None
 
     def __post_init__(self):
         if (
@@ -55,6 +56,8 @@ class SimulationCycleContext:
         ):
             raise ValueError("Cycle signals require the exact previous trading session")
         self.cash_rules.validate_settings(self.params)
+        if self.hosted_signals is not None:
+            self.hosted_signals.require_context(self)
 
     @property
     def market(self):
@@ -82,10 +85,12 @@ class SimulationCycleContext:
 
     @property
     def signal_run_id(self):
+        if self.hosted_signals is not None:
+            return self.hosted_signals.run_id
         return f"pred_parquet_{self.model_id}"
 
     def provenance(self):
-        return {
+        result = {
             "market": self.market.value,
             "data_version": self.cash_rules.data_version,
             "model_id": self.model_id,
@@ -97,8 +102,17 @@ class SimulationCycleContext:
             "price_source": "local_open",
             "execution_mode": "daily_open",
         }
+        if self.hosted_signals is not None:
+            result.update(
+                signal_run_id=self.hosted_signals.run_id,
+                signal_source="engine_signal_scores",
+                signal_snapshot_sha256=self.hosted_signals.snapshot_sha256,
+            )
+        return result
 
     def signals(self):
+        if self.hosted_signals is not None:
+            return self.hosted_signals.signals()
         rows = []
         for item in self.signal_input.frame.itertuples(index=False):
             score = float(item.score)

@@ -179,12 +179,14 @@ async def run_simulation_cycle_for_active(
     strategy_id: str,
     live_trade_config: dict[str, Any] | None = None,
     run_id: str | None = None,
+    execution_context=None,
+    scheduled_trade_date: date | None = None,
 ) -> dict[str, Any]:
     """托管模拟盘唯一执行入口：RebalanceCalculator + ashare_matcher。"""
     from backend.services.simulation.engine import simulation_engine
 
     cfg = _normalize_live_trade_config(live_trade_config)
-    if registered_schedule_provider(cfg.get("market")):
+    if execution_context is None and registered_schedule_provider(cfg.get("market")):
         # Calendar eligibility does not enable the ordinary Lua cash path.
         # The dated cash adapter must join this engine before orders can run.
         return {
@@ -198,7 +200,25 @@ async def run_simulation_cycle_for_active(
     params_override: dict[str, Any] = {}
     if cfg.get("pool_id"):
         params_override["pool_id"] = cfg["pool_id"]
-    signal_run_id, gate_error = await _resolve_hosted_signal_run_id(tenant_id, user_id)
+    cycle_context = None
+    if execution_context is not None:
+        from .hosted_cycle_context import prepare_hosted_cycle_context
+
+        try:
+            cycle_context = await prepare_hosted_cycle_context(
+                execution_context, tenant_id=tenant_id, user_id=user_id,
+                strategy_id=strategy_id, config=cfg,
+                scheduled_trade_date=scheduled_trade_date,
+            )
+        except Exception as error:
+            return {
+                "task_id": run_id, "status": "skipped",
+                "error": f"registered_market_dated_execution_unavailable: {error}"[:300],
+                "signal_count": 0, "order_count": 0, "filled_count": 0,
+            }
+        signal_run_id, gate_error = cycle_context.signal_run_id, None
+    else:
+        signal_run_id, gate_error = await _resolve_hosted_signal_run_id(tenant_id, user_id)
     if not signal_run_id:
         # 拿不到可用批次时按严格模式不下单；strict=0 可退回旧行为（仅告警）。
         strict = os.getenv(
@@ -236,6 +256,7 @@ async def run_simulation_cycle_for_active(
         pool_id=cfg.get("pool_id"),
         signal_run_id=signal_run_id,
         max_orders=int(cfg.get("max_orders_per_cycle") or 0) or None,
+        **({"cycle_context": cycle_context} if cycle_context is not None else {}),
     )
     return report_to_hosted_result(report)
 
@@ -738,6 +759,10 @@ class SimulationHostedScheduler:
                 strategy_id=strategy_id,
                 live_trade_config=live_trade_config,
                 run_id=task_id,
+                **({
+                    "execution_context": active_data["execution_context"],
+                    "scheduled_trade_date": date.fromisoformat(decision.trade_date),
+                } if active_data.get("execution_context") is not None else {}),
             )
             if result.get("status") == "skipped":
                 # 没有可用信号批次：本轮不建仓，作业标记为 skipped 而非失败。
