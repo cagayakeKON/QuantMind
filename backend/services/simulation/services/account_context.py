@@ -146,7 +146,7 @@ async def prepare_registered_account_reset(
 
 
 async def read_registered_simulation_account(
-    market, *, redis, tenant_id, raw_user_id, user_id
+    market, *, redis, tenant_id, raw_user_id, user_id, execution_inputs=None
 ):
     adapter = registered_account_input_adapter(market)
     if adapter is None:
@@ -195,13 +195,28 @@ async def read_registered_simulation_account(
             commission_rate=config.get("commission_rate"),
             slippage_bps=config.get("slippage_bps"),
         )
+        saved_date = inputs.trade_date
+        if execution_inputs is not None:
+            inputs = DatedAccountInputs.model_validate(execution_inputs)
         context = await asyncio.to_thread(adapter.prepare_inputs, inputs.model_dump())
         if (
             not isinstance(context, SimulationAccountContext)
             or context.market != market
+            or (
+                execution_inputs is not None and context.trade_date != inputs.trade_date
+            )
         ):
             raise RegisteredAccountUnavailable("Wrong registered account read context")
         # Use this single PG checkpoint for date, publication and cash. A second
         # account read could observe a newer day after opening its publication.
-        account = context.rules.restore_checkpoint(checkpoint, context.trade_date)
+        account = context.rules.restore_checkpoint(
+            checkpoint,
+            saved_date if execution_inputs is not None else context.trade_date,
+        )
+        if execution_inputs is not None:
+            # The same rules as execution project the committed checkpoint to the
+            # requested day. This read does not advance the persisted account.
+            prepared = context.rules.prepare_day(account, context.trade_date)
+            context.rules.corporate_action_inputs(account, prepared, context.trade_date)
+            account = prepared
         return True, context.serialize(account, checkpoint)

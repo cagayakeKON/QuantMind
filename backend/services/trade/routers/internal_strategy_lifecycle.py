@@ -1,3 +1,4 @@
+import json
 import logging
 import time
 from typing import Any
@@ -66,10 +67,28 @@ async def strategy_heartbeat(
 async def sync_account_state(
     x_user_id: str = Header(...), x_tenant_id: str | None = Header(None), db=Depends(get_db),
     market: str | None = None, trading_mode: str | None = None,
+    execution_context: str | None = None,
 ):
     """
     供策略 Pod 启动时初始化：获取真实的资金和持仓
     """
+    inputs = None
+    if execution_context is not None:
+        from backend.services.trade.sandbox.registered_account_reader import (
+            validate_sandbox_execution_inputs,
+        )
+
+        try:
+            if market is None:
+                raise ValueError("Dated account reads require an explicit market")
+            inputs = validate_sandbox_execution_inputs(
+                json.loads(execution_context),
+                mode=str(trading_mode or "").upper(),
+                execution_config={"market": market},
+                live_trade_config=None,
+            )
+        except (ValueError, NotImplementedError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if market is not None:
         from backend.services.simulation.services.account_context import (
             read_registered_simulation_account,
@@ -91,6 +110,8 @@ async def sync_account_state(
                 registered, account = await read_registered_simulation_account(
                     selected, redis=None, tenant_id=tenant,
                     raw_user_id=x_user_id, user_id=uid,
+                    **({"execution_inputs": inputs.model_dump()}
+                       if inputs is not None else {}),
                 )
             except (ValueError, NotImplementedError) as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc

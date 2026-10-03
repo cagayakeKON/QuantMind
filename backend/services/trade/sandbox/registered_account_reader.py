@@ -5,6 +5,8 @@ cash rules. No worker reconstructs cash provenance from a raw Redis snapshot.
 """
 
 from datetime import date
+from decimal import Decimal
+import json
 import math
 import os
 
@@ -45,7 +47,9 @@ def validate_sandbox_execution_inputs(
     return inputs
 
 
-def read_sandbox_simulation_account(*, market, tenant_id, user_id):
+def read_sandbox_simulation_account(
+    *, market, tenant_id, user_id, execution_context=None
+):
     from backend.services.trade_shared.simulation_manager import canonical_sim_uid
     from backend.shared.auth import get_internal_call_secret
 
@@ -55,9 +59,19 @@ def read_sandbox_simulation_account(*, market, tenant_id, user_id):
             os.getenv("TRADE_SERVICE_URL", "http://127.0.0.1:8002").rstrip("/")
             + "/api/v1/internal/strategy"
         )
+    params = {"market": market, "trading_mode": "SIMULATION"}
+    requested = None
+    if execution_context is not None:
+        requested = validate_sandbox_execution_inputs(
+            execution_context,
+            mode="SIMULATION",
+            execution_config={"market": market},
+            live_trade_config=None,
+        ).model_dump(mode="json")
+        params["execution_context"] = json.dumps(requested)
     response = httpx.get(
         base_url.rstrip("/") + "/sync-account",
-        params={"market": market, "trading_mode": "SIMULATION"},
+        params=params,
         headers={
             "X-Internal-Call": get_internal_call_secret(),
             "X-Tenant-Id": tenant_id,
@@ -84,6 +98,15 @@ def read_sandbox_simulation_account(*, market, tenant_id, user_id):
     ):
         raise ValueError("Registered sandbox account has no dated provenance")
     date.fromisoformat(inputs["trade_date"])
+    if requested is not None:
+        if any(
+            inputs.get(key) != requested[key]
+            for key in ("market", "data_version", "trade_date")
+        ) or any(
+            Decimal(str(inputs.get(key))) != Decimal(str(requested[key]))
+            for key in ("commission_rate", "slippage_bps")
+        ):
+            raise ValueError("Registered sandbox account differs from dated inputs")
     for field in ("cash", "total_asset", "market_value"):
         if not math.isfinite(float(account[field])):
             raise ValueError("Registered sandbox account contains non-finite values")

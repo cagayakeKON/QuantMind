@@ -51,6 +51,7 @@ class SandboxContext:
         self._redis: redis.Redis | None = None
         self._account_cache: dict[str, Any] = {}
         self._account_cache_market: str | None = None
+        self._account_cache_inputs: dict | None = None
         self._last_cache_time: float = 0
 
     def _get_redis(self) -> redis.Redis | None:
@@ -70,24 +71,34 @@ class SandboxContext:
     def _load_account_from_redis(self) -> dict[str, Any]:
         """从 Redis 加载账户状态，带 1 秒缓存"""
         now = time.time()
+        if self.execution_context is not None:
+            validate_sandbox_execution_inputs(
+                self.execution_context, mode="SIMULATION", execution_config=self.exec_config,
+                live_trade_config=self.live_trade_config,
+            )
         market = registered_sandbox_market(self.exec_config, self.live_trade_config)
         if self._account_cache_market is not None and market != self._account_cache_market:
             self._account_cache = {}
             self._last_cache_time = 0
             self._account_cache_market = None
+            self._account_cache_inputs = None
         if (
             now - self._last_cache_time < 1.0
             and self._account_cache
             and market == self._account_cache_market
+            and self.execution_context == self._account_cache_inputs
         ):
             return self._account_cache
 
         if market is not None:
             account = read_sandbox_simulation_account(
                 market=market, tenant_id=self.tenant_id, user_id=self.user_id,
+                **({"execution_context": self.execution_context}
+                   if self.execution_context is not None else {}),
             )
             self._account_cache = account
             self._account_cache_market = market
+            self._account_cache_inputs = deepcopy(self.execution_context)
             self._last_cache_time = now
             return account
 
