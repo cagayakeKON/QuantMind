@@ -6,8 +6,9 @@ import { useFundData } from '../../hooks/useFundData';
 import { FundData } from '../../services/userService';
 import { useAppSelector } from '../../store';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
+import { getMarketConfig } from '../../config/marketConfig';
 
-const MARKET_LABELS: Record<string, string> = { CN: 'A股', JP: '日本市场', HK: '港股', US: '美股', CRYPTO: '区块链' };
+const MARKET_LABELS: Record<string, string> = { CN: 'A股', HK: '港股', US: '美股', CRYPTO: '区块链' };
 
 const formatMoney = (value: number): string =>
   value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -24,10 +25,11 @@ export const FundOverviewCard: React.FC = () => {
     refreshInterval: 5000 // 实时数据刷新，间隔缩短
   });
 
-  const marketLabel = MARKET_LABELS[currentMarket] || '';
+  const marketConfig = getMarketConfig(currentMarket);
+  const marketLabel = MARKET_LABELS[currentMarket] || (marketConfig.stockCodePattern ? marketConfig.label : '');
   const modeLabel = tradingMode === 'real' ? '实盘' : '模拟';
-  const cardTitle = `资金概览 (${marketLabel}/${modeLabel})${currentMarket === 'JP' ? ' · JPY' : ''}`;
-  const currency = currentMarket === 'JP' ? 'JPY ' : '￥';
+  const cardTitle = `资金概览 (${marketLabel}/${modeLabel})${marketConfig.simulationExecution === 'dated_daily' ? ' · 用户合计（CNY）' : ''}`;
+  const currency = '￥';
 
   if (loading && !data) {
     return <FundOverviewSkeleton />;

@@ -37,9 +37,6 @@ export interface MarketConfig {
   /** Optional request context for markets joining the common backtest pages. */
   backtest?: { market: AppMarket; commission: number; requireModelMarket: boolean; dealPrice?: 'open' | 'close'; dealPrices?: ('open' | 'close')[] };
   analysis?: { benchmarks: Array<{ id: string; name: string }> };
-  tradeRecordsUi?: 'standard' | 'jp_cash';
-  portfolioChartsUi?: 'standard' | 'jp_cash';
-  strategyMonitorUi?: 'standard' | 'jp_cash';
 }
 
 export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
@@ -59,9 +56,6 @@ export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
     stockTerminal: { market: 'JP', adjustments: ['none', 'qfq'], requestTimeoutMs: 120000 },
     backtest: { market: 'JP', commission: 0, requireModelMarket: true, dealPrice: 'open', dealPrices: ['open'] },
     analysis: { benchmarks: [{ id: 'TOPIX', name: 'TOPIX 价格指数' }] },
-    tradeRecordsUi: 'jp_cash',
-    portfolioChartsUi: 'jp_cash',
-    strategyMonitorUi: 'jp_cash',
   },
   CN: {
     label: 'A股',

@@ -125,12 +125,6 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
     setLastUpdate(null);
   }, [currentMarket, resolvedUserId, resolvedTenantId]);
 
-  useEffect(() => {
-    const refreshJP = () => { if (currentMarket === 'JP') void fetchData({ silent: false }); };
-    window.addEventListener('qm:jp-session-changed', refreshJP);
-    return () => window.removeEventListener('qm:jp-session-changed', refreshJP);
-  }, [currentMarket, fetchData]);
-
   const refresh = useCallback(async () => {
     await fetchData({ silent: true });
   }, [fetchData]);

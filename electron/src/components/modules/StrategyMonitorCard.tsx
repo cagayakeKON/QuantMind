@@ -4,10 +4,6 @@ import { motion } from 'framer-motion';
 import { useStrategies } from '../../hooks/useStrategies';
 import { StrategyMonitorSkeleton } from '../common/CardSkeletons';
 import { formatBackendTime } from '../../utils/format';
-import { useAppSelector } from '../../store';
-import { selectCurrentMarket } from '../../store/slices/uiSlice';
-import { getMarketConfig } from '../../config/marketConfig';
-import { JPModelAccountMonitorCard } from './JPModelAccountMonitorCard';
 
 interface StrategyMonitorCardProps {
   expanded?: boolean;
@@ -283,8 +279,4 @@ const StandardStrategyMonitorCard: React.FC<StrategyMonitorCardProps> = ({
   );
 };
 
-export const StrategyMonitorCard: React.FC<StrategyMonitorCardProps> = (props) => {
-  const market = useAppSelector(selectCurrentMarket);
-  return getMarketConfig(market).strategyMonitorUi === 'jp_cash'
-    ? <JPModelAccountMonitorCard /> : <StandardStrategyMonitorCard {...props} />;
-};
+export const StrategyMonitorCard = StandardStrategyMonitorCard;

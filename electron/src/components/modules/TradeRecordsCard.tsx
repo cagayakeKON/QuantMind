@@ -6,7 +6,7 @@ import { useAppSelector } from '../../store';
 import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { formatBackendTime, parseBackendTimestamp } from '../../utils/format';
 import { getMarketConfig } from '../../config/marketConfig';
-import { JPTradeRecordsCard } from './JPTradeRecordsCard';
+import { formatMarketCompactTime, registeredStockMarket } from '../../utils/marketPresentation';
 
 const MARKET_LABELS: Record<string, string> = { CN: 'A股', HK: '港股', US: '美股', CRYPTO: '区块链' };
 
@@ -131,6 +131,12 @@ const StandardTradeRecordsCard: React.FC = () => {
     return value.toLocaleString('zh-CN');
   };
 
+  const formatRecordTime = (record: (typeof records)[number]) => {
+    const market = registeredStockMarket(record.symbol);
+    const timeZone = market ? getMarketConfig(market).simulationTimeZone : undefined;
+    return timeZone ? formatMarketCompactTime(record.time, timeZone) : formatTime(record.time);
+  };
+
   const formatTimestamp = (timeStr: string | null) => {
     return formatBackendTime(timeStr, { withSeconds: true });
   };
@@ -144,7 +150,7 @@ const StandardTradeRecordsCard: React.FC = () => {
   };
 
   return (
-    <Card title={`实时交易记录 (${MARKET_LABELS[currentMarket] || ''})`} height="100%" background="trade">
+    <Card title={`实时交易记录 (${MARKET_LABELS[currentMarket] || (getMarketConfig(currentMarket).stockCodePattern ? getMarketConfig(currentMarket).label : '')})`} height="100%" background="trade">
       <div className="trade-records-table">
         <div className="trade-records-header">
           <div className="trade-cell time-cell">时间</div>
@@ -158,7 +164,7 @@ const StandardTradeRecordsCard: React.FC = () => {
         {viewRows.rows.map((record, index) => (
           <div key={record.id} className={`trade-records-row ${flashTopId === record.id && index === 0 ? 'new-row' : ''}`}>
             <div className="trade-cell time-cell text-[var(--text-tertiary)]" title={record.time}>
-              {formatTime(record.time)}
+              {formatRecordTime(record)}
             </div>
             <div
               className={`trade-cell action-cell font-bold ${record.type === '买入' ? 'text-[var(--profit-primary)]' : 'text-[var(--loss-primary)]'
@@ -355,8 +361,4 @@ const StandardTradeRecordsCard: React.FC = () => {
   );
 };
 
-export const TradeRecordsCard: React.FC = () => {
-  const market = useAppSelector(selectCurrentMarket);
-  return getMarketConfig(market).tradeRecordsUi === 'jp_cash'
-    ? <JPTradeRecordsCard /> : <StandardTradeRecordsCard />;
-};
+export const TradeRecordsCard = StandardTradeRecordsCard;

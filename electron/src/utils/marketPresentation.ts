@@ -20,3 +20,19 @@ export function formatMarketTimestamp(value: string | null | undefined, timeZone
     ...(includeDate ? { year: 'numeric', month: '2-digit', day: '2-digit' } as const : {}),
   }).format(date);
 }
+
+/** Registered rows use their market date when deciding whether to show MM-DD. */
+export function formatMarketCompactTime(value: string | null | undefined, timeZone: string, now = new Date()): string {
+  const date = parseBackendTimestamp(value);
+  if (!date) return '--';
+  const formatter = new Intl.DateTimeFormat('zh-CN', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+  const parts = (instant: Date) => Object.fromEntries(formatter.formatToParts(instant).map(part => [part.type, part.value]));
+  const saved = parts(date);
+  const current = parts(now);
+  const hhmm = `${saved.hour}:${saved.minute}`;
+  return ['year', 'month', 'day'].every(key => saved[key] === current[key])
+    ? hhmm : `${saved.month}-${saved.day} ${hhmm}`;
+}
