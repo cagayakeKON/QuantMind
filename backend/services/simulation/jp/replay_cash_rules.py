@@ -7,6 +7,7 @@ metadata stays alongside the original account projection in its existing key.
 from copy import deepcopy
 from datetime import date
 from decimal import Decimal
+from fractions import Fraction
 
 from backend.services.simulation.services.ashare_matcher import MatchConfig
 from backend.shared.stock_utils import StockCodeUtil
@@ -205,6 +206,59 @@ class JapanReplayCashRules:
             for fill in self._metadata(account)["state"]["fills"]
             if fill["symbol"] == canonical and fill["trade_date"] == str(day)
         )
+
+    def corporate_action_inputs(self, previous, prepared, day):
+        """Translate covered raw events; bookkeeping stays in the common service."""
+        from backend.services.simulation.services.dated_corporate_actions import (
+            DatedShareAction,
+        )
+
+        before = self._metadata(previous)
+        after = self._metadata(prepared)
+        previous_day = date.fromisoformat(before["prepared_date"])
+        sessions = self.reader.calendar.sessions
+        if (
+            previous["positions"]
+            and previous_day != day
+            and (sessions.index(day) - sessions.index(previous_day) != 1)
+        ):
+            raise RuleDataMissing("Dated holdings require consecutive trading sessions")
+        added = set(after["state"]["applied_actions"]) - set(
+            before["state"]["applied_actions"]
+        )
+        bars, _ = (
+            self.reader.day(day, list(before["state"]["positions"]))
+            if added
+            else ({}, {})
+        )
+        events = []
+        for symbol in before["state"]["positions"]:
+            key = f"{day}:{symbol}"
+            if key not in added:
+                continue
+            raw = bars.get(symbol)
+            if not raw or str(raw.get("ex_rights_type", "")) not in {"1", "2"}:
+                raise RuleDataMissing("Dated share action has no covered raw event")
+            ratio = Fraction(str(raw["adj_factor"])).limit_denominator(100000)
+            multiplier = Decimal(ratio.denominator) / Decimal(ratio.numerator)
+            canonical = StockCodeUtil.to_suffix(symbol, market=self.market)
+            if (
+                round(previous["positions"][canonical]["volume"] * float(multiplier), 6)
+                != prepared["positions"][canonical]["volume"]
+            ):
+                raise RuleDataMissing(
+                    "Original lot precision cannot represent this share action"
+                )
+            events.append(
+                DatedShareAction(
+                    self.market, self.data_version, day, canonical, multiplier
+                )
+            )
+        if len(events) != len(added):
+            raise RuleDataMissing(
+                "Dated share actions differ from the prepared checkpoint"
+            )
+        return events
 
     def apply_fill(self, account, day, symbol, side, matched, order_id):
         updated = deepcopy(account)

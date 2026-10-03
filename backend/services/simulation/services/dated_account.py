@@ -18,6 +18,9 @@ from sqlalchemy import event, select
 from backend.services.simulation.models.account import SimulationAccount
 from backend.services.simulation.models.trade import SimTrade
 from backend.services.simulation.services.ledger_service import SimulationLedgerService
+from backend.services.simulation.services.dated_corporate_actions import (
+    apply_dated_inventory_actions,
+)
 from backend.services.simulation.services.market_rules import infer_market
 from backend.services.trade_shared.simulation_manager import SimulationAccountManager
 from backend.shared.stock_utils import StockCodeUtil
@@ -195,17 +198,16 @@ class DatedSimulationAccountManager(SimulationAccountManager):
             raise ValueError("Registered cash account is not initialized")
         previous = self._restore(self._row)
         prepared = self.rules.prepare_day(previous, trade_date)
-        if self.cycle_inputs is not None and {
-            symbol: (position["volume"], position["cost"])
-            for symbol, position in previous["positions"].items()
-        } != {
-            symbol: (position["volume"], position["cost"])
-            for symbol, position in prepared["positions"].items()
-        }:
-            raise NotImplementedError(
-                "Dated inventory actions require the original corporate-action ledger adapter"
-            )
+        applied = await apply_dated_inventory_actions(
+            self, previous, prepared, trade_date
+        )
         self._account = prepared
+        if applied:
+            states = self._states(self._row)
+            states[self.execution_market] = self._checkpoint()
+            self._row.market_state = states
+            self._publish = deepcopy(self._account)
+            await self.db.flush()
 
     async def filled_volume_on_date(self, *, trade_date, symbol):
         if self._account is None:

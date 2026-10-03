@@ -390,8 +390,9 @@ async def test_unadapted_inventory_action_cannot_change_only_the_cash_checkpoint
         trade_date=next_day,
         signal_input=replace(context.signal_input, data_day=DAY),
     )
+    monkeypatch.setattr(pg.setup.rules, "corporate_action_inputs", None)
     second = await engine.run_cycle("test", "00000007", "2", cycle_context=next_context)
-    assert "corporate-action ledger adapter" in second.error
+    assert "registered data adapter" in second.error
     assert (await financial_rows(pg))["sim_trades"] == 1
     async with pg.sessions() as db:
         assert (await db.get(SimulationAccount, ROOT)).market_state == saved

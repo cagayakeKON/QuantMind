@@ -155,7 +155,10 @@ class SimulationCorporateActionService:
         session,
         action: SimulationCorporateAction,
         applied_at: datetime,
+        action_context=None,
     ) -> None:
+        if action_context is not None:
+            action_context.validate(action, applied_at)
         normalized_type = str(action.action_type or "").strip().lower()
         # 台账 lots 用后缀式（600036.SH），公司行为表用前缀式（SH600036）。
         # 历史 bug：这里按前缀查 lots，与台账后缀永不匹配，导致分红/送股
@@ -163,20 +166,15 @@ class SimulationCorporateActionService:
         # 保留前缀候选，兼容未来格式迁移。
         normalized_symbol = StockCodeUtil.to_suffix(action.symbol)
         symbol_candidates = cls._lot_symbol_candidates(action.symbol)
-        lots = list(
-            (
-                await session.execute(
-                    select(SimulationPositionLot).where(
-                        SimulationPositionLot.symbol.in_(symbol_candidates),
-                        SimulationPositionLot.position_side == "long",
-                        SimulationPositionLot.status == "open",
-                        SimulationPositionLot.quantity_remaining > 0,
-                    )
-                )
-            )
-            .scalars()
-            .all()
+        lot_query = select(SimulationPositionLot).where(
+            SimulationPositionLot.symbol.in_(symbol_candidates),
+            SimulationPositionLot.position_side == "long",
+            SimulationPositionLot.status == "open",
+            SimulationPositionLot.quantity_remaining > 0,
         )
+        if action_context is not None:
+            lot_query = action_context.lots_query(lot_query)
+        lots = list((await session.execute(lot_query)).scalars().all())
 
         if normalized_type == "dividend":
             by_account: dict[str, list[SimulationPositionLot]] = defaultdict(list)
@@ -296,12 +294,26 @@ class SimulationCorporateActionService:
                         6,
                     )
                 touched_accounts.add(str(lot.account_id))
-            latest_price = await cls._load_latest_price(session, normalized_symbol)
+            latest_price = (
+                await cls._load_latest_price(session, normalized_symbol)
+                if action_context is None
+                else await action_context.latest_price(session, normalized_symbol)
+            )
             for account_id in touched_accounts:
                 await cls._refresh_account_projection(
                     session=session,
                     account_id=account_id,
                     applied_at=applied_at,
+                    **(
+                        {}
+                        if action_context is None
+                        else {
+                            "latest_price_loader": lambda symbol: (
+                                action_context.latest_price(session, symbol)
+                            ),
+                            "persist_cache": False,
+                        }
+                    ),
                 )
                 # 备查行必写（含 amount=0）：一是幂等标记（重跑靠它跳过），
                 # 二是 amount 恒为非负现金口径——合股等 value_delta<=0 时记 0，
@@ -330,6 +342,11 @@ class SimulationCorporateActionService:
                         trade_date=applied_at,
                         occurred_at=applied_at,
                         note=f"{normalized_symbol} {normalized_type} value delta",
+                        **(
+                            {}
+                            if action_context is None
+                            else {"currency": action_context.currency}
+                        ),
                     )
                 )
             cls._merge_action_note(
@@ -484,6 +501,8 @@ class SimulationCorporateActionService:
         session,
         account_id: str,
         applied_at: datetime,
+        latest_price_loader=None,
+        persist_cache: bool = True,
     ) -> None:
         account = await session.get(SimulationAccount, account_id)
         if account is None:
@@ -491,7 +510,8 @@ class SimulationCorporateActionService:
         projection = await SimulationProjectionService(session).load_projection(
             tenant_id=account.tenant_id,
             user_id=account.user_id,
-            latest_price_loader=lambda symbol: cls._load_latest_price(session, symbol),
+            latest_price_loader=latest_price_loader
+            or (lambda symbol: cls._load_latest_price(session, symbol)),
         )
         positions = projection.positions or {}
         long_market_value = 0.0
@@ -530,12 +550,13 @@ class SimulationCorporateActionService:
         account.total_asset = total_asset
         account.equity = total_asset
         account.last_projected_at = applied_at
-        cls._persist_projection_cache(
-            account=account,
-            positions=positions,
-            tenant_id=account.tenant_id,
-            user_id=account.user_id,
-        )
+        if persist_cache:
+            cls._persist_projection_cache(
+                account=account,
+                positions=positions,
+                tenant_id=account.tenant_id,
+                user_id=account.user_id,
+            )
 
     @staticmethod
     def _persist_projection_cache(
