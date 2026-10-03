@@ -12,7 +12,7 @@ from backend.services.simulation.services.rebalance_calculator import (
 )
 from backend.services.simulation.services.signal_loader import SignalScore
 from backend.shared.stock_utils import StockCodeUtil
-from .account import money
+from .cash_rules import money
 from .rules import RuleDataMissing, lot_size
 
 

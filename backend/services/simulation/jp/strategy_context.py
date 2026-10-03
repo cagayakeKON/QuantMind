@@ -10,7 +10,9 @@ from backend.services.engine.rd_agent.data_pipeline.jp_provider import (
     prepare_jp_rd_provider,
 )
 from backend.shared.stock_utils import StockCodeUtil
-from .service import execution_data
+from backend.services.simulation.services.market_execution_data import (
+    open_market_execution_data,
+)
 
 
 def to_provider_instrument(code):
@@ -21,11 +23,13 @@ def to_provider_instrument(code):
 
 def prepare_batch_request(request):
     """All trials use the same immutable daily publication, including retries."""
-    request.jp_data_version = execution_data(request.jp_data_version).hub.data_dir.name
+    request.jp_data_version = open_market_execution_data(
+        "JP", data_version=request.jp_data_version
+    ).hub.data_dir.name
 
 
 def prepare_context(request):
-    data = execution_data(request.jp_data_version)
+    data = open_market_execution_data("JP", data_version=request.jp_data_version)
     root = _resolve_quantjp_data_dir()
     provider = prepare_jp_rd_provider(
         root, publication=data.hub.data_dir, price_basis="raw"

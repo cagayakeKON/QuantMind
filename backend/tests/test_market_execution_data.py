@@ -10,7 +10,6 @@ import pytest
 from backend.services.engine.data_platform.jquants_import import import_jquants_snapshot
 from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
 from backend.services.simulation.jp import data as jp_data
-from backend.services.simulation.jp import service
 from backend.services.simulation.jp.rules import RuleDataMissing
 from backend.services.simulation.services import market_execution_data as resolver
 from backend.services.simulation.services.ashare_matcher import MatchConfig, match_order
@@ -43,7 +42,7 @@ def test_existing_market_reader_identity_and_call_are_preserved(monkeypatch, mar
     assert calls == [{"market": market or "CN"}]
 
 
-def test_registered_factory_is_optional_and_the_session_uses_it(monkeypatch):
+def test_registered_factory_is_optional_and_the_resolver_uses_it(monkeypatch):
     calls = []
     reader = object()
     provider = replace(LOCAL_MARKET_PROVIDERS["JP"], execution_data_factory="test.open")
@@ -55,7 +54,10 @@ def test_registered_factory_is_optional_and_the_session_uses_it(monkeypatch):
             open=lambda version: calls.append(version) or reader
         ),
     )
-    assert service.execution_data("saved-publication") is reader
+    assert (
+        resolver.open_market_execution_data("JP", data_version="saved-publication")
+        is reader
+    )
     assert calls == ["saved-publication"]
     monkeypatch.setitem(
         LOCAL_MARKET_PROVIDERS, "JP", replace(provider, execution_data_factory=None)
@@ -67,7 +69,10 @@ def test_registered_factory_is_optional_and_the_session_uses_it(monkeypatch):
 def test_registered_reader_uses_raw_prices_full_codes_and_dated_master(published):
     reader = resolver.open_market_execution_data("JP")
     version = reader.data_version
-    assert service.execution_data(version).data_version == version
+    assert (
+        resolver.open_market_execution_data("JP", data_version=version).data_version
+        == version
+    )
     bars = reader.load_date(date(2026, 9, 29))
     assert set(bars) == {"72030.JP", "216A0.JP"}
     assert bars["72030.JP"].open == bars["72030.JP"].close == 50

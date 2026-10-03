@@ -84,7 +84,9 @@ async def test_all_trials_use_one_publication_even_when_latest_changes(
     class Trials:
         async def run_backtest(self, request):
             calls.append(request.model_dump(mode="json"))
-            data = strategy_context.execution_data(request.jp_data_version)
+            data = strategy_context.open_market_execution_data(
+                "JP", data_version=request.jp_data_version
+            )
             assert data.hub.data_dir.name == meta["jp_data_version"]
             bars, _ = data.day(date(2026, 9, 29), ["JP72030"])
             assert bars["JP72030"]["close"] == 50

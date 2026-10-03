@@ -1,4 +1,8 @@
-"""Isolated JP accounts; each state transition is protected by a PG row lock."""
+"""Legacy JP source archive retained for migration/provenance verification.
+
+New accounts and execution use the common simulation/replay tables. No runtime
+endpoint or worker creates, queues orders in, or advances these legacy rows.
+"""
 
 import uuid
 from datetime import date

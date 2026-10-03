@@ -6,7 +6,7 @@ from qlib.backtest.decision import Order
 
 from backend.services.engine.qlib_app.services.dated_strategy import DecisionQuote
 from backend.shared.stock_utils import StockCodeUtil
-from .account import money
+from .cash_rules import money
 from .rules import RuleDataMissing, lot_size
 
 

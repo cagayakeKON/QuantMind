@@ -12,6 +12,9 @@ import pandas as pd
 
 from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestResult
 from backend.services.simulation.services.rebalance_calculator import StrategyConfig
+from backend.services.simulation.services.market_execution_data import (
+    open_market_execution_data,
+)
 from backend.shared.stock_pool.filters import filter_signals_by_pool
 from backend.shared.stock_pool.resolver import ResolveContext, resolver as pool_resolver
 from backend.shared.stock_pool.schemas import PoolSnapshot
@@ -26,7 +29,6 @@ from .model_signals import (
     resolve_model,
 )
 from .rules import RuleDataMissing
-from .service import execution_data
 from .strategy_snapshot import (
     execution_orders,
     strategy_snapshot,
@@ -135,7 +137,7 @@ def run_cash_backtest(
             )
     elif strategy_context is None:
         raise ValueError("Feature signals require the registered dated market context")
-    data = execution_data(request.jp_data_version)
+    data = open_market_execution_data("JP", data_version=request.jp_data_version)
     execution_version = data.hub.data_dir.name
     start, end = (
         date.fromisoformat(request.start_date),

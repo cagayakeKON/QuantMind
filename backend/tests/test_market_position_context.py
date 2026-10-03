@@ -134,7 +134,7 @@ async def test_public_positions_and_advice_use_actual_history_and_saved_master(
 
     monkeypatch.setattr(service._persistence, "get_result", load)
     monkeypatch.setattr(position_service, "get_stock_info", forbidden)
-    monkeypatch.setattr(backtest, "execution_data", forbidden)
+    monkeypatch.setattr(backtest, "open_market_execution_data", forbidden)
     response = await service.analyze(result.backtest_id, "alice", "tenant-a")
     assert response.holdings_count == 2  # Preserve original history-list treatment.
     assert response.concentration_hhi == pytest.approx(
