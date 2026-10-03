@@ -41,6 +41,16 @@ class MarketScheduleContext:
         session = self.calendar.date_to_session(pd.Timestamp(day), direction="previous")
         return int(self.calendar.sessions.get_loc(session))
 
+    def shift_sessions(self, day: date, count: int) -> date:
+        if not self.is_trading_day(day):
+            raise ScheduleDataUnavailable(f"{self.market} signal day is not a session")
+        index = self.session_index(day) + count
+        if index < 0 or index >= len(self.calendar.sessions):
+            raise ScheduleDataUnavailable(
+                f"{self.market} trading calendar does not cover the execution window"
+            )
+        return self.calendar.sessions[index].date()
+
     def is_enabled_session(self, local_now: datetime, config: dict) -> bool:
         day = local_now.date()
         self._require_day(day)

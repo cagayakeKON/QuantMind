@@ -1248,13 +1248,30 @@ class ManualExecutionService:
         return dict(row) if row else None
 
     async def get_default_model_hosted_status(
-        self, *, tenant_id: str, user_id: str
+        self, *, tenant_id: str, user_id: str,
+        market: str | None = None, trade_date: date | None = None,
     ) -> dict[str, Any]:
         tenant = (tenant_id or "").strip() or "default"
         uid = str(user_id or "").strip()
-        default_model = await self._load_user_default_model_record(
-            tenant_id=tenant, user_id=uid
-        )
+        schedule = None
+        if market is None:
+            if trade_date is not None:
+                raise ValueError("A hosted execution date requires a registered market")
+            default_model = await self._load_user_default_model_record(
+                tenant_id=tenant, user_id=uid
+            )
+        else:
+            from .hosted_execution_context import load_hosted_model_inputs
+
+            try:
+                default_model, schedule = await load_hosted_model_inputs(
+                    tenant_id=tenant, user_id=uid, market=market,
+                )
+            except (ValueError, NotImplementedError) as error:
+                return {
+                    "available": False, "source": "unavailable",
+                    "reason_code": "market_inputs_unavailable", "message": str(error),
+                }
         if not default_model:
             return {
                 "available": False,
@@ -1346,11 +1363,27 @@ class ManualExecutionService:
 
         data_trade_date = _parse_iso_date(latest_run.get("data_trade_date"))
         prediction_trade_date = _parse_iso_date(latest_run.get("prediction_trade_date"))
-        generation_start, execution_deadline = self._resolve_hosted_execution_window(
-            data_trade_date=data_trade_date,
-            target_horizon_days=target_horizon_days,
-        )
-        current_trade_date = datetime.now(_SH_TZ).date()
+        if schedule is None:
+            generation_start, execution_deadline = self._resolve_hosted_execution_window(
+                data_trade_date=data_trade_date,
+                target_horizon_days=target_horizon_days,
+            )
+            current_trade_date = datetime.now(_SH_TZ).date()
+        else:
+            try:
+                generation_start = schedule.shift_sessions(data_trade_date, 1)
+                execution_deadline = schedule.shift_sessions(
+                    data_trade_date, max(1, target_horizon_days)
+                )
+                current_trade_date = trade_date or datetime.now(schedule.timezone).date()
+                schedule._require_day(current_trade_date)
+            except (ValueError, NotImplementedError) as error:
+                return {
+                    "available": False, "source": "unavailable",
+                    "reason_code": "market_inputs_unavailable", "message": str(error),
+                    "latest_default_model_id": default_model_id,
+                    "latest_run_id": str(latest_run.get("run_id") or ""),
+                }
         if current_trade_date < generation_start:
             return {
                 "available": False,
@@ -1380,6 +1413,22 @@ class ManualExecutionService:
                 "latest_default_model_id": default_model_id,
                 "latest_run_id": str(latest_run.get("run_id") or "").strip() or None,
                 "target_horizon_days": target_horizon_days,
+                "data_trade_date": data_trade_date.isoformat(),
+                "prediction_trade_date": prediction_trade_date.isoformat(),
+                "execution_window_start": generation_start.isoformat(),
+                "execution_window_end": execution_deadline.isoformat(),
+            }
+
+        if schedule is not None and (
+            prediction_trade_date != generation_start
+            or current_trade_date != prediction_trade_date
+        ):
+            return {
+                "available": False, "source": "unavailable",
+                "reason_code": "dated_signal_session_mismatch",
+                "message": "Dated next-open execution requires the latest signal's exact session",
+                "latest_default_model_id": default_model_id,
+                "latest_run_id": str(latest_run.get("run_id") or ""),
                 "data_trade_date": data_trade_date.isoformat(),
                 "prediction_trade_date": prediction_trade_date.isoformat(),
                 "execution_window_start": generation_start.isoformat(),
@@ -2179,6 +2228,7 @@ class ManualExecutionService:
             return fallback[0] if fallback else None
         return None
 
+    @registered_manual_preview
     async def create_hosted_task(
         self,
         *,
@@ -2193,17 +2243,33 @@ class ManualExecutionService:
         parent_runtime_id: str | None = None,
         note: str | None = None,
         task_id: str | None = None,
+        execution_context=None,
     ) -> dict[str, Any]:
         tenant = (tenant_id or "").strip() or "default"
         uid = str(user_id or "").strip()
         sid = str(strategy_id or "").strip()
         mode = _normalize_trading_mode(trading_mode)
+        dated_inputs = None
+        if execution_context is not None:
+            from .hosted_execution_context import validate_hosted_inputs
+
+            dated_inputs = validate_hosted_inputs(
+                execution_context, mode=mode, execution_config=execution_config,
+                live_trade_config=live_trade_config,
+            )
         provided_task_id = str(task_id or "").strip()
         if provided_task_id:
             existing_task = await manual_execution_persistence.get_task_any(
                 provided_task_id
             )
             if existing_task:
+                if dated_inputs is not None:
+                    from .hosted_execution_context import validate_hosted_duplicate
+
+                    validate_hosted_duplicate(
+                        existing_task, dated_inputs, tenant_id=tenant, user_id=uid,
+                        strategy_id=sid, mode=mode,
+                    )
                 return {
                     "task_id": provided_task_id,
                     "status": str(existing_task.get("status") or "completed"),
@@ -2213,7 +2279,9 @@ class ManualExecutionService:
                 }
 
         hosted_status = await self.get_default_model_hosted_status(
-            tenant_id=tenant, user_id=uid
+            tenant_id=tenant, user_id=uid,
+            **({"market": dated_inputs.market, "trade_date": dated_inputs.trade_date}
+               if dated_inputs is not None else {}),
         )
         if not bool(hosted_status.get("available")):
             raise HTTPException(
@@ -2244,13 +2312,17 @@ class ManualExecutionService:
             model_id=default_model_id,
             trading_mode=mode,
             note=note,
+            **({"execution_context": dated_inputs.model_dump(mode="json")}
+               if dated_inputs is not None else {}),
         )
+        cycle_context = getattr(prepared, "cycle_context", None)
         if prepared.trading_mode == "SIMULATION":
             # 模拟盘托管任务读模拟账户快照，与手动任务预览口径一致；
             # 实盘快照（QMT 上报）仅 REAL/SHADOW 模式需要。
             latest_snapshot = await self._load_simulation_account_snapshot(
                 tenant_id=prepared.tenant_id,
                 user_id=prepared.user_id,
+                **({"cycle_context": cycle_context} if cycle_context is not None else {}),
             )
             if not latest_snapshot:
                 raise HTTPException(
@@ -2274,13 +2346,22 @@ class ManualExecutionService:
             model_id=prepared.model_id,
             data_trade_date=prepared.run.get("data_trade_date"),
             pool_id=_resolve_pool_id_from_prepared(prepared),
+            **({"cycle_context": cycle_context} if cycle_context is not None else {}),
         )
         strategy_params = _normalize_strategy_params(prepared.strategy)
+        plan_inputs = None
+        if cycle_context is not None:
+            from .manual_execution_context import prepare_manual_plan_inputs
+
+            plan_inputs = await prepare_manual_plan_inputs(
+                cycle_context, latest_snapshot, normalized_signals, strategy_params,
+            )
         execution_plan = _build_execution_plan_from_signals(
             signal_rows=normalized_signals,
             strategy_params=strategy_params,
             account_snapshot=latest_snapshot,
             trade_date=prepared.prediction_trade_date,
+            **({"plan_inputs": plan_inputs} if plan_inputs is not None else {}),
         )
         created_at = datetime.now(timezone.utc)
         plan_summary = execution_plan.get("summary") or {}

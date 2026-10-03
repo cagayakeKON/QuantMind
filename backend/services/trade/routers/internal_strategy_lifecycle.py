@@ -11,6 +11,7 @@ from backend.services.trade_shared.portfolio.models import Portfolio, Position
 from backend.services.trade_shared.redis_client import RedisClient
 from backend.services.live_trading.services.internal_strategy_dispatcher import dispatch_internal_strategy_order
 from backend.services.live_trading.services.manual_execution_service import manual_execution_service
+from backend.services.live_trading.services.manual_execution_context import DatedManualInputs
 from .internal_strategy_utils import verify_internal_call
 
 router = APIRouter(tags=["Internal Strategy Gateway"])
@@ -28,6 +29,7 @@ class HostedExecutionCreateRequest(BaseModel):
     trigger_context: dict[str, Any] | None = None
     parent_runtime_id: str | None = None
     note: str | None = None
+    execution_context: DatedManualInputs | None = None
 
 @router.post("/heartbeat", dependencies=[Depends(verify_internal_call)])
 async def strategy_heartbeat(
@@ -163,5 +165,7 @@ async def create_hosted_execution(
         trigger_context=payload.trigger_context,
         parent_runtime_id=payload.parent_runtime_id,
         note=payload.note,
+        **({"execution_context": payload.execution_context.model_dump(mode="json")}
+           if payload.execution_context is not None else {}),
     )
     return {"status": "success", **result}
