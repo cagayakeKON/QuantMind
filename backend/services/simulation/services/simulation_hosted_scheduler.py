@@ -22,6 +22,11 @@ from backend.services.trade_shared.redis_client import RedisClient
 from backend.services.simulation.services.rebalance_job_service import (
     SimulationRebalanceJobService,
 )
+from backend.services.simulation.services.market_schedule import (
+    hosted_schedule_market,
+    open_registered_schedule_context,
+    registered_schedule_provider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -179,15 +184,26 @@ async def run_simulation_cycle_for_active(
     from backend.services.simulation.engine import simulation_engine
 
     cfg = _normalize_live_trade_config(live_trade_config)
+    if registered_schedule_provider(cfg.get("market")):
+        # Calendar eligibility does not enable the ordinary Lua cash path.
+        # The dated cash adapter must join this engine before orders can run.
+        return {
+            "task_id": run_id,
+            "status": "skipped",
+            "error": "registered_market_dated_execution_unavailable",
+            "signal_count": 0,
+            "order_count": 0,
+            "filled_count": 0,
+        }
     params_override: dict[str, Any] = {}
     if cfg.get("pool_id"):
         params_override["pool_id"] = cfg["pool_id"]
-    signal_run_id, gate_error = await _resolve_hosted_signal_run_id(
-        tenant_id, user_id
-    )
+    signal_run_id, gate_error = await _resolve_hosted_signal_run_id(tenant_id, user_id)
     if not signal_run_id:
         # 拿不到可用批次时按严格模式不下单；strict=0 可退回旧行为（仅告警）。
-        strict = os.getenv("SIM_HOSTED_STRICT_SIGNAL_BATCH", "1").strip().lower() not in {
+        strict = os.getenv(
+            "SIM_HOSTED_STRICT_SIGNAL_BATCH", "1"
+        ).strip().lower() not in {
             "0",
             "false",
             "no",
@@ -224,15 +240,15 @@ async def run_simulation_cycle_for_active(
     return report_to_hosted_result(report)
 
 
-def _parse_started_at(value: Any) -> date | None:
+def _parse_started_at(value: Any, *, context=None) -> date | None:
     text = str(value or "").strip()
     if not text:
         return None
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=_SH_TZ)
-        return parsed.astimezone(_SH_TZ).date()
+            parsed = parsed.replace(tzinfo=context.timezone if context else _SH_TZ)
+        return parsed.astimezone(context.timezone if context else _SH_TZ).date()
     except Exception:
         return None
 
@@ -253,14 +269,19 @@ def _is_interval_rebalance_day(
     *,
     started_day: date | None,
     rebalance_days: int,
+    context=None,
 ) -> bool:
     if rebalance_days <= 1:
         return True
     if started_day is None:
         return True
 
-    current_idx = _session_index(current_day)
-    started_idx = _session_index(started_day)
+    current_idx = (
+        context.session_index(current_day) if context else _session_index(current_day)
+    )
+    started_idx = (
+        context.session_index(started_day) if context else _session_index(started_day)
+    )
     if current_idx is not None and started_idx is not None:
         return max(0, current_idx - started_idx) % rebalance_days == 0
 
@@ -314,7 +335,9 @@ def _matches_trigger_window(
 def _resolve_phase(local_now: datetime, live_trade_config: dict[str, Any]) -> str:
     sell_time = str(live_trade_config.get("sell_time") or "14:45")
     buy_time = str(live_trade_config.get("buy_time") or "14:50")
-    window_seconds = max(30, _to_int(live_trade_config.get("trigger_window_seconds"), 90))
+    window_seconds = max(
+        30, _to_int(live_trade_config.get("trigger_window_seconds"), 90)
+    )
     sell_hit = _matches_trigger_window(
         local_now,
         sell_time,
@@ -346,15 +369,26 @@ def _should_trigger(
     now: datetime,
     live_trade_config: dict[str, Any],
     started_day: date | None,
+    context=None,
 ) -> SimulationScheduleDecision:
-    local_now = now.astimezone(_SH_TZ)
+    local_now = now.astimezone(context.timezone if context else _SH_TZ)
     now_hhmm = local_now.strftime("%H:%M")
     trade_date = local_now.date().isoformat()
 
-    if not _is_trading_day(local_now.date()):
+    trading_day = (
+        context.is_trading_day(local_now.date())
+        if context
+        else _is_trading_day(local_now.date())
+    )
+    if not trading_day:
         return SimulationScheduleDecision(False, "IDLE", trade_date, "non_trading_day")
 
-    if not _is_enabled_session(now_hhmm, live_trade_config):
+    enabled = (
+        context.is_enabled_session(local_now, live_trade_config)
+        if context
+        else _is_enabled_session(now_hhmm, live_trade_config)
+    )
+    if not enabled:
         return SimulationScheduleDecision(False, "IDLE", trade_date, "outside_session")
 
     schedule_type = str(live_trade_config.get("schedule_type") or "interval").lower()
@@ -364,10 +398,12 @@ def _should_trigger(
         if weekday not in allowed:
             return SimulationScheduleDecision(False, "IDLE", trade_date, "weekday_skip")
     else:
+        interval_context = {"context": context} if context else {}
         if not _is_interval_rebalance_day(
             local_now.date(),
             started_day=started_day,
             rebalance_days=max(1, _to_int(live_trade_config.get("rebalance_days"), 3)),
+            **interval_context,
         ):
             return SimulationScheduleDecision(
                 False, "IDLE", trade_date, "interval_skip"
@@ -379,7 +415,9 @@ def _should_trigger(
     return SimulationScheduleDecision(True, phase, trade_date, "matched")
 
 
-def _is_time_in_enabled_session(target_hhmm: str, live_trade_config: dict[str, Any]) -> bool:
+def _is_time_in_enabled_session(
+    target_hhmm: str, live_trade_config: dict[str, Any]
+) -> bool:
     return _is_enabled_session(str(target_hhmm or "").strip(), live_trade_config)
 
 
@@ -387,32 +425,33 @@ def _build_candidate_trigger_datetimes(
     *,
     current_day: date,
     live_trade_config: dict[str, Any],
+    context=None,
 ) -> list[tuple[datetime, str]]:
     sell_time = str(live_trade_config.get("sell_time") or "14:45")
     buy_time = str(live_trade_config.get("buy_time") or "14:50")
     candidates: list[tuple[datetime, str]] = []
 
     def _append_candidate(target_hhmm: str, phase: str) -> None:
-        if not _is_time_in_enabled_session(target_hhmm, live_trade_config):
+        if not context and not _is_time_in_enabled_session(
+            target_hhmm, live_trade_config
+        ):
             return
         try:
             hour = int(target_hhmm[:2])
             minute = int(target_hhmm[3:5])
         except Exception:
             return
-        candidates.append(
-            (
-                datetime(
-                    current_day.year,
-                    current_day.month,
-                    current_day.day,
-                    hour,
-                    minute,
-                    tzinfo=_SH_TZ,
-                ),
-                phase,
-            )
+        target_at = datetime(
+            current_day.year,
+            current_day.month,
+            current_day.day,
+            hour,
+            minute,
+            tzinfo=context.timezone if context else _SH_TZ,
         )
+        if context and not context.is_enabled_session(target_at, live_trade_config):
+            return
+        candidates.append((target_at, phase))
 
     if sell_time == buy_time:
         _append_candidate(sell_time, "ALL")
@@ -433,8 +472,10 @@ def _next_scheduled_trigger(
     live_trade_config: dict[str, Any],
     started_day: date | None,
     horizon_days: int = 30,
+    context=None,
 ) -> SimulationNextTrigger | None:
-    local_now = now.astimezone(_SH_TZ)
+    local_now = now.astimezone(context.timezone if context else _SH_TZ)
+    context_kwargs = {"context": context} if context else {}
     normalized_config = _normalize_live_trade_config(live_trade_config)
     window_seconds = max(
         30, _to_int(normalized_config.get("trigger_window_seconds"), 90)
@@ -442,12 +483,18 @@ def _next_scheduled_trigger(
 
     for offset in range(max(1, int(horizon_days or 30)) + 1):
         candidate_day = local_now.date() + timedelta(days=offset)
-        if not _is_trading_day(candidate_day):
+        trading_day = (
+            context.is_trading_day(candidate_day)
+            if context
+            else _is_trading_day(candidate_day)
+        )
+        if not trading_day:
             continue
 
         for target_at, phase in _build_candidate_trigger_datetimes(
             current_day=candidate_day,
             live_trade_config=normalized_config,
+            **context_kwargs,
         ):
             if target_at < local_now:
                 continue
@@ -455,10 +502,16 @@ def _next_scheduled_trigger(
                 now=target_at,
                 live_trade_config=normalized_config,
                 started_day=started_day,
+                **context_kwargs,
             )
             if not probe.should_trigger:
                 continue
             window_end_at = target_at + timedelta(seconds=window_seconds)
+            if context:
+                window_end_at = min(
+                    window_end_at,
+                    context.enabled_session_end(target_at, normalized_config),
+                )
             return SimulationNextTrigger(
                 phase=phase,
                 trade_date=candidate_day.isoformat(),
@@ -605,11 +658,21 @@ class SimulationHostedScheduler:
         live_trade_config = _normalize_live_trade_config(
             active_data.get("live_trade_config")
         )
-        started_day = _parse_started_at(active_data.get("started_at"))
+        market = hosted_schedule_market(active_data)
+        context = (
+            await asyncio.to_thread(open_registered_schedule_context, market)
+            if market
+            else None
+        )
+        context_kwargs = {"context": context} if context else {}
+        if context:
+            live_trade_config["market"] = context.market
+        started_day = _parse_started_at(active_data.get("started_at"), **context_kwargs)
         decision = _should_trigger(
             now=now,
             live_trade_config=live_trade_config,
             started_day=started_day,
+            **context_kwargs,
         )
         if not decision.should_trigger:
             return False

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -27,6 +29,11 @@ from backend.services.simulation.services.simulation_hosted_scheduler import (
     _normalize_live_trade_config,
     _parse_started_at,
 )
+from backend.services.simulation.services.market_schedule import (
+    ScheduleDataUnavailable,
+    hosted_schedule_market,
+    open_registered_schedule_context,
+)
 from backend.services.trade_shared.models.order import Order
 from backend.services.trade_shared.redis_client import redis_client
 from backend.shared.database_manager_v2 import get_session
@@ -34,6 +41,7 @@ from sqlalchemy import text
 
 router = APIRouter(dependencies=[Depends(require_admin)])
 _SH_TZ = ZoneInfo("Asia/Shanghai")
+logger = logging.getLogger(__name__)
 
 
 def _ensure_redis():
@@ -262,12 +270,28 @@ async def list_planned_orders(
     for row in iter_active_strategy_payloads(redis):
         payload = row.get("payload") or {}
         live_cfg = _normalize_live_trade_config(payload.get("live_trade_config"))
-        started_day = _parse_started_at(payload.get("started_at"))
-        nxt = _next_scheduled_trigger(
-            now=now,
-            live_trade_config=live_cfg,
-            started_day=started_day,
+        market = (
+            hosted_schedule_market(payload)
+            if str(row.get("mode") or "SIMULATION").upper() == "SIMULATION"
+            else None
         )
+        try:
+            context = (
+                await asyncio.to_thread(open_registered_schedule_context, market)
+                if market
+                else None
+            )
+            context_kwargs = {"context": context} if context else {}
+            started_day = _parse_started_at(payload.get("started_at"), **context_kwargs)
+            nxt = _next_scheduled_trigger(
+                now=now,
+                live_trade_config=live_cfg,
+                started_day=started_day,
+                **context_kwargs,
+            )
+        except ScheduleDataUnavailable as error:
+            logger.warning("Registered simulation schedule unavailable: %s", error)
+            continue
         if nxt is None:
             continue
         tenant_id = str(row.get("tenant_id") or "default")
@@ -288,8 +312,12 @@ async def list_planned_orders(
                 "phase": nxt.phase,
                 "status": "scheduled",
                 "trade_date": nxt.trade_date,
-                "planned_at": isoformat_dt(nxt.target_at.replace(tzinfo=None)),
-                "window_end_at": isoformat_dt(nxt.window_end_at.replace(tzinfo=None)),
+                "planned_at": isoformat_dt(
+                    nxt.target_at if context else nxt.target_at.replace(tzinfo=None)
+                ),
+                "window_end_at": isoformat_dt(
+                    nxt.window_end_at if context else nxt.window_end_at.replace(tzinfo=None)
+                ),
                 "title": "下次托管窗口",
                 "detail": f"{nxt.phase} {live_cfg.get('schedule_type')}",
             }
