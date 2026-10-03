@@ -895,7 +895,9 @@ def _default_live_trade_config() -> dict:
     }
 
 
-def _normalize_live_trade_config(user_live_cfg: dict, base_live_cfg: dict) -> dict:
+def _normalize_live_trade_config(
+    user_live_cfg: dict, base_live_cfg: dict, *, execution_context=None
+) -> dict:
     merged = dict(_default_live_trade_config())
     merged.update(base_live_cfg or {})
     merged.update(user_live_cfg or {})
@@ -906,6 +908,17 @@ def _normalize_live_trade_config(user_live_cfg: dict, base_live_cfg: dict) -> di
         "AM": ("09:30", "11:30"),
         "PM": ("13:00", "15:00"),
     }
+    if execution_context is not None:
+        from backend.services.live_trading.services.hosted_lifecycle_inputs import (
+            lifecycle_session_ranges,
+        )
+
+        session_ranges = lifecycle_session_ranges(execution_context)
+
+    def _covers(start, end, hhmm):
+        return start <= hhmm and (
+            hhmm < end if execution_context is not None else hhmm <= end
+        )
 
     def _hhmm(value: object) -> str:
         text = str(value or "").strip()
@@ -917,7 +930,7 @@ def _normalize_live_trade_config(user_live_cfg: dict, base_live_cfg: dict) -> di
         return [
             name
             for name, (start, end) in session_ranges.items()
-            if start <= hhmm <= end
+            if _covers(start, end, hhmm)
         ]
 
     for key in ("sell_time", "buy_time"):
@@ -936,20 +949,27 @@ def _normalize_live_trade_config(user_live_cfg: dict, base_live_cfg: dict) -> di
                 status_code=400,
                 detail=(
                     f"live_trade_config.{label}={hhmm} 不在任何交易时段内"
-                    f"（AM 09:30-11:30 / PM 13:00-15:00）"
+                    + (
+                        "（" + " / ".join(
+                            f"{name} {start}-{end}"
+                            for name, (start, end) in session_ranges.items()
+                        ) + "，连续交易结束时刻不含）"
+                        if execution_context is not None
+                        else "（AM 09:30-11:30 / PM 13:00-15:00）"
+                    )
                 ),
             )
     needed = list(
         dict.fromkeys(_sessions_covering(sell_hhmm) + _sessions_covering(buy_hhmm))
     )
     sell_ok = any(
-        start <= sell_hhmm <= end
+        _covers(start, end, sell_hhmm)
         for start, end in (
             session_ranges[s] for s in enabled_sessions if s in session_ranges
         )
     )
     buy_ok = any(
-        start <= buy_hhmm <= end
+        _covers(start, end, buy_hhmm)
         for start, end in (
             session_ranges[s] for s in enabled_sessions if s in session_ranges
         )
@@ -1002,7 +1022,7 @@ def _normalize_live_trade_config(user_live_cfg: dict, base_live_cfg: dict) -> di
     for key in ("sell_time", "buy_time"):
         target = str(normalized.get(key) or "")
         in_session = any(
-            start <= target <= end
+            _covers(start, end, target)
             for start, end in (
                 session_ranges[s] for s in enabled_sessions if s in session_ranges
             )
@@ -1018,7 +1038,11 @@ def _normalize_live_trade_config(user_live_cfg: dict, base_live_cfg: dict) -> di
                 detail=(
                     f"live_trade_config.{key}={target} 必须落在已选执行时段内"
                     f"（当前 {ranges_text}）。"
-                    f"若要用下午时点请勾选 PM/下午；若只跑上午请把时点改到 09:30-11:30。"
+                    + (
+                        f"请使用 {ranges_text} 内的连续交易时点。"
+                        if execution_context is not None
+                        else "若要用下午时点请勾选 PM/下午；若只跑上午请把时点改到 09:30-11:30。"
+                    )
                 ),
             )
 
