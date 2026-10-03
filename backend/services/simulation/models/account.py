@@ -6,6 +6,7 @@ from datetime import datetime
 
 from sqlalchemy import DateTime, Float, Index, String
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import JSONB
 
 from backend.services.simulation.models import Base, TimestampMixin
 
@@ -25,13 +26,16 @@ class SimulationAccount(Base, TimestampMixin):
         String(32), nullable=False, default="cash"
     )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    market_state: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     initial_equity: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     cash: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     available_cash: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     frozen_cash: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     long_market_value: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
-    short_market_value: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    short_market_value: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0
+    )
     total_asset: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     liabilities: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     equity: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)

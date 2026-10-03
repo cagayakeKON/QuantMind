@@ -1903,6 +1903,7 @@ CREATE TABLE IF NOT EXISTS simulation_accounts (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_simulation_accounts_tenant_user
     ON simulation_accounts (tenant_id, user_id);
+ALTER TABLE simulation_accounts ADD COLUMN IF NOT EXISTS market_state JSONB;
 
 -- 60.2 SIMULATION_ACCOUNT_DAILY
 CREATE TABLE IF NOT EXISTS simulation_account_daily (

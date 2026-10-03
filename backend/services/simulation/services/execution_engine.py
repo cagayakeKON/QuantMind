@@ -27,6 +27,8 @@ from backend.shared.trade_account_cache import (
     write_json_cache,
     write_trade_account_cache,
 )
+from backend.services.simulation.services.dated_account import checkpointed_simulation_fill
+from backend.services.simulation.services.dated_execution import execute_registered_bar
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +81,13 @@ class MarketSnapshot:
 
 
 class SimulationExecutionEngine:
-    def __init__(self, db: AsyncSession, manager: SimulationAccountManager):
+    def __init__(
+        self, db: AsyncSession, manager: SimulationAccountManager,
+        *, execution_context=None,
+    ):
         self.db = db
         self.manager = manager
+        self.execution_context = execution_context
         self._http: httpx.AsyncClient | None = None
 
     async def _http_client(self) -> httpx.AsyncClient:
@@ -582,6 +588,8 @@ return tostring(granted)
         market: str | None = None,
     ) -> ExecutionResult:
         """按当日不复权日 K 走 ashare_matcher（托管/周期调仓与回放同口径）。"""
+        if self.execution_context is not None:
+            return await execute_registered_bar(self, order, bar, market)
         from backend.services.simulation.services.ashare_matcher import (
             MatchConfig,
             match_order,
@@ -678,6 +686,10 @@ return tostring(granted)
         requested_quantity: float | None = None,
         allow_stale_market_fill: bool = False,
     ) -> ExecutionResult:
+        if self.execution_context is not None:
+            raise NotImplementedError(
+                "Registered cash execution needs a dated quote adapter"
+            )
         snapshot = snapshot or await self._latest_price(
             order.symbol, user_id=order.user_id, tenant_id=order.tenant_id
         )
@@ -935,6 +947,7 @@ return tostring(granted)
             ),
         )
 
+    @checkpointed_simulation_fill
     async def apply_filled(self, order: SimOrder, result: ExecutionResult) -> SimTrade:
         trade_value = result.quantity * result.price
         transfer_fee = float(getattr(result, "transfer_fee", 0.0) or 0.0)
