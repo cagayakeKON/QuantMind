@@ -64,11 +64,44 @@ async def strategy_heartbeat(
 
 @router.get("/sync-account", dependencies=[Depends(verify_internal_call)])
 async def sync_account_state(
-    x_user_id: str = Header(...), x_tenant_id: str | None = Header(None), db=Depends(get_db)
+    x_user_id: str = Header(...), x_tenant_id: str | None = Header(None), db=Depends(get_db),
+    market: str | None = None, trading_mode: str | None = None,
 ):
     """
     供策略 Pod 启动时初始化：获取真实的资金和持仓
     """
+    if market is not None:
+        from backend.services.simulation.services.account_context import (
+            read_registered_simulation_account,
+            registered_account_input_adapter,
+        )
+        from backend.services.trade_shared.simulation_manager import canonical_sim_uid
+
+        selected = market.strip().upper()
+        if registered_account_input_adapter(selected) is not None:
+            if str(trading_mode or "").upper() != "SIMULATION":
+                raise HTTPException(
+                    status_code=400, detail="Registered account reads require SIMULATION"
+                )
+            uid = canonical_sim_uid(x_user_id)
+            if uid <= 0:
+                raise HTTPException(status_code=400, detail="Invalid simulation user_id")
+            tenant = (x_tenant_id or "").strip() or "default"
+            try:
+                registered, account = await read_registered_simulation_account(
+                    selected, redis=None, tenant_id=tenant,
+                    raw_user_id=x_user_id, user_id=uid,
+                )
+            except (ValueError, NotImplementedError) as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if not registered or account is None:
+                raise HTTPException(
+                    status_code=409, detail="Registered simulation account is not initialized"
+                )
+            return {
+                **account, "tenant_id": tenant, "user_id": uid,
+                "portfolio_id": None, "market": selected,
+            }
     try:
         user_id = int(x_user_id)
         tenant_id = (x_tenant_id or "").strip() or "default"

@@ -6,6 +6,11 @@ from typing import Any, Dict, List
 import redis
 
 from backend.shared.simulation_account_keys import account_key
+from backend.shared.stock_utils import StockCodeUtil
+from backend.services.trade.sandbox.registered_account_reader import (
+    read_sandbox_simulation_account,
+    registered_sandbox_market,
+)
 
 
 class SandboxContext:
@@ -33,6 +38,7 @@ class SandboxContext:
         self._current_time: float = time.time()
         self._redis: redis.Redis | None = None
         self._account_cache: dict[str, Any] = {}
+        self._account_cache_market: str | None = None
         self._last_cache_time: float = 0
 
     def _get_redis(self) -> redis.Redis | None:
@@ -52,8 +58,26 @@ class SandboxContext:
     def _load_account_from_redis(self) -> dict[str, Any]:
         """从 Redis 加载账户状态，带 1 秒缓存"""
         now = time.time()
-        if now - self._last_cache_time < 1.0 and self._account_cache:
+        market = registered_sandbox_market(self.exec_config, self.live_trade_config)
+        if self._account_cache_market is not None and market != self._account_cache_market:
+            self._account_cache = {}
+            self._last_cache_time = 0
+            self._account_cache_market = None
+        if (
+            now - self._last_cache_time < 1.0
+            and self._account_cache
+            and market == self._account_cache_market
+        ):
             return self._account_cache
+
+        if market is not None:
+            account = read_sandbox_simulation_account(
+                market=market, tenant_id=self.tenant_id, user_id=self.user_id,
+            )
+            self._account_cache = account
+            self._account_cache_market = market
+            self._last_cache_time = now
+            return account
 
         r = self._get_redis()
         if not r:
@@ -113,6 +137,9 @@ class SandboxContext:
         """从 Redis 读取真实持仓状态"""
         account = self._load_account_from_redis()
         positions = account.get("positions", {})
+        market = registered_sandbox_market(self.exec_config, self.live_trade_config)
+        if market is not None:
+            symbol = StockCodeUtil.to_prefix(symbol, market=market)
         pos = positions.get(symbol.upper())
         if pos:
             volume = float(pos.get("volume", 0))
