@@ -1,7 +1,7 @@
 import axios, { AxiosHeaders } from 'axios';
 import { SERVICE_ENDPOINTS, SERVICE_URLS } from '../config/services';
 import { authService } from '../features/auth/services/authService';
-import type { ExecutionConfig, LiveTradeConfig } from '../types/liveTrading';
+import type { DatedExecutionContext, SimulationExecutionInputs, ExecutionConfig, LiveTradeConfig } from '../types/liveTrading';
 
 function getTenantId(): string {
     const fromEnv = String((import.meta as any).env?.VITE_TENANT_ID || '').trim();
@@ -137,6 +137,7 @@ export interface RealTradingStatus {
     };
     execution_config?: ExecutionConfig | null;
     live_trade_config?: LiveTradeConfig | null;
+    execution_context?: DatedExecutionContext;
     latest_hosted_task?: ManualExecutionTaskRecord | null;
     latest_signal_run_id?: string | null;
     signal_source_status?: {
@@ -398,6 +399,7 @@ export interface RealAccountLedgerDailySnapshot {
 }
 
 export interface StartTradingResponse {
+    execution_context?: DatedExecutionContext;
     status: string;
     message?: string;
     effective_execution_config?: ExecutionConfig;
@@ -558,25 +560,29 @@ export const realTradingService = {
     preflight: async (
         tradingMode: 'REAL' | 'SHADOW' | 'SIMULATION',
         _userId: string,
-        _tenantId: string = getTenantId()
+        _tenantId: string = getTenantId(),
+        executionContext?: DatedExecutionContext
     ): Promise<PreflightCheckResponse> => {
         return await requestRealTradingWithFallback<PreflightCheckResponse>({
             method: 'get',
             url: '/preflight',
             params: {
                 trading_mode: tradingMode,
+                ...(executionContext ? { market: executionContext.market, execution_context: JSON.stringify(executionContext) } : {}),
             },
         });
     },
 
     getTradingPrecheck: async (
-        tradingMode: 'REAL' | 'SHADOW' | 'SIMULATION'
+        tradingMode: 'REAL' | 'SHADOW' | 'SIMULATION',
+        executionContext?: DatedExecutionContext
     ): Promise<TradingPrecheckResult> => {
         return await requestRealTradingWithFallback<TradingPrecheckResult>({
             method: 'get',
             url: '/trading-precheck',
             params: {
                 trading_mode: tradingMode,
+                ...(executionContext ? { market: executionContext.market, execution_context: JSON.stringify(executionContext) } : {}),
             },
         });
     },
@@ -588,7 +594,8 @@ export const realTradingService = {
         tradingMode: string = 'REAL',
         _tenantId: string = getTenantId(),
         executionConfig?: ExecutionConfig,
-        liveTradeConfig?: LiveTradeConfig
+        liveTradeConfig?: LiveTradeConfig,
+        executionContext?: DatedExecutionContext
     ): Promise<StartTradingResponse> => {
         const formData = new FormData();
         formData.append('strategy_id', strategyId);
@@ -598,6 +605,10 @@ export const realTradingService = {
         }
         if (liveTradeConfig) {
             formData.append('live_trade_config', JSON.stringify(liveTradeConfig));
+        }
+
+        if (executionContext) {
+            formData.append('execution_context', JSON.stringify(executionContext));
         }
 
         return await requestRealTradingWithFallback<StartTradingResponse>({
@@ -620,7 +631,7 @@ export const realTradingService = {
     },
 
     // Get Status
-    getStatus: async (userId?: string, tradingMode?: string, tenantId: string = getTenantId()): Promise<RealTradingStatus> => {
+    getStatus: async (userId?: string, tradingMode?: string, tenantId: string = getTenantId(), market?: string, executionContext?: DatedExecutionContext): Promise<RealTradingStatus> => {
         const actualUserId = userId || (authService.getStoredUser() as any)?.user_id || (authService.getStoredUser() as any)?.sub || '';
         return await requestRealTradingWithFallback<RealTradingStatus>({
             method: 'get',
@@ -629,6 +640,8 @@ export const realTradingService = {
                 user_id: actualUserId,
                 tenant_id: tenantId,
                 trading_mode: tradingMode?.toUpperCase(),
+                ...(market ? { market } : {}),
+                ...(executionContext ? { execution_context: JSON.stringify(executionContext) } : {}),
             },
         });
     },
@@ -801,6 +814,20 @@ export const realTradingService = {
         return await realTradingService.getAccount(userId, tenantId).catch(() => null);
     },
 
+    getSimulationExecutionInputs: async (
+        market: string,
+        tradeDate?: string,
+        dataVersion?: string,
+    ): Promise<SimulationExecutionInputs | null> => {
+        const token = authService.getAccessToken();
+        const response = await axios.get(`${SERVICE_ENDPOINTS.API_GATEWAY}/simulation/execution-inputs`, {
+            params: { market, ...(tradeDate ? { trade_date: tradeDate } : {}), ...(dataVersion ? { data_version: dataVersion } : {}) },
+            headers: token ? new AxiosHeaders({ Authorization: `Bearer ${token}` }) : undefined,
+            timeout: 30000,
+        });
+        return response.data?.data || null;
+    },
+
     // Get Simulation Account Info
     getSimulationAccount: async (
         _userId: string,
@@ -841,12 +868,13 @@ export const realTradingService = {
         _userId: string,
         initialCash: number,
         _tenantId: string = getTenantId(),
-        market?: string
+        market?: string,
+        executionContext?: DatedExecutionContext
     ): Promise<AccountInfo | null> => {
         const token = authService.getAccessToken();
         const response = await axios.post(
             `${SERVICE_ENDPOINTS.API_GATEWAY}/simulation/reset`,
-            { initial_cash: initialCash, market },
+            { initial_cash: initialCash, market, ...(executionContext ? { execution_context: executionContext } : {}) },
             {
                 headers: token ? new AxiosHeaders({ Authorization: `Bearer ${token}` }) : undefined,
                 timeout: 30000,
@@ -948,6 +976,7 @@ export const realTradingService = {
 
 
 export interface AccountInfo {
+    execution_context?: DatedExecutionContext;
     account_id?: string;
     snapshot_kind?: 'account_snapshot';
     timestamp?: string | number;

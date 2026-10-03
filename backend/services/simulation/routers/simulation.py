@@ -32,6 +32,32 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+@router.get("/execution-inputs")
+async def get_execution_inputs(
+    market: str = Query(...),
+    trade_date: date | None = None,
+    data_version: str | None = None,
+    auth: AuthContext = Depends(get_auth_context),
+):
+    import asyncio
+
+    from backend.services.simulation.services.execution_input_metadata import (
+        read_execution_input_metadata,
+    )
+
+    _require_user_id(auth.user_id, auth.tenant_id)
+    try:
+        data = await asyncio.to_thread(
+            read_execution_input_metadata,
+            market,
+            trade_date=trade_date,
+            data_version=data_version,
+        )
+    except (ValueError, NotImplementedError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    return {"success": True, "data": data}
+
+
 def _require_user_id(raw_user_id: str, tenant_id: str = "default") -> int:
     """兼容别名，统一走 require_sim_user_id（OSS admin 归 10000001）。"""
     return require_sim_user_id(raw_user_id, tenant_id=tenant_id)

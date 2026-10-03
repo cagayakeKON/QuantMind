@@ -28,6 +28,7 @@ export interface MarketConfig {
   trainingDefaults?: { commissionRate: number; dealPrice: 'open' | 'close' };
   trainingCapabilities?: {dealPrices: ('open' | 'close')[]; industryFeature: boolean};
   simulationUi?: 'standard' | 'jp_cash';
+  simulationExecution?: 'dated_daily';
   replay?: {market: AppMarket; currency: string; priceUnit: string};
   stockSearch?: 'local' | 'gateway';
   stockTerminal?: { market: string; adjustments: ('none' | 'qfq' | 'hfq')[]; requestTimeoutMs?: number };
@@ -48,6 +49,7 @@ export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
     trainingDefaults: { commissionRate: 0, dealPrice: 'open' },
     trainingCapabilities: {dealPrices: ['open'], industryFeature: false},
     simulationUi: 'jp_cash',
+    simulationExecution: 'dated_daily',
     replay: {market: 'JP', currency: 'JPY', priceUnit: 'JPY'},
     stockSearch: 'gateway',
     stockTerminal: { market: 'JP', adjustments: ['none', 'qfq'], requestTimeoutMs: 120000 },

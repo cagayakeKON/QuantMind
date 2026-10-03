@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Button, message, Modal, Steps } from 'antd';
 import { CheckCircle2 } from 'lucide-react';
 import type {
+  DatedExecutionContext,
+  SimulationExecutionInputs,
   DeployMode,
   ExecutionConfig,
   LiveTradeConfig,
@@ -18,8 +20,9 @@ type Props = {
   strategyDefaults?: StrategyLiveDefaults | null;
   initialExecutionConfig?: ExecutionConfig | null;
   initialLiveTradeConfig?: Partial<LiveTradeConfig> | null;
+  executionInputs?: SimulationExecutionInputs;
   onCancel: () => void;
-  onConfirm: (payload: { execution_config: ExecutionConfig; live_trade_config: LiveTradeConfig }) => Promise<void>;
+  onConfirm: (payload: { execution_config: ExecutionConfig; live_trade_config: LiveTradeConfig; execution_context?: DatedExecutionContext }) => Promise<void>;
 };
 
 const DEFAULT_EXECUTION_CONFIG: ExecutionConfig = {
@@ -45,23 +48,27 @@ function buildInitialState(
   defaults?: StrategyLiveDefaults | null,
   initialExecutionConfig?: ExecutionConfig | null,
   initialLiveTradeConfig?: Partial<LiveTradeConfig> | null,
+  executionInputs?: SimulationExecutionInputs,
 ) {
   const live_trade_config = {
     ...DEFAULT_LIVE_TRADE_CONFIG,
     ...(defaults?.live_defaults || {}),
     ...(initialLiveTradeConfig || {}),
+    ...(executionInputs ? { market: executionInputs.market } : {}),
   } as LiveTradeConfig;
   // 历史快照可能留下「下午时点 + 上午时段」，打开向导时自动对齐
   live_trade_config.enabled_sessions = syncSessionsToTimes(
     live_trade_config.enabled_sessions || [],
     live_trade_config.sell_time,
     live_trade_config.buy_time,
+    executionInputs,
   );
   return {
     execution_config: {
       ...DEFAULT_EXECUTION_CONFIG,
       ...(defaults?.execution_defaults || {}),
       ...(initialExecutionConfig || {}),
+      ...(executionInputs ? { market: executionInputs.market } : {}),
     },
     live_trade_config,
   };
@@ -75,6 +82,7 @@ const LiveTradeConfigWizard: React.FC<Props> = ({
   strategyDefaults,
   initialExecutionConfig,
   initialLiveTradeConfig,
+  executionInputs,
   onCancel,
   onConfirm,
 }) => {
@@ -89,18 +97,18 @@ const LiveTradeConfigWizard: React.FC<Props> = ({
       initializedKeyRef.current = null;
       return;
     }
-    const nextKey = `${strategyId}:${mode}`;
+    const nextKey = executionInputs ? `${strategyId}:${mode}:${JSON.stringify(executionInputs)}` : `${strategyId}:${mode}`;
     if (initializedKeyRef.current === nextKey) {
       return;
     }
-    const initial = buildInitialState(strategyDefaults, initialExecutionConfig, initialLiveTradeConfig);
+    const initial = buildInitialState(strategyDefaults, initialExecutionConfig, initialLiveTradeConfig, executionInputs);
     setExecutionConfig(initial.execution_config);
     setLiveTradeConfig(initial.live_trade_config);
     setStep(0);
     initializedKeyRef.current = nextKey;
-  }, [open, mode, strategyId, strategyDefaults, initialExecutionConfig, initialLiveTradeConfig]);
+  }, [open, mode, strategyId, strategyDefaults, initialExecutionConfig, initialLiveTradeConfig, executionInputs]);
 
-  const issues = useMemo(() => validateLiveTradeConfig(liveTradeConfig), [liveTradeConfig]);
+  const issues = useMemo(() => validateLiveTradeConfig(liveTradeConfig, executionInputs), [liveTradeConfig, executionInputs]);
   const tips = strategyDefaults?.live_config_tips || [];
   const modeLabel = mode === 'SIMULATION' ? '模拟盘' : (mode === 'SHADOW' ? '影子模式' : '实盘');
   const orderTypeLabel = liveTradeConfig.order_type === 'LIMIT' ? '限价' : '市价';
@@ -109,6 +117,7 @@ const LiveTradeConfigWizard: React.FC<Props> = ({
     () => [
       { label: '策略', value: strategyName || strategyId },
       { label: '模式', value: modeLabel },
+      ...(executionInputs ? [{ label: '市场与日期', value: `${executionInputs.market} / ${executionInputs.execution_context.trade_date} (${executionInputs.timezone})` }, { label: '成交费用', value: `佣金 ${(Number(executionInputs.execution_context.commission_rate) * 100).toFixed(4)}% / 滑点 ${executionInputs.execution_context.slippage_bps} bps` }] : []),
       {
         label: '调仓',
         value:
@@ -141,7 +150,7 @@ const LiveTradeConfigWizard: React.FC<Props> = ({
             : '全市场（不限定）'),
       },
     ],
-    [strategyId, strategyName, modeLabel, orderTypeLabel, liveTradeConfig, executionConfig],
+    [strategyId, strategyName, modeLabel, orderTypeLabel, liveTradeConfig, executionConfig, executionInputs],
   );
 
   const handleNext = async () => {
@@ -163,6 +172,7 @@ const LiveTradeConfigWizard: React.FC<Props> = ({
       await onConfirm({
         execution_config: executionConfig,
         live_trade_config: liveTradeConfig,
+        ...(executionInputs ? { execution_context: { ...executionInputs.execution_context } } : {}),
       });
     } finally {
       setSubmitting(false);
@@ -216,6 +226,7 @@ const LiveTradeConfigWizard: React.FC<Props> = ({
                 onExecutionConfigChange={setExecutionConfig}
                 onLiveTradeConfigChange={setLiveTradeConfig}
                 validationIssues={issues}
+                executionInputs={executionInputs}
               />
             </div>
           )}

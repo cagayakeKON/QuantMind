@@ -20,7 +20,8 @@ import { selectCurrentMarket } from '../../store/slices/uiSlice';
 import { useTradeWebSocket } from '../../hooks/useTradeWebSocket';
 import { buildTradingTopBarAccountInfo, resolveTradingAccountMode } from './utils/accountAdapter';
 import LiveTradeConfigWizard from './components/LiveTradeConfigWizard';
-import type { DeployMode, ExecutionConfig, LiveTradeConfig } from '../../types/liveTrading';
+import SimulationExecutionInputForm from './components/SimulationExecutionInputForm';
+import type { DatedExecutionContext, SimulationExecutionInputs, DeployMode, ExecutionConfig, LiveTradeConfig } from '../../types/liveTrading';
 
 type TradingMode = 'real' | 'simulation'; // 仅保留模拟交易：实盘入口已隐藏，store 被强制为 simulation（恢复见 git 历史）
 type ActiveTab = 'manage' | 'manual-task' | 'personal' | 'position' | 'history' | 'settings' | 'replay' | 'jp';
@@ -30,6 +31,7 @@ type PendingDeploy = {
     mode: DeployMode;
     executionConfig: ExecutionConfig;
     liveTradeConfig: LiveTradeConfig;
+    executionContext?: DatedExecutionContext;
 };
 type TradingReadinessCheckItem = {
     key: string;
@@ -73,8 +75,11 @@ const getErrorHttpStatus = (err: unknown): number | undefined => {
 
 // 实盘通道文案已随模拟专用化移除（恢复见 git 历史）。
 
-const StandardTradingPage: React.FC = () => {
+export const StandardTradingPage: React.FC = () => {
     const currentMarket = useAppSelector(selectCurrentMarket);
+    const datedMarket = getMarketConfig(currentMarket).simulationExecution ? currentMarket : undefined;
+    const [executionInputs, setExecutionInputs] = useState<SimulationExecutionInputs>();
+    const selectedInputs = executionInputs?.market === datedMarket ? executionInputs : undefined;
     const [activeTab, setActiveTab] = useState<ActiveTab>('manage');
 
     // 券商通道卡「去配置凭证」跳转：切到设置页签
@@ -114,6 +119,7 @@ const StandardTradingPage: React.FC = () => {
     const [wizardOpen, setWizardOpen] = useState(false);
     const [wizardStrategy, setWizardStrategy] = useState<StrategyFile | null>(null);
     const [wizardMode, setWizardMode] = useState<DeployMode>('SIMULATION');
+    const [wizardExecutionInputs, setWizardExecutionInputs] = useState<SimulationExecutionInputs>();
     const [confirmStarting, setConfirmStarting] = useState(false);
     const [revealedItemCount, setRevealedItemCount] = useState(0);
     const [isRevealing, setIsRevealing] = useState(false);
@@ -135,7 +141,9 @@ const StandardTradingPage: React.FC = () => {
         isFetchingRef.current = true;
         try {
             const { realTradingService } = await import('../../services/realTradingService');
-            const statusData = await realTradingService.getStatus(userId, tradingMode, tenantId);
+            const statusData = datedMarket
+                ? await realTradingService.getStatus(userId, tradingMode, tenantId, datedMarket, selectedInputs?.execution_context)
+                : await realTradingService.getStatus(userId, tradingMode, tenantId);
             const runtimeMode = resolveTradingAccountMode(statusData?.mode, tradingMode);
             const accountData = await realTradingService.getRuntimeAccount(userId, tenantId, runtimeMode, currentMarket).catch(() => null);
 
@@ -169,7 +177,7 @@ const StandardTradingPage: React.FC = () => {
         } finally {
             isFetchingRef.current = false;
         }
-    }, [tenantId, userId, tradingMode]);
+    }, [tenantId, userId, tradingMode, datedMarket, selectedInputs]);
 
     useEffect(() => {
         if (pollingPausedByAuth) {
@@ -236,6 +244,7 @@ const StandardTradingPage: React.FC = () => {
         mode: DeployMode,
         executionConfig: ExecutionConfig,
         liveTradeConfig: LiveTradeConfig,
+        executionContext?: DatedExecutionContext,
     ): Promise<boolean> => {
         try {
             const { realTradingService } = await import('../../services/realTradingService');
@@ -246,6 +255,7 @@ const StandardTradingPage: React.FC = () => {
                 tenantId,
                 executionConfig,
                 liveTradeConfig,
+                ...(executionContext ? [executionContext] : []),
             );
 
             // 10万并发架构核心：激活策略至 Redis 匹配池
@@ -297,7 +307,12 @@ const StandardTradingPage: React.FC = () => {
         isShadow: boolean,
         strategy?: StrategyFile | null,
     ) => {
+        if (datedMarket && !selectedInputs) {
+            message.error('请先选择可用的模拟执行输入');
+            return;
+        }
         const mode: DeployMode = 'SIMULATION';
+        setWizardExecutionInputs(selectedInputs ? structuredClone(selectedInputs) : undefined);
         setWizardStrategy(strategy || { id: strategyId, name: strategyId, source: 'personal', code: '' });
         setWizardMode(mode);
         setWizardOpen(true);
@@ -306,6 +321,7 @@ const StandardTradingPage: React.FC = () => {
     const handleWizardConfirm = useCallback(async (payload: {
         execution_config: ExecutionConfig;
         live_trade_config: LiveTradeConfig;
+        execution_context?: DatedExecutionContext;
     }) => {
         if (!wizardStrategy) return;
         const mode = wizardMode;
@@ -322,13 +338,14 @@ const StandardTradingPage: React.FC = () => {
             mode,
             executionConfig: payload.execution_config,
             liveTradeConfig: payload.live_trade_config,
+            ...(payload.execution_context ? { executionContext: { ...payload.execution_context } } : {}),
         });
         setWizardOpen(false);
 
         try {
             const { realTradingService } = await import('../../services/realTradingService');
             const tradingReadiness = await Promise.race([
-                realTradingService.getTradingPrecheck(mode),
+                realTradingService.getTradingPrecheck(mode, ...(payload.execution_context ? [payload.execution_context] : [])),
                 new Promise<never>((_, reject) =>
                     setTimeout(() => reject(new Error('交易准备度检测超时')), 10000)
                 ),
@@ -373,7 +390,7 @@ const StandardTradingPage: React.FC = () => {
             setPreflightStage('preflight');
             setPreflightLoading(true);
             const preflight = await Promise.race([
-                realTradingService.preflight(mode, userId, tenantId),
+                realTradingService.preflight(mode, userId, tenantId, ...(payload.execution_context ? [payload.execution_context] : [])),
                 new Promise<never>((_, reject) =>
                     setTimeout(() => reject(new Error('启动前自检超时')), 10000)
                 ),
@@ -502,6 +519,18 @@ const StandardTradingPage: React.FC = () => {
         { id: 'settings', label: '设置', icon: Settings },
     ];
 
+    const strategyConsole = (
+        <TopologyConsole
+            tenantId={tenantId}
+            userId={userId}
+            tradingMode={tradingMode}
+            onDeploy={handleDeploy}
+            onStop={handleStop}
+            onOpenManualTask={() => setActiveTab('manual-task')}
+            onOpenHistory={() => setActiveTab('history')}
+        />
+    );
+
     return (
         <div className="w-full h-full bg-[#f8fafc] p-6 flex flex-col overflow-hidden font-sans box-border">
             {/* Unified Frame Container with 32px Border Radius (BacktestCenter Style) */}
@@ -549,15 +578,18 @@ const StandardTradingPage: React.FC = () => {
                     {/* Right Content Area */}
                     <div className="flex-1 overflow-hidden relative bg-gray-50/50">
                     {activeTab === 'manage' && (
-                            <TopologyConsole
-                                tenantId={tenantId}
-                                userId={userId}
-                                tradingMode={tradingMode}
-                                onDeploy={handleDeploy}
-                                onStop={handleStop}
-                                onOpenManualTask={() => setActiveTab('manual-task')}
-                                onOpenHistory={() => setActiveTab('history')}
+                        datedMarket ? <div className="h-full min-h-0 flex flex-col">
+                            <SimulationExecutionInputForm
+                                key={datedMarket}
+                                market={datedMarket} userId={userId} tenantId={tenantId}
+                                savedContext={(isRuntimeActive ? status?.execution_context : accountInfo?.execution_context)?.market === datedMarket
+                                    ? (isRuntimeActive ? status?.execution_context : accountInfo?.execution_context) : undefined}
+                                runtimeActive={isRuntimeActive}
+                                onChange={setExecutionInputs}
+                                onAccountReset={fetchData}
                             />
+                            <div className="flex-1 min-h-0">{strategyConsole}</div>
+                        </div> : strategyConsole
                     )}
                     {activeTab === 'manual-task' && (
                         <ManualTaskPage tenantId={tenantId} userId={userId} tradingMode={tradingMode} onBack={() => setActiveTab('manage')} />
@@ -622,6 +654,7 @@ const StandardTradingPage: React.FC = () => {
                                         current.mode,
                                         current.executionConfig,
                                         current.liveTradeConfig,
+                                        ...(current.executionContext ? [current.executionContext] : []),
                                     );
                                     setConfirmStarting(false);
                                     if (ok) {
@@ -639,6 +672,9 @@ const StandardTradingPage: React.FC = () => {
                     body: { maxHeight: '70vh', overflowY: 'auto' },
                 }}
             >
+                {pendingDeploy?.executionContext && <div className="mb-3 text-sm text-slate-600">
+                    执行市场：{pendingDeploy.executionContext.market} · 交易日：{pendingDeploy.executionContext.trade_date}
+                </div>}
                 {preflightLoading ? (
                     <div className="space-y-3">
                         <div className="text-sm text-gray-600">
@@ -829,6 +865,7 @@ const StandardTradingPage: React.FC = () => {
                 } : null}
                 initialExecutionConfig={effectiveExecutionConfig || undefined}
                 initialLiveTradeConfig={effectiveLiveTradeConfig || undefined}
+                executionInputs={wizardExecutionInputs}
                 onCancel={() => setWizardOpen(false)}
                 onConfirm={handleWizardConfirm}
             />
