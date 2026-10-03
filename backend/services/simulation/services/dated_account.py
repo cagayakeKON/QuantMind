@@ -64,12 +64,13 @@ class DatedSimulationAccountManager(SimulationAccountManager):
     update_balance = _require_dated_mutation(SimulationAccountManager.update_balance)
     unlock_t1 = _require_dated_mutation(SimulationAccountManager.unlock_t1)
 
-    def __init__(self, db, redis, *, tenant_id, user_id, cash_rules):
+    def __init__(self, db, redis, *, tenant_id, user_id, cash_rules, cycle_inputs=None):
         super().__init__(redis)
         self.db = db
         self.tenant_id = tenant_id
         self.user_id = str(user_id)
         self.rules = cash_rules
+        self.cycle_inputs = deepcopy(cycle_inputs)
         self._original_redis = redis
         self._cache_paused = False
         self._applying_fill = False
@@ -192,12 +193,55 @@ class DatedSimulationAccountManager(SimulationAccountManager):
         self._row = await self._lock_row()
         if self._row is None:
             raise ValueError("Registered cash account is not initialized")
-        self._account = self.rules.prepare_day(self._restore(self._row), trade_date)
+        previous = self._restore(self._row)
+        prepared = self.rules.prepare_day(previous, trade_date)
+        if self.cycle_inputs is not None and {
+            symbol: (position["volume"], position["cost"])
+            for symbol, position in previous["positions"].items()
+        } != {
+            symbol: (position["volume"], position["cost"])
+            for symbol, position in prepared["positions"].items()
+        }:
+            raise NotImplementedError(
+                "Dated inventory actions require the original corporate-action ledger adapter"
+            )
+        self._account = prepared
 
     async def filled_volume_on_date(self, *, trade_date, symbol):
         if self._account is None:
             raise ValueError("Prepare the registered cash day first")
         return self.rules.filled_volume(self._account, trade_date, symbol)
+
+    def _checkpoint(self):
+        checkpoint = self.rules.checkpoint(self._account)
+        if self.cycle_inputs is not None:
+            checkpoint["cycle_inputs"] = deepcopy(self.cycle_inputs)
+        elif self._row is not None:
+            previous = self._states(self._row).get(self.execution_market, {})
+            if "cycle_inputs" in previous:
+                checkpoint["cycle_inputs"] = deepcopy(previous["cycle_inputs"])
+        return checkpoint
+
+    async def stage_day_checkpoint(self, projection):
+        if self._row is None or self._account is None or self._pending_order:
+            raise ValueError("Dated marking requires an exclusive prepared day")
+        self._account = self.rules.merge_marks(self._account, projection)
+        states = self._states(self._row)
+        states[self.execution_market] = self._checkpoint()
+        states[self.execution_market]["cycle_completed"] = True
+        self._row.market_state = states
+        self._publish = deepcopy(self._account)
+        await self.db.flush()
+
+    def completed_cycle_account(self, trade_date):
+        checkpoint = self._states(self._row).get(self.execution_market, {})
+        if checkpoint.get("cycle_completed") is True and (
+            checkpoint.get("cycle_inputs") or {}
+        ).get("trade_date") == str(trade_date):
+            if checkpoint.get("cycle_inputs") != self.cycle_inputs:
+                raise ValueError("Cycle day was completed with different model inputs")
+            return deepcopy(self._account)
+        return None
 
     async def apply_dated_fill(self, *, trade_date, symbol, side, matched, order_id):
         if self._account is None or self._pending_order is not None:
@@ -245,7 +289,7 @@ class DatedSimulationAccountManager(SimulationAccountManager):
         ):
             raise ValueError("Registered cash amounts differ from persisted fill")
         states = self._states(self._row)
-        states[self.execution_market] = self.rules.checkpoint(self._account)
+        states[self.execution_market] = self._checkpoint()
         self._row.market_state = states
         self._publish = deepcopy(self._account)
         self._checkpoint_staged = True

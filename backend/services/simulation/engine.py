@@ -163,6 +163,7 @@ class SimulationEngine:
         signal_run_id: str | None = None,
         allow_stale_quotes: bool | None = None,
         max_orders: int | None = None,
+        cycle_context=None,
     ) -> ExecutionReport:
         """
         执行一次模拟盘调仓周期。
@@ -202,13 +203,18 @@ class SimulationEngine:
 
         try:
             async with get_session() as db:
+                if cycle_context is not None:
+                    cycle_context.require_owner(tenant, uid, strategy_id, signal_run_id)
                 # 1. 加载信号
-                signals = await self.signal_loader.load_latest_signals(
-                    db=db,
-                    tenant_id=tenant,
-                    user_id=uid,
-                    run_id=signal_run_id,
-                )
+                if cycle_context is not None:
+                    signals = cycle_context.signals()
+                else:
+                    signals = await self.signal_loader.load_latest_signals(
+                        db=db,
+                        tenant_id=tenant,
+                        user_id=uid,
+                        run_id=signal_run_id,
+                    )
                 report.signal_count = len(signals)
 
                 if not signals:
@@ -224,6 +230,8 @@ class SimulationEngine:
                 # 1.5 市场推断：同一策略的信号来自同一模型/市场，按信号代码
                 # 众数确定本轮行情源、交易规则与账户维度。
                 market = infer_market_from_symbols([s.symbol for s in signals])
+                if cycle_context is not None and market != cycle_context.market:
+                    raise ValueError("Signals do not belong to the cycle market")
                 logger.info(
                     "SimulationEngine: market=%s (from %d signals)",
                     market.value,
@@ -247,10 +255,17 @@ class SimulationEngine:
                         resolver as pool_resolver,
                     )
 
+                    pool_context = ResolveContext(tenant_id=tenant, user_id=uid)
+                    if cycle_context is not None:
+                        pool_context.market = market.value
                     pool_snapshot = await pool_resolver.resolve(
-                        str(effective_pool_id),
-                        ResolveContext(tenant_id=tenant, user_id=uid),
+                        str(effective_pool_id), pool_context,
                     )
+                    if (
+                        cycle_context is not None
+                        and pool_snapshot.market != market.value
+                    ):
+                        raise ValueError("Stock pool does not belong to the cycle market")
                     outcome = filter_signals_by_pool(
                         [
                             {"symbol": s.symbol, "score": getattr(s, "score", 0.0), "_ref": s}
@@ -290,7 +305,18 @@ class SimulationEngine:
 
                 # 3. 获取当前账户状态（按市场隔离）
                 self._ensure_redis()
-                account_data = await self.account_manager.get_account(
+                account_manager = self.account_manager
+                if cycle_context is not None:
+                    strategy_config = cycle_context.configure(strategy_config)
+                    account_manager = cycle_context.accounts(db, self.redis)
+                    await account_manager.prepare_dated_day(cycle_context.trade_date)
+                    completed = account_manager.completed_cycle_account(
+                        cycle_context.trade_date
+                    )
+                    if completed is not None:
+                        report.account_snapshot = cycle_context.public_account(completed)
+                        return report
+                account_data = await account_manager.get_account(
                     user_id=canonical_sim_uid(uid),
                     tenant_id=tenant,
                     market=market.value,
@@ -314,8 +340,13 @@ class SimulationEngine:
                     if int(float((pos or {}).get("volume") or 0)) > 0
                 ]
                 symbols = list(dict.fromkeys([s.symbol for s in signals] + position_symbols))
-                quotes, live_ticks = await self._load_live_quotes(symbols)
-                if stale_ok and len(live_ticks) < len(symbols):
+                cycle_bars = {}
+                if cycle_context is not None:
+                    quotes, cycle_bars = await cycle_context.quotes(symbols)
+                    live_ticks = {}
+                else:
+                    quotes, live_ticks = await self._load_live_quotes(symbols)
+                if cycle_context is None and stale_ok and len(live_ticks) < len(symbols):
                     # Bootstrap / 盘后：实时行情停更后往往只剩零星几只新鲜
                     # （实测 2/2827）。原实现只在「实时全空」时才用本地日线兜底，
                     # 部分覆盖时行情字典里就只有那几只，而选股阶段 _is_tradable
@@ -342,7 +373,11 @@ class SimulationEngine:
                                 len(bar_quotes),
                             )
                 if not quotes:
-                    report.error = "realtime_quote_unavailable"
+                    report.error = (
+                        "dated_quote_unavailable"
+                        if cycle_context is not None
+                        else "realtime_quote_unavailable"
+                    )
                     logger.error(
                         "SimulationEngine: no fresh realtime quote; cycle rejected "
                         "tenant=%s user=%s symbols=%d",
@@ -353,14 +388,22 @@ class SimulationEngine:
                     return report
 
                 # 5. 调仓计算
-                orders = self.rebalance_calculator.calculate(
+                calculator = self.rebalance_calculator
+                if cycle_context is not None:
+                    calculator = cycle_context.calculator(cycle_bars)
+                orders = calculator.calculate(
                     signals=signals,
                     strategy=strategy_config,
                     quotes=quotes,
                     account=account,
                 )
                 orders = self._apply_risk_buy_locks(
-                    orders, tenant=tenant, user_id=uid, trade_date=datetime.now().date()
+                    orders,
+                    tenant=tenant,
+                    user_id=uid,
+                    trade_date=cycle_context.trade_date
+                    if cycle_context is not None
+                    else datetime.now().date(),
                 )
                 orders = self._apply_max_buy_drop_gate(
                     orders, live_ticks=live_ticks, tenant=tenant, user_id=uid
@@ -375,10 +418,26 @@ class SimulationEngine:
                         tenant,
                         uid,
                     )
+                    if cycle_context is not None:
+                        await cycle_context.finish_day(account_manager)
+                        await db.commit()
+                        await self._sync_snapshot(tenant, uid, market)
+                        report.account_snapshot = cycle_context.public_account(
+                            await account_manager.get_account(
+                                canonical_sim_uid(uid),
+                                tenant_id=tenant,
+                                market=market.value,
+                            )
+                        )
                     return report
 
                 # 6. 模拟撮合（ashare_matcher + 当日不复权日 K）
-                exec_engine = SimulationExecutionEngine(db, self.account_manager)
+                if cycle_context is not None:
+                    exec_engine = SimulationExecutionEngine(
+                        db, account_manager, execution_context=cycle_context.execution
+                    )
+                else:
+                    exec_engine = SimulationExecutionEngine(db, self.account_manager)
                 failed_orders: list[str] = []
                 for order in orders:
                     # 单笔失败不能拖垮整个调仓批次。
@@ -445,18 +504,24 @@ class SimulationEngine:
                         f"{len(failed_orders)} 笔订单执行异常已隔离"
                     )
 
+                if cycle_context is not None:
+                    await cycle_context.finish_day(account_manager)
                 await db.commit()
 
                 # 7. 同步快照
                 await self._sync_snapshot(tenant, uid, market)
 
                 # 8. 更新账户快照
-                updated_account = await self.account_manager.get_account(
+                updated_account = await account_manager.get_account(
                     user_id=canonical_sim_uid(uid),
                     tenant_id=tenant,
                     market=market.value,
                 )
                 report.account_snapshot = updated_account or {}
+                if cycle_context is not None:
+                    report.account_snapshot = cycle_context.public_account(
+                        updated_account
+                    )
 
             logger.info(
                 "SimulationEngine: 执行完成, tenant=%s user=%s orders=%d filled=%d rejected=%d",
@@ -890,6 +955,11 @@ class SimulationEngine:
         )
 
         # 创建订单对象
+        dated_context = getattr(exec_engine, "execution_context", None)
+        if dated_context is not None:
+            order.symbol = StockCodeUtil.to_prefix(
+                order.symbol, market=dated_context.market
+            )
         sim_order = SimOrder(
             tenant_id=tenant_id,
             user_id=canonical_sim_uid(user_id),
@@ -939,7 +1009,7 @@ class SimulationEngine:
         # allow_stale_fill 分支下不会走 assess_execution_window，此处先置 None，
         # 避免下游部分成交排队时引用未初始化变量（历史 UnboundLocalError）。
         session_decision = None
-        if not allow_stale_fill:
+        if dated_context is None and not allow_stale_fill:
             session_decision = await exec_engine.assess_execution_window(sim_order)
             if not session_decision.can_execute:
                 result = ExecutionResult(
@@ -949,17 +1019,26 @@ class SimulationEngine:
                 await exec_engine.mark_rejected(sim_order, result.message)
                 return result
 
-        snapshot = (
-            exec_engine.market_snapshot_from_tick(order.symbol, live_tick)
-            if live_tick
-            else None
-        )
-        result = await exec_engine.execute_order(
-            sim_order,
-            market=getattr(market, "value", None),
-            snapshot=snapshot,
-            allow_stale_market_fill=allow_stale_fill,
-        )
+        if dated_context is not None:
+            bar = await asyncio.to_thread(
+                dated_context.reader.get_bar, order.symbol, dated_context.trade_date
+            )
+            if bar is None:
+                result = ExecutionResult(success=False, message="NO_MARKET_DATA")
+            else:
+                result = await exec_engine.execute_from_bar(sim_order, bar, market)
+        else:
+            snapshot = (
+                exec_engine.market_snapshot_from_tick(order.symbol, live_tick)
+                if live_tick
+                else None
+            )
+            result = await exec_engine.execute_order(
+                sim_order,
+                market=getattr(market, "value", None),
+                snapshot=snapshot,
+                allow_stale_market_fill=allow_stale_fill,
+            )
         if result.success:
             await exec_engine.apply_filled(sim_order, result)
             if result.quantity + 1e-6 < float(order.quantity or 0.0):
@@ -979,21 +1058,22 @@ class SimulationEngine:
             # 双轨镜像：虚拟成交已生效，按开关/白名单/限额向大 QMT 补一笔真单。
             # 用独立会话（db=None），避免真单写入提前提交本周期未完成的虚拟账本；
             # mirror_virtual_fill 自身吞掉全部异常，不影响上面的虚拟成交。
-            await mirror_virtual_fill(
-                db=None,
-                redis=self.redis,
-                tenant_id=tenant_id,
-                user_id=user_id,
-                symbol=order.symbol,
-                side=order.side,
-                quantity=result.quantity,
-                price=float(result.price or order.price or 0),
-                sim_order_id=str(sim_order.order_id or ""),
-                run_id=run_id,
-                strategy_id=strategy_id,
-                market=str(getattr(market, "value", market) or ""),
-                source="simulation_engine",
-            )
+            if dated_context is None:
+                await mirror_virtual_fill(
+                    db=None,
+                    redis=self.redis,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    symbol=order.symbol,
+                    side=order.side,
+                    quantity=result.quantity,
+                    price=float(result.price or order.price or 0),
+                    sim_order_id=str(sim_order.order_id or ""),
+                    run_id=run_id,
+                    strategy_id=strategy_id,
+                    market=str(getattr(market, "value", market) or ""),
+                    source="simulation_engine",
+                )
         else:
             await exec_engine.mark_rejected(sim_order, result.message)
 

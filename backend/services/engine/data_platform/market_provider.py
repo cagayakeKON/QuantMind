@@ -22,6 +22,7 @@ class LocalMarketProvider:
     replay_session_input_preparer: str | None = None
     strategy_template_market: str | None = None
     hosted_schedule_factory: str | None = None
+    simulation_cycle_input_preparer: str | None = None
 
     def open(self):
         cls = getattr(importlib.import_module(self.module), self.hub_class)
@@ -45,6 +46,7 @@ LOCAL_MARKET_PROVIDERS = {
         replay_session_input_preparer="backend.services.simulation.jp.replay_data.prepare_session_inputs",
         strategy_template_market="japan",
         hosted_schedule_factory="backend.services.simulation.jp.schedule.open_schedule_context",
+        simulation_cycle_input_preparer="backend.services.simulation.jp.cycle_data.prepare_cycle_inputs",
     ),
 }
 
