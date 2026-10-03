@@ -26,7 +26,18 @@ class LocalMarketProvider:
     simulation_account_input_adapter: str | None = None
     fundamental_snapshot_reader_factory: str | None = None
 
-    def open(self):
+    def open(self, data_version: str | None = None):
+        if data_version is not None:
+            if not data_version or not self.execution_data_factory:
+                raise ValueError("A published stock snapshot version is required")
+            module, factory = self.execution_data_factory.rsplit(".", 1)
+            reader = getattr(importlib.import_module(module), factory)(data_version)
+            hub = reader.hub
+            if hub.data_dir.name != data_version:
+                raise ValueError(
+                    "Stock snapshot publication does not match its version"
+                )
+            return hub
         cls = getattr(importlib.import_module(self.module), self.hub_class)
         return cls(cls().data_dir)  # One immutable publication per request.
 

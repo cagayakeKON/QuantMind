@@ -14,6 +14,7 @@ from sqlalchemy import text
 
 from .services import StockQueryService, StockSearchService
 from backend.shared.stock_utils import StockCodeUtil
+from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
 
 logger = logging.getLogger(__name__)
 
@@ -185,18 +186,33 @@ async def get_all_stocks(
 
 
 @router.get("/stocks/{symbol}")
-async def get_stock_info(symbol: str, market: str | None = Query(None), asof: date | None = Query(None)):
+async def get_stock_info(
+    symbol: str,
+    market: str | None = Query(None),
+    asof: date | None = Query(None),
+    data_version: str | None = None,
+):
     """获取股票详细信息"""
     logger.info("Fetching stock info", extra={"symbol": symbol})
 
-    if str(market or "").upper() == "JP" or StockCodeUtil.is_jp_symbol(symbol):
+    local_market = (
+        "JP" if StockCodeUtil.is_jp_symbol(symbol) else str(market or "").upper()
+    )
+    if local_market in LOCAL_MARKET_PROVIDERS:
         from backend.services.engine.data_platform.local_stock_snapshot import local_stock_snapshot
         try:
-            snapshot = await asyncio.to_thread(local_stock_snapshot, symbol, "JP", asof)
+            if data_version is None:
+                snapshot = await asyncio.to_thread(
+                    local_stock_snapshot, symbol, local_market, asof
+                )
+            else:
+                snapshot = await asyncio.to_thread(
+                    local_stock_snapshot, symbol, local_market, asof, data_version
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if snapshot is None:
-            raise HTTPException(status_code=404, detail="No dated JP ordinary-stock snapshot")
+            raise HTTPException(status_code=404, detail=f"No dated {local_market} ordinary-stock snapshot")
         return {"success": True, "data": snapshot, "source": snapshot["source"]}
 
     try:

@@ -52,6 +52,10 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
     const datedValuation = marketConfig.simulationExecution === 'dated_daily';
     const valuationAccount = datedValuation && accountInfo?.execution_context?.market !== currentMarket ? null : accountInfo;
     const [stockNames, setStockNames] = useState<Record<string, string>>({});
+    const [datedNames, setDatedNames] = useState<{scope: string; names: Record<string, string>}>({scope: '', names: {}});
+    const savedContext = valuationAccount?.execution_context;
+    const nameScope = datedValuation && savedContext
+        ? JSON.stringify([currentMarket, savedContext.trade_date, savedContext.data_version]) : '';
     const [livePrices, setLivePrices] = useState<Record<string, number>>({});
     const livePricesRef = useRef<Record<string, number>>({});
     const subscribedRef = useRef<string[]>([]);
@@ -83,6 +87,26 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
         };
         fetchNames();
     }, [accountInfo, stockNames, datedValuation]);
+
+    React.useEffect(() => {
+        if (!isActive || !nameScope || !savedContext) return;
+        const cached = datedNames.scope === nameScope ? datedNames.names : {};
+        const codes = buildNormalizedHoldings(valuationAccount)
+            .filter(holding => holding.name === holding.code && !cached[holding.code])
+            .map(holding => holding.code);
+        if (!codes.length) return;
+        let current = true;
+        const context = {market: currentMarket, asof: savedContext.trade_date, data_version: savedContext.data_version};
+        void marketDataService.getStockDetailsBatch(codes, 10, 50, context).then(results => {
+            if (!current) return;
+            const names = {...cached};
+            for (const {code, result} of results) {
+                if (result.success && result.data?.name) names[code] = result.data.name;
+            }
+            if (Object.keys(names).length > Object.keys(cached).length) setDatedNames({scope: nameScope, names});
+        }).catch(error => { if (current) console.error('Failed to fetch dated stock names:', error); });
+        return () => { current = false; };
+    }, [isActive, nameScope, currentMarket, valuationAccount, datedNames]);
 
     // 订阅持仓股实时行情（topic stock.{code}，stream 服务 2s 推一次）
     useEffect(() => {
@@ -121,8 +145,10 @@ const PositionMonitor: React.FC<PositionMonitorProps> = ({ userId: _userId, isAc
 
     const holdings = React.useMemo(() => {
         const normalized = buildNormalizedHoldings(valuationAccount, datedValuation ? {} : stockNames);
-        return datedValuation ? normalized : mergeLivePrices(normalized, livePrices);
-    }, [valuationAccount, stockNames, livePrices, datedValuation]);
+        if (datedValuation) return normalized.map(holding => holding.name === holding.code && datedNames.scope === nameScope
+            ? {...holding, name: datedNames.names[holding.code] || holding.name} : holding);
+        return mergeLivePrices(normalized, livePrices);
+    }, [valuationAccount, stockNames, livePrices, datedValuation, datedNames, nameScope]);
 
     const summary = React.useMemo(
         () => getPositionSummary(valuationAccount, holdings),

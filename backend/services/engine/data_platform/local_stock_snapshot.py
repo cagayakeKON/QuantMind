@@ -7,9 +7,16 @@ from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_P
 from backend.shared.stock_utils import StockCodeUtil
 
 
-def local_stock_snapshot(symbol: str, market: str, asof: date | None = None):
+def local_stock_snapshot(
+    symbol: str,
+    market: str,
+    asof: date | None = None,
+    data_version: str | None = None,
+):
     provider = LOCAL_MARKET_PROVIDERS[market]
-    hub = provider.open()
+    if data_version is not None and asof is None:
+        raise ValueError("A pinned stock snapshot requires an explicit asof date")
+    hub = provider.open(data_version) if data_version is not None else provider.open()
     prefix = StockCodeUtil.to_prefix(symbol, market=market)
     suffix = StockCodeUtil.to_suffix(prefix, market=market)
     end = asof or date.today()
@@ -48,6 +55,8 @@ def local_stock_snapshot(symbol: str, market: str, asof: date | None = None):
         "change": None,
         "change_pct": None,
     }
+    if data_version is not None:
+        result["asof"] = str(end)
     if not prices.empty:
         latest = prices.iloc[-1]
         result.update(

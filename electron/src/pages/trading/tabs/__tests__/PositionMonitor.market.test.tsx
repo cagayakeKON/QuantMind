@@ -43,6 +43,51 @@ describe('original position view with optional dated valuation', () => {
     expect(screen.queryByText('SH600036')).not.toBeInTheDocument();
     expect(screen.getByLabelText('持仓估值来源')).toHaveTextContent('尚无已提交估值');
   });
+  it('fills missing names from the saved publication/date without using returned latest prices', async () => {
+    const saved = account();
+    (saved.positions as any[])[0].name = '';
+    mocks.names.mockResolvedValue([{code: 'JP72030', result: {success: true, data: {name: '日期资料名称', price: 999}}}]);
+    render(<PositionMonitor userId="7" isActive accountInfo={saved} />);
+    await waitFor(() => expect(screen.getByText('日期资料名称')).toBeInTheDocument());
+    expect(mocks.names).toHaveBeenCalledWith(['JP72030'], 10, 50, {market: 'JP', asof: '2026-09-29', data_version: 'v1'});
+    expect(screen.getByText('JPY 200.00')).toBeInTheDocument();
+    expect(screen.queryByText('JPY 999.00')).not.toBeInTheDocument();
+    expect(mocks.subscribe).not.toHaveBeenCalled();
+  });
+  it('ignores an earlier date/version name reply after switching checkpoint', async () => {
+    const first = account();
+    (first.positions as any[])[0].name = '';
+    const second = structuredClone(first);
+    second.execution_context = {...second.execution_context!, trade_date: '2026-09-30', data_version: 'v2'};
+    let resolve!: (value: unknown[]) => void;
+    mocks.names.mockImplementationOnce(() => new Promise(done => {resolve = done;}));
+    mocks.names.mockResolvedValue([{code: 'JP72030', result: {success: true, data: {name: '新日期名称'}}}]);
+    const view = render(<PositionMonitor userId="7" isActive accountInfo={first} />);
+    view.rerender(<PositionMonitor userId="7" isActive accountInfo={second} />);
+    await waitFor(() => expect(screen.getByText('新日期名称')).toBeInTheDocument());
+    await act(async () => {resolve([{code: 'JP72030', result: {success: true, data: {name: '迟到的旧名称'}}}]);});
+    expect(screen.queryByText('迟到的旧名称')).not.toBeInTheDocument();
+    expect(screen.getByText('新日期名称')).toBeInTheDocument();
+  });
+  it('preserves saved inline names when later checkpoints add them', async () => {
+    const first = account();
+    (first.positions as any[])[0].name = '';
+    mocks.names.mockResolvedValue([{code: 'JP72030', result: {success: true, data: {name: '补全名称'}}}]);
+    const view = render(<PositionMonitor userId="7" isActive accountInfo={first} />);
+    await waitFor(() => expect(screen.getByText('补全名称')).toBeInTheDocument());
+    view.rerender(<PositionMonitor userId="7" isActive accountInfo={account()} />);
+    expect(screen.getByText('已有账户名称')).toBeInTheDocument();
+    expect(screen.queryByText('补全名称')).not.toBeInTheDocument();
+  });
+  it('keeps code fallback when historical metadata is unavailable, including StrictMode', async () => {
+    const saved = account();
+    (saved.positions as any[])[0].name = '';
+    mocks.names.mockResolvedValue([{code: 'JP72030', result: {success: false}}]);
+    render(<React.StrictMode><PositionMonitor userId="7" isActive accountInfo={saved} /></React.StrictMode>);
+    await waitFor(() => expect(mocks.names).toHaveBeenCalledTimes(2));
+    expect(screen.getAllByText('JP72030')).toHaveLength(2);
+    expect(screen.getByText('JPY 200.00')).toBeInTheDocument();
+  });
   it('does not carry latest names from the previous global account into a dated checkpoint', async () => {
     mocks.market = 'CN';
     mocks.names.mockResolvedValue([{code: 'JP72030', result: {success: true, data: {name: '最新资料名称'}}}]);

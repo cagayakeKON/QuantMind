@@ -2,6 +2,13 @@
 import axios from 'axios';
 import store from '../store';
 import { normalizeStockCode } from '../utils/portfolioUtils';
+import type { AppMarket } from '../store/slices/uiSlice';
+
+export interface StockSnapshotContext {
+  market: AppMarket;
+  asof: string;
+  data_version: string;
+}
 
 // 基础配置 - 使用统一端口配置
 import { SERVICE_URLS } from '../config/services';
@@ -217,12 +224,13 @@ class MarketDataService {
   }
 
   // 获取股票详细信息
-  async getStockDetail(code: string): Promise<{
+  async getStockDetail(code: string, snapshotContext?: StockSnapshotContext): Promise<{
     success: boolean;
     data?: StockInfo;
     message: string;
     data_source?: string;
   }> {
+    if (snapshotContext) snapshotContext = {...snapshotContext};
     console.log('获取股票详情:', code);
 
     if (!code?.trim()) {
@@ -233,13 +241,22 @@ class MarketDataService {
     }
 
     try {
-      const normalized = this.normalizeStockSymbol(code);
+      if (snapshotContext && (!snapshotContext.asof || !snapshotContext.data_version)) {
+        return {success: false, message: '日期股票资料需要日期及已发布版本'};
+      }
+      const normalized = snapshotContext ? normalizeStockCode(code, snapshotContext.market) : this.normalizeStockSymbol(code);
       const normalizedCode = encodeURIComponent(normalized);
       const response = await apiClient.get(`/api/v1/stocks/${normalizedCode}`, {
-        params: {market: store.getState().ui.currentMarket},
+        params: snapshotContext ? {...snapshotContext} : {market: store.getState().ui.currentMarket},
       });
       const raw = response.data || {};
       const payload = (raw?.data && typeof raw.data === 'object') ? raw.data : raw;
+      if (snapshotContext && (
+        payload?.data_version !== snapshotContext.data_version
+        || payload?.asof !== snapshotContext.asof
+        || payload?.market !== snapshotContext.market
+        || normalizeStockCode(String(payload?.symbol ?? payload?.code ?? ''), snapshotContext.market) !== normalized
+      )) return {success: false, message: '日期股票资料与请求的代码、日期或版本不一致'};
       const name = String(
         payload?.name
         ?? payload?.stock_name
@@ -264,6 +281,7 @@ class MarketDataService {
         };
       }
 
+      if (snapshotContext) return {success: false, message: `股票 ${code} 在所选日期没有名称资料`};
       const searchResp = await this.searchStocks(code.trim(), 10);
       const exact = (searchResp.data || []).find((item) => {
         const symbol = String(item.symbol || '').toUpperCase();
@@ -292,6 +310,7 @@ class MarketDataService {
       };
     } catch (error) {
       console.error('获取股票详情失败:', error);
+      if (snapshotContext) return {success: false, message: '日期股票资料不可用'};
       try {
         const searchResp = await this.searchStocks(code.trim(), 10);
         const exact = (searchResp.data || []).find((item) => {
@@ -355,8 +374,10 @@ class MarketDataService {
   async getStockDetailsBatch(
     codes: string[],
     batchSize: number = 5,
-    delayMs: number = 100
+    delayMs: number = 100,
+    snapshotContext?: StockSnapshotContext,
   ): Promise<Array<{ code: string; result: any }>> {
+    if (snapshotContext) snapshotContext = {...snapshotContext};
     console.log(`[MarketDataService] 开始分批获取股票详情: 总数=${codes.length}, 每批=${batchSize}`);
     const results: Array<{ code: string; result: any }> = [];
 
@@ -369,7 +390,7 @@ class MarketDataService {
 
       const batchPromises = batch.map(async (code) => {
         try {
-          const result = await this.getStockDetail(code);
+          const result = snapshotContext ? await this.getStockDetail(code, snapshotContext) : await this.getStockDetail(code);
           return { code, result };
         } catch (err) {
           console.error(`[MarketDataService] 请求股票详情失败: ${code}`, err);
