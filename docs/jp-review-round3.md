@@ -68,4 +68,16 @@ T06 已接入公共研究骨架、原 batch-features API 与注册市场特征�
 
 42 个改动/新增 Python 文件与修复前 HEAD 对照，无新增 Ruff 诊断；新增文件格式及 diff 检查通过。依赖缺失、Windows 子进程环境及不合法 fixture 先单独确认，不通过修改业务规则掩盖。全部临时依赖、数据库和示例文件在仓库外，不改变项目 requirements。
 
-本机 Docker Desktop 的 Linux 引擎未恢复，只读 docker info 超时。本轮未完成 bind mount 后端重启、运行容器健康和生产摘要只读复核，也未同步运行中的 QuantBot 技能池。临时数据库测试不能代替部署验收；不合并 master，不宣称所有功能可用。此前自动审批拒绝删除 Docker 运行 socket，未绕过此拒绝。数据集、模型、缓存、私有环境及四个本机未跟踪文件不提交。
+初次业务修复交付时，Docker Desktop 的 Linux 引擎不可用，只读 docker info 超时；当时未完成后端重启、容器健康、生产摘要复核和 QuantBot 技能同步。该阶段临时数据库测试不能代替部署验收。后续用户明确要求先恢复 Docker 再测试，完成情况如下；不合并 master，不宣称所有功能可用。数据集、模型、缓存、私有环境及四个本机未跟踪文件不提交。
+
+### Docker 恢复后的真实容器验证（2026-10-04）
+
+Windows 11 Build 26200、Docker Desktop 4.76.0 日志确认 Inference manager 在 dockerInference socket 初始化失败，导致 Linux 引擎未启动。与 [Docker 官方仓库问题 527](https://github.com/docker/desktop-feedback/issues/527) 的报告一致。停止卡住的 Docker 组件及 docker-desktop WSL 后，把 LocalAppData 下 Docker/run 和 docker-secrets-engine 两个通信目录改名为 backup-20261004-docker-repair 备份，校验父目录无重解析点；保留原文件与容器 VHD。没有删除 socket、恢复出厂、清理磁盘或卸载发行版。Docker 引擎恢复为 29.5.2 linux，原容器重新启动；两个备份保留。
+
+显式重启 quantmind、唯一 celery worker 与 beat，bind mount 的执行代码 SHA 与工作区一致，运行代码为 14ca7b17。8000–8003 /health 全部 200；DB/Redis 已连接，stream ws_core_started=true；后端、worker、beat、DB、Redis、gateway 和 QuantBot 均 healthy。独立只读 review 确认 Redis 恰好一个 BRPOP 消费者，来自 quantmind-celery。
+
+实际 quantmind 容器中十一文件联合为 124 项通过、1 项环境失败：QuantBot 的仓库校验脚本没有挂载在后端 /app/skills，FileNotFoundError 发生在加载校验脚本时，不是配置校验断言失败。原校验测试函数在有仓库挂载的 qwenpaw 容器实际执行通过；安装后 validator 与仓库源 SHA 相同，六种市场配置（CN/HK/US/JP/CRYPTO/FUTURES）全部校验通过。没有更改生产挂载或把技能目录手工拷入技能池。另对后端公共执行文件定向运行 14 项通过、1 项未选（该 QuantBot 用例）。此前联合已通过的用例不重复计数。
+
+原市场 Lab 六文件在实际后端容器中 96 项通过、无跳过/失败，与上述 124 项为不同用例。后端实际通过集合共 220 项；QuantBot 校验按所属运行时单独记录，不能写成第一次 125 联合全绿。此前本机 99/26 与这次容器运行存在重叠，不相加。容器真实使用 Qlib 0.9.7、MLflow 3.15.0、PostgreSQL 15。
+
+通过项目 quantbot_init.sh --skills-only 经 API 导入和广播 30 个项目技能，重启 qwenpaw；实际显示 46/46 技能启用（含原内置技能），model-training-config 技能测试通过。未改 LLM 配置或人格。部署前后普通金融来源及两份旧 JP 来源摘要相同；两份公共回放、7 委托、7 成交、5 权益快照和2份迁移凭证均保持。没有推进生产模拟成交或重置账户。
