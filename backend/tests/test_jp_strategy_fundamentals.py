@@ -230,7 +230,15 @@ def get_strategy_instance():
         assert result.status == "completed", result.error_message
         assert result.config["strategy_decision_class"] == "RedisRecordingStrategy"
         assert [(row["symbol"], row["quantity"]) for row in result.trades] == [
-            ("JP216A0", 900)
+            ("JP216A0", 1800)
         ]
+        assert float(result.trades[0]["price"]) == 50
+        assert result.trades[0]["commission"] == 0
+        assert result.trades[0]["settlement_date"] == "2026-10-01"
+        assert (
+            sum(float(f["amount"]) for f in result.advanced_stats["cash_funds"])
+            == 10000
+        )
+        assert result.equity_curve[-1]["value"] == 100000
         assert saved == ["running", "completed"]
     assert D._provider is original_provider

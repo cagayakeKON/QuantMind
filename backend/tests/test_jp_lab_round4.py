@@ -362,11 +362,12 @@ def test_watch_and_daily_scan_keep_main_publication_and_params(provider, monkeyp
     }
     assert stored[0]["params"] == {"period": 5}
     monkeypatch.setattr(daily_scan, "list_watch", lambda: stored)
-    writes = []
+    from backend.tests.test_jp_sync_watch_review import RecordingRedis
+    redis = RecordingRedis()
     monkeypatch.setattr(
         daily_scan,
         "get_redis_sentinel_client",
-        lambda: SimpleNamespace(set=lambda *args: writes.append(args)),
+        lambda: redis,
     )
     monkeypatch.setattr(
         runner,
@@ -393,7 +394,7 @@ def test_watch_and_daily_scan_keep_main_publication_and_params(provider, monkeyp
         result.config["stock_pool"] == "list:JP72030"
         and result.config["market"] == "JP"
     )
-    assert writes
+    assert redis.get(daily_scan.SIGNALS_KEY)
     assert len(scan["signals"]) == 1
     assert scan["signals"][0]["market"] == "JP"
     assert scan["signals"][0]["data_version"] == provider.reader.data_version

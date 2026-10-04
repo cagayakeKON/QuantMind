@@ -476,6 +476,13 @@ class JapanReplayCashRules:
             metadata["state"]["positions"][canonical]["last_price"] = str(price)
         return self.project(updated)
 
+    def closing_marks(self, account, day):
+        from .valuation import closing_marks
+
+        if self._metadata(account)["prepared_date"] != str(day):
+            raise ValueError("JP closing marks require the exact prepared session")
+        return closing_marks(self.reader, account, day)
+
     def backtest_state(self, account):
         """Read the exact cash journal without exposing mutable account state."""
         return deepcopy(self._metadata(account)["state"])

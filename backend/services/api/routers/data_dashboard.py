@@ -43,6 +43,111 @@ def _parse_date(s: str | None) -> date | None:
 _AGG_CACHE = None
 
 
+def _registered_provider(market: str):
+    from backend.services.engine.data_platform.market_provider import (
+        LOCAL_MARKET_PROVIDERS,
+    )
+
+    return LOCAL_MARKET_PROVIDERS.get(market.upper())
+
+
+_NATIVE_FIELDS = (
+    "daily_kline", "stock_list", "sector", "valuation", "calendar", "l1_factors"
+)
+
+
+def _native_field_status(provider):
+    """Describe the actual immutable schemas, including unavailable datasets."""
+    import pyarrow.parquet as pq
+
+    raw, research = provider.open_raw(), provider.open()
+    paths = {
+        "daily_kline": "1_kline_data/daily_unadjusted",
+        "stock_list": "2_base_sector/master",
+        "sector": "2_base_sector/master",
+        "valuation": "5_technical_derived/valuation",
+        "calendar": "2_base_sector/trading_calendar",
+        "l1_factors": "6_ml_datasets/l1_factors",
+    }
+    fields = []
+    for field, relative in paths.items():
+        hub = research if field == "l1_factors" else raw
+        published = (hub.data_dir / "manifest.json").is_file()
+        files = (
+            sorted((hub.data_dir / relative).glob("**/*.parquet")) if published else []
+        )
+        fields.append(
+            {
+                "field": field,
+                "tier": "T1",
+                "primary": provider.source,
+                "fallbacks": [],
+                "consensus": False,
+                "cleanup": False,
+                "available": bool(files),
+                "data_version": hub.data_dir.name if published else None,
+                "columns": pq.read_schema(files[-1]).names if files else [],
+            }
+        )
+    return fields
+
+
+def _fetch_field(market: str, field: str, symbol: str, start=None, end=None):
+    """Use one registered raw publication, preserving old aggregator routes."""
+    provider = _registered_provider(market)
+    if provider is None:
+        return _get_aggregator().fetch(
+            market=market, field=field, symbol=symbol, start=start, end=end
+        )
+    if field not in _NATIVE_FIELDS:
+        raise HTTPException(status_code=422, detail=f"当前市场未发布字段: {field}")
+    from types import SimpleNamespace
+    from backend.shared.stock_utils import StockCodeUtil
+
+    hub = provider.open() if field == "l1_factors" else provider.open_raw()
+    if field == "daily_kline":
+        frame = hub.fetch_daily_kline(symbol, start, end, adjust="none")
+    elif field == "valuation":
+        frame = hub.fetch_valuation(symbol, start, end)
+    elif field == "calendar":
+        frame = hub.fetch_calendar(start, end)
+    elif field == "l1_factors":
+        frame = hub.fetch_l1_factors(symbol, start, end)
+        if frame.empty:
+            raise HTTPException(
+                status_code=422, detail="该区间没有已发布的原生 L1 特征"
+            )
+    else:
+        frame = hub.fetch_stock_list(as_of=end)
+        if not frame.empty and symbol:
+            wanted = StockCodeUtil.to_suffix(symbol, market=market)
+            frame = frame[frame.symbol.eq(wanted)].copy()
+        if field == "sector":
+            columns = [
+                c
+                for c in (
+                    "symbol",
+                    "trade_date",
+                    "stock_name",
+                    "industry_code",
+                    "industry_name",
+                )
+                if c in frame
+            ]
+            frame = frame[columns].copy()
+    if not frame.empty and "symbol" in frame:
+        frame = frame.copy()
+        frame["symbol"] = frame.symbol.map(
+            lambda value: StockCodeUtil.to_prefix(value, market=market)
+        )
+    return SimpleNamespace(
+        data=frame,
+        source_used=provider.source,
+        fallbacks_tried=[],
+        data_version=hub.data_dir.name,
+    )
+
+
 def _get_aggregator():
     global _AGG_CACHE
     if _AGG_CACHE is None:
@@ -78,6 +183,15 @@ async def list_fields(
     market: str = Query("A", description="A / HK / US"),
     current_user: dict = Depends(get_current_user),
 ):
+    provider = _registered_provider(market)
+    if provider:
+        import asyncio
+
+        fields = await asyncio.to_thread(_native_field_status, provider)
+        return {
+            "success": True, "market": market.upper(),
+            "fields": fields, "count": len(fields),
+        }
     routing = _get_routing()
     fields = routing.list_fields(market.upper())
     result = []
@@ -121,17 +235,20 @@ async def get_field_data(
         ed = ed or date.today()
         sd = sd or (ed - timedelta(days=days))
 
-    agg = _get_aggregator()
+    provider = _registered_provider(market)
+    fetch = _fetch_field if provider else _get_aggregator().fetch
     try:
         import asyncio
         result = await asyncio.to_thread(
-            agg.fetch,
+            fetch,
             market=market.upper(),
             field=field,
             symbol=symbol.upper(),
             start=sd,
             end=ed,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.warning("field-data fetch failed: market=%s field=%s symbol=%s err=%s",
                         market, field, symbol, exc)
@@ -156,6 +273,7 @@ async def get_field_data(
         "count": len(records),
         "columns": list(df.columns),
         "data": records,
+        **({"data_version": result.data_version} if hasattr(result, "data_version") else {}),
     }
 
 
@@ -199,9 +317,15 @@ def _is_nan(v: Any) -> bool:
 @router.get("/sectors")
 async def get_sectors(
     market: str = Query("A", description="A / HK / US"),
-    symbol: str = Query("000001.SZ", description="任意一个该市场的股票代码（用于获取行业信息）"),
+    symbol: str | None = Query(None, description="任意一个该市场的股票代码（用于获取行业信息）"),
     current_user: dict = Depends(get_current_user),
 ):
+    if _registered_provider(market):
+        return await get_field_data(
+            market=market, field="sector", symbol=symbol or "",
+            start=None, end=None, days=365, current_user=current_user,
+        )
+    symbol = "000001.SZ" if symbol is None else symbol
     agg = _get_aggregator()
     try:
         import asyncio
@@ -241,6 +365,11 @@ async def get_meta(
     current_user: dict = Depends(get_current_user),
 ):
     """股票基本信息 — A 股从 QuantDB stock_list 获取。"""
+    if _registered_provider(market):
+        return await get_field_data(
+            market=market, field="stock_list", symbol=symbol,
+            start=None, end=None, days=365, current_user=current_user,
+        )
     agg = _get_aggregator()
     try:
         import asyncio
@@ -280,6 +409,31 @@ async def search_stocks(
     limit: int = Query(20, ge=1, le=100),
     current_user: dict = Depends(get_current_user),
 ):
+    if market and _registered_provider(market):
+        import asyncio
+        from backend.shared.stock_utils import StockCodeUtil
+
+        provider = _registered_provider(market)
+        try:
+            frame = await asyncio.to_thread(provider.open_raw().fetch_stock_list)
+            keyword_key = keyword.strip().lower()
+            results = []
+            for row in frame.to_dict("records"):
+                code = StockCodeUtil.to_prefix(row["symbol"], market=market.upper())
+                name = str(row.get("stock_name") or row.get("name_en") or code)
+                if any(keyword_key in value.lower() for value in (code, str(row["symbol"]), name)):
+                    results.append({
+                        "symbol": code, "code": code,
+                        "name": name, "market": market.upper(),
+                    })
+                    if len(results) >= limit:
+                        break
+            return {
+                "success": True, "keyword": keyword, "market": market.upper(),
+                "results": results, "count": len(results),
+            }
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"注册市场搜索失败: {exc}") from exc
     # HK/US: stocks_index 只有 A 股，直接走本地 security_master（中文名）
     if market and market.upper() in ("HK", "US"):
         try:

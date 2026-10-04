@@ -2,7 +2,7 @@ import { beforeEach, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({get:vi.fn(), post:vi.fn()}));
 vi.mock('axios', () => ({default:{ create: () => ({...mocks, interceptors:{request:{use:vi.fn()},response:{use:vi.fn()}}}) }}));
 vi.mock('../../features/auth/services/authService', () => ({authService:{getAccessToken:()=> 'token'}}));
-import { researchService } from '../researchService';
+import { researchService, ResearchPredictionSourceChangedError } from '../researchService';
 import { flattenProjectedValues, mergePoolFeatures, toSuffixSymbol } from '../../features/research/utils/featureMapper';
 
 beforeEach(() => {vi.clearAllMocks();});
@@ -57,5 +57,17 @@ it('preserves unavailable provenance without substituting a model training versi
     {market:'JP',modelId:'owned-model',runId:'persisted-run'})).toEqual({});
   expect(mocks.post).toHaveBeenCalledWith('/research/batch-features', {
     symbols:['72030.JP'],fields:['closePrice'],trade_date:'2026-10-01',market:'JP',model_id:'owned-model',run_id:'persisted-run',
+  });
+});
+
+it('sends observed scores and sources, and distinguishes a source race from unavailable features', async () => {
+  const source = {market:'JP' as const,data_version:'v1',data_trade_date:'2026-10-01',prediction_trade_date:'2026-10-02',run_id:'first'};
+  mocks.post.mockRejectedValue({response:{status:409,data:{detail:{code:'PREDICTION_SOURCE_CHANGED'}}}});
+  await expect(researchService.getProjectedQuantDbFeatures(['72030.JP'],['feature0'],'2026-10-01',{
+    market:'JP',modelId:'owned-model',observedPredictions:[{symbol:'72030.JP',score:0.1,dataProvenance:source}],
+  })).rejects.toBeInstanceOf(ResearchPredictionSourceChangedError);
+  expect(mocks.post).toHaveBeenCalledWith('/research/batch-features',{
+    symbols:['72030.JP'],fields:['feature0'],trade_date:'2026-10-01',market:'JP',model_id:'owned-model',
+    observed_predictions:[{symbol:'72030.JP',score:0.1,data_provenance:source}],
   });
 });

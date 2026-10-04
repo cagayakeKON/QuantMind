@@ -191,6 +191,42 @@ async def get_batch_features(
         rows = await _research_service.selected_prediction_rows(
             tid, uid, req.model_id, req.trade_date, req.run_id
         )
+        if req.observed_predictions is not None:
+            from backend.services.engine.inference.prediction_provenance import (
+                prediction_source,
+            )
+
+            current = {row["symbol"]: row for row in rows}
+            observed = {}
+            for prediction in req.observed_predictions:
+                prefix = StockCodeUtil.to_prefix(prediction.symbol, market="JP")
+                if prefix in observed:
+                    raise HTTPException(422, "Duplicate observed prediction")
+                observed[prefix] = prediction
+            for symbol in req.symbols:
+                prefix = StockCodeUtil.to_prefix(symbol, market="JP")
+                before = observed.get(prefix)
+                if before is None:
+                    raise HTTPException(
+                        422, "Requested symbol lacks its observed prediction"
+                    )
+                now = current.get(prefix)
+                try:
+                    before_source = prediction_source(before.data_provenance)
+                except ValueError as exc:
+                    raise HTTPException(422, "Invalid observed prediction source") from exc
+                if (
+                    now is None
+                    or before.score != now["score"]
+                    or before_source != now.get("data_provenance")
+                ):
+                    raise HTTPException(
+                        409,
+                        {
+                            "code": "PREDICTION_SOURCE_CHANGED",
+                            "message": "Prediction changed since the candidate list was read",
+                        },
+                    )
         sources = {row["symbol"]: row.get("data_provenance") for row in rows}
         groups, warnings = {}, {}
         for symbol in req.symbols:

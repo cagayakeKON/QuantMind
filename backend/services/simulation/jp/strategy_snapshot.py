@@ -8,6 +8,7 @@ from backend.services.engine.qlib_app.services.dated_strategy import DecisionQuo
 from backend.shared.stock_utils import StockCodeUtil
 from .cash_rules import money
 from .rules import RuleDataMissing, lot_size
+from .valuation import held_mark
 
 
 def strategy_snapshot(state, scores, bars, master, signal_day):
@@ -22,7 +23,9 @@ def strategy_snapshot(state, scores, bars, master, signal_day):
         quotes[code] = DecisionQuote(
             price=price,
             trading_unit=lot_size(signal_day, info),
-            suspended=price <= 0
+            suspended=bar.get("open") is None
+            or money(bar.get("open") or 0) <= 0
+            or price <= 0
             or money(bar.get("volume") or 0) <= 0
             or info.get("product_category") != "011",
             fields={
@@ -38,13 +41,28 @@ def strategy_snapshot(state, scores, bars, master, signal_day):
         predictions[code] = float(row["score"])
     for symbol, position in state["positions"].items():
         code = StockCodeUtil.to_qlib(symbol, market="JP")
-        if code not in quotes or quotes[code].price <= 0:
+        if code not in quotes or master[symbol].get("product_category") != "011":
             raise RuleDataMissing(
                 f"Exact prior-close valuation required for held {symbol}"
             )
+        quote = quotes[code]
+        price = held_mark(
+            position["last_price"],
+            suspended=quote.suspended,
+            close=quote.price,
+            symbol=symbol,
+            day=signal_day,
+        )
+        if quote.suspended:
+            quotes[code] = DecisionQuote(
+                price=price,
+                trading_unit=quote.trading_unit,
+                suspended=True,
+                fields=quote.fields,
+            )
         positions[code] = {
             "amount": sum(lot["quantity"] for lot in position["lots"]),
-            "price": quotes[code].price,
+            "price": price,
         }
     cash = sum((money(f["amount"]) for f in state["cash_funds"]), Decimal(0))
     return {

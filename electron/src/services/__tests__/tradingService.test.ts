@@ -60,6 +60,20 @@ describe('TradingService', () => {
     });
 
     describe('getRecentTrades', () => {
+        it('未接入日股实盘时不会借用原市场成交或订单回退', async () => {
+            mocks.get.mockClear();
+            const result = await tradingService.getRecentTrades(8, 'real', 'JP');
+            expect(result.records).toEqual([]);
+            expect(result.isFallbackToOrders).toBe(false);
+            expect(mocks.get).not.toHaveBeenCalled();
+        });
+        it('日股模拟成交查询在后端截取之前透传市场，CN也声明旧市场范围', async () => {
+            mocks.get.mockResolvedValue({ data: [] });
+            await tradingService.getRecentTrades(8, 'simulation', 'JP');
+            expect(mocks.get).toHaveBeenLastCalledWith(expect.stringContaining('/simulation/trades'), expect.objectContaining({ params: { limit: 8, offset: 0, market: 'JP' } }));
+            await tradingService.getRecentTrades(8, 'simulation', 'CN');
+            expect(mocks.get).toHaveBeenLastCalledWith(expect.stringContaining('/simulation/trades'), expect.objectContaining({ params: { limit: 8, offset: 0, market: 'CN' } }));
+        });
         it('后端不可用时应该返回空列表并标记 isOffline', async () => {
             mocks.get.mockRejectedValue(new Error('Network Error'));
 

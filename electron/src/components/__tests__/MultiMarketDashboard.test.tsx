@@ -60,7 +60,7 @@ describe('common dashboard for every registered market', () => {
   it.each(['CN', 'JP', 'HK', 'US', 'CRYPTO', 'FUTURES'] as AppMarket[])('uses all original providers and features in %s', market => {
     mount(market);
     expect(useFundData).toHaveBeenCalledWith({autoRefresh: true, refreshInterval: 5000});
-    expect(useTradeRecords).toHaveBeenCalledWith({limit: 8, tradingMode: 'simulation', autoRefresh: true, refreshInterval: 12000});
+    expect(useTradeRecords).toHaveBeenCalledWith({limit: 8, tradingMode: 'simulation', market, autoRefresh: true, refreshInterval: 12000});
     expect(useStrategies).toHaveBeenCalledWith({autoRefresh: true, refreshInterval: 10000, enableRealtime: true});
     expect(useIntelligenceCharts).toHaveBeenCalledWith('current', {tradingMode: 'simulation'});
     expect(screen.getByText('策略监控')).toBeTruthy();
@@ -97,10 +97,12 @@ describe('common dashboard for every registered market', () => {
   it('keeps the same providers and user history through JP/CN market switches', () => {
     const {store} = mount('JP');
     act(() => store.dispatch(setMarket('CN')));
+    expect(useTradeRecords).toHaveBeenLastCalledWith({limit: 8, tradingMode: 'simulation', market: 'CN', autoRefresh: true, refreshInterval: 12000});
     expect(screen.getByText('资金概览 (A股/模拟)')).toBeTruthy();
     expect(screen.getByText('实时交易记录 (A股)')).toBeTruthy();
     expect(screen.getByText('トヨタ')).toBeTruthy();
     act(() => store.dispatch(setMarket('JP')));
+    expect(useTradeRecords).toHaveBeenLastCalledWith({limit: 8, tradingMode: 'simulation', market: 'JP', autoRefresh: true, refreshInterval: 12000});
     expect(screen.getByText('策略监控')).toBeTruthy();
     expect(screen.getByText('智能图表')).toBeTruthy();
     expect(screen.getByText('招商银行')).toBeTruthy();

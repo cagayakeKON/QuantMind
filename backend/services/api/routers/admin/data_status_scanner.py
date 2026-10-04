@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -82,11 +82,31 @@ _XCALS_MARKET_MAP: dict[str, str] = {
 
 
 def _resolve_qlib_dir(market: str) -> Path:
+    if _is_jp(market):
+        from backend.services.engine.qlib_data_builder import QlibDataBuilder
+
+        # Match the registered builder; the global legacy QLIB_PROVIDER_URI
+        # may point at CN and cannot describe the new market's data status.
+        return QlibDataBuilder.for_market("JP").qlib_dir
     return _MARKET_QLIB_DIRS.get(market, _MARKET_QLIB_DIRS["a_share"])
 
 
 def _resolve_calendar_market(market: str) -> str:
+    if _is_jp(market):
+        return "XTKS"
     return _CALENDAR_MARKET_MAP.get(market, "SSE")
+
+
+def _is_jp(market: str) -> bool:
+    return str(market).lower() in {"jp", "japan"}
+
+
+def _jp_trade_date() -> str:
+    from backend.services.engine.data_platform.jp_calendar import resolve_cash_session
+
+    now = datetime.now(ZoneInfo("Asia/Tokyo"))
+    direction = "previous" if now.hour < 9 else "on_or_before"
+    return resolve_cash_session(now.date(), direction=direction).isoformat()
 
 
 def resolve_trade_date_sync(market: str) -> str:
@@ -94,6 +114,8 @@ def resolve_trade_date_sync(market: str) -> str:
 
     优先使用 exchange_calendars；不可用时回退到当前日期。
     """
+    if _is_jp(market):
+        return _jp_trade_date()
     now_local = datetime.now(ZoneInfo("Asia/Shanghai"))
     if xcals is None:
         return now_local.date().isoformat()
@@ -115,6 +137,8 @@ def resolve_trade_date_sync(market: str) -> str:
 
 async def _resolve_trade_date(market: str, tenant_id: str, user_id: str) -> str:
     """根据市场日历返回当前应参照的交易日 ISO 字符串。"""
+    if _is_jp(market):
+        return _jp_trade_date()
     now_local = datetime.now(ZoneInfo("Asia/Shanghai"))
     cal_market = _resolve_calendar_market(market)
 
@@ -238,17 +262,20 @@ async def scan_data_status(
         预解析的交易日 ISO 字符串。传 None 则异步调用 calendar_service 自动解析。
         Celery worker 应传同步解析的日期以避免跨事件循环的 asyncpg 冲突。
     """
-    now_local = datetime.now(ZoneInfo("Asia/Shanghai"))
+    now_local = datetime.now(ZoneInfo("Asia/Tokyo" if _is_jp(market) else "Asia/Shanghai"))
     if trade_date is None:
         trade_date = await _resolve_trade_date(market, tenant_id, user_id)
 
     qlib_data_dir = _resolve_qlib_dir(market)
     qlib_info = _scan_qlib_info(qlib_data_dir, market)
-    feature_snapshots_info = _scan_feature_snapshots_status(
-        target_date=trade_date,
-        topn=20,
-        market=market,
-    )
+    if _is_jp(market):
+        feature_snapshots_info = _scan_registered_features(trade_date)
+    else:
+        feature_snapshots_info = _scan_feature_snapshots_status(
+            target_date=trade_date,
+            topn=20,
+            market=market,
+        )
 
     return {
         "checked_at": now_local.isoformat(),
@@ -256,4 +283,49 @@ async def scan_data_status(
         "market": market,
         "qlib_data": qlib_info,
         "feature_snapshots": feature_snapshots_info,
+    }
+
+
+def _scan_registered_features(target_date: str) -> dict[str, Any]:
+    from backend.services.engine.data_platform.market_provider import (
+        LOCAL_MARKET_PROVIDERS,
+    )
+    import pyarrow.parquet as pq
+
+    hub = LOCAL_MARKET_PROVIDERS["JP"].open()
+    folder = hub.data_dir / "6_ml_datasets" / "l1_factors"
+    files = sorted(folder.glob("dt=*/data.parquet"))
+    days = [
+        date.fromisoformat(
+            f"{p.parent.name[3:7]}-{p.parent.name[7:9]}-{p.parent.name[9:11]}"
+        ).isoformat()
+        for p in files
+    ]
+    coverage = {
+        "target_date": target_date,
+        "at_target_count": 0,
+        "older_count": 0,
+        "invalid_count": 0,
+    }
+    eligible = [day for day in days if day <= target_date]
+    if eligible:
+        latest = eligible[-1]
+        last_day = date.fromisoformat(latest)
+        last = hub.fetch_l1_factors(start=last_day, end=last_day)
+        count = int(last.symbol.nunique()) if "symbol" in last else 0
+        coverage["at_target_count" if latest == target_date else "older_count"] = count
+    return {
+        "exists": bool(files),
+        "snapshot_dir": str(folder),
+        "data_version": hub.data_dir.name,
+        "file_count": len(files),
+        "scanned_files": len(files),
+        "failed_files": 0,
+        "total_rows": sum(pq.read_metadata(p).num_rows for p in files),
+        "min_date": days[0] if days else None,
+        "max_date": days[-1] if days else None,
+        "metadata_files": [],
+        "latest_date_coverage": coverage,
+        "topn_samples": {"sample_size": 20, "older_samples": [], "invalid_samples": []},
+        "suggested_periods": None,
     }

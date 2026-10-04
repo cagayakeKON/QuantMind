@@ -5,12 +5,20 @@ from types import SimpleNamespace
 import duckdb
 import pytest
 
-from backend.scripts.quantjp_daily_sync import run
+from backend.scripts.quantjp_daily_sync import dataset_selection, run
 from backend.services.engine.data_platform.jquants_client import JQuantsClient
 from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
 from backend.tests.test_jp_data_platform import snapshot as source_fixture
 
 snapshot = source_fixture
+
+
+def request_payload(endpoint, params=None):
+    if endpoint == "/indices/bars/daily/topix":
+        assert set(params) == {"from", "to"}
+        assert params["from"] == params["to"]
+        return payload(endpoint, params["from"])
+    return payload(endpoint, (params or {}).get("date"))
 
 
 def payload(table, day):
@@ -69,9 +77,7 @@ def payload(table, day):
 
 def test_owned_cache_update_publishes_without_modifying_snapshot(snapshot, tmp_path):
     original = hashlib.sha256(snapshot.read_bytes()).digest()
-    fake = SimpleNamespace(
-        rows=lambda endpoint, params=None: payload(endpoint, (params or {}).get("date"))
-    )
+    fake = SimpleNamespace(rows=request_payload)
     cache, target = tmp_path / "cache/source.duckdb", tmp_path / "published"
     result = run(
         seed=snapshot,
@@ -101,6 +107,7 @@ def test_owned_cache_update_publishes_without_modifying_snapshot(snapshot, tmp_p
             days=1,
             end=date(2026, 10, 1),
             client=SimpleNamespace(rows=empty),
+            datasets=["valuation"],
         )
     assert (target / "current.json").read_bytes() == pointer
     with duckdb.connect(str(cache), read_only=True) as conn:
@@ -136,9 +143,7 @@ def test_sync_restores_published_history_into_new_cache(snapshot, tmp_path):
 
     target = tmp_path / "published"
     import_jquants_snapshot(snapshot, target)
-    fake = SimpleNamespace(
-        rows=lambda endpoint, params=None: payload(endpoint, (params or {}).get("date"))
-    )
+    fake = SimpleNamespace(rows=request_payload)
     result = run(
         cache=tmp_path / "cache/source.duckdb",
         destination=target,

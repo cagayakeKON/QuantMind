@@ -42,7 +42,7 @@ import {
   StockPoolSelectField,
   type StockPoolSelection,
 } from '../components/backtest/StockPoolSelectField';
-import { researchService, type ResearchRunOption } from '../services/researchService';
+import { researchService, ResearchPredictionSourceChangedError, type ResearchRunOption } from '../services/researchService';
 import { getStockPoolMembers } from '../services/stockPoolOptionService';
 import {
   addSymbolToUserPool,
@@ -680,6 +680,8 @@ export const ResearchPlatformPage: React.FC = () => {
   // 全池投影因子：筛选与排序在分页之前执行，必须覆盖整个候选池而非当前页
   const [universeFeatures, setUniverseFeatures] = React.useState<Record<string, Partial<ResearchStockRow>>>({});
   const [universeFeaturesLoading, setUniverseFeaturesLoading] = React.useState<boolean>(false);
+  const [projectionWarning, setProjectionWarning] = React.useState<string | null>(null);
+  const sourceRetry = React.useRef({ key: '', attempts: 0 });
 
   // ---- 视图状态 ----
   const [keyword, setKeyword] = React.useState<string>('');
@@ -905,7 +907,10 @@ export const ResearchPlatformPage: React.FC = () => {
     let cancelled = false;
     const loadUniverse = async () => {
       setOverviewLoading(true);
-      if (currentMarket === 'JP') setUniverseFeatures({});
+      if (currentMarket === 'JP') {
+        setUniverseFeatures({});
+        setProjectionWarning(null);
+      }
       try {
         const result = await researchService.getResearchUniverseByDate(selectedModelId, selectedDate, 10000);
         if (cancelled) return;
@@ -980,6 +985,7 @@ export const ResearchPlatformPage: React.FC = () => {
       return;
     }
     setSyncing(true);
+    if (currentMarket === 'JP') sourceRetry.current.attempts = 0;
     try {
       triggerRefresh();
       message.success('候选池同步请求已发起');
@@ -1070,14 +1076,22 @@ export const ResearchPlatformPage: React.FC = () => {
 
     let cancelled = false;
     if (projectionMarket === 'JP') setUniverseFeatures({});
+    const retryKey = `${selectedModelId}|${selectedDate}`;
+    if (sourceRetry.current.key !== retryKey) sourceRetry.current = { key: retryKey, attempts: 0 };
     setUniverseFeaturesLoading(true);
     const request = projectionMarket === 'JP'
       ? researchService.getProjectedQuantDbFeatures(symbols, QUANTDB_PROJECTION_FIELDS, selectedDate,
-        { market: 'JP', modelId: selectedModelId })
+        { market: 'JP', modelId: selectedModelId, observedPredictions: candidatePool.map(row => ({
+          symbol: toSuffixSymbol(row.code), score: row.score, dataProvenance: row.dataProvenance ?? null,
+        })) })
       : researchService.getProjectedQuantDbFeatures(symbols, QUANTDB_PROJECTION_FIELDS, selectedDate);
     void request
       .then((bySymbol) => {
         if (cancelled) return;
+        if (projectionMarket === 'JP') {
+          sourceRetry.current.attempts = 0;
+          setProjectionWarning(null);
+        }
         const next: Record<string, Partial<ResearchStockRow>> = {};
         Object.entries(bySymbol).forEach(([symbol, values]) => {
           next[symbol] = flattenProjectedValues(values);
@@ -1089,6 +1103,16 @@ export const ResearchPlatformPage: React.FC = () => {
           _setResearchDateCache(cacheKey, { ...existing, universeFeatures: next });
         } else {
           _setResearchDateCache(cacheKey, { candidatePool, overview: null, universeFeatures: next });
+        }
+      })
+      .catch((error) => {
+        if (cancelled || projectionMarket !== 'JP' || !(error instanceof ResearchPredictionSourceChangedError)) return;
+        setUniverseFeatures({});
+        setProjectionWarning('预测已在加载期间更新，价格和因子暂不显示；请刷新候选列表。');
+        if (sourceRetry.current.attempts < 1) {
+          sourceRetry.current.attempts += 1;
+          setCandidatePool([]);
+          triggerRefresh();
         }
       })
       .finally(() => {
@@ -1802,6 +1826,9 @@ export const ResearchPlatformPage: React.FC = () => {
             <div role="status" className="px-5 py-2 text-xs text-amber-700">
               部分历史预测未记录数据来源，无法显示对应价格、因子与归因。预测分数仍可查看。
             </div>
+          )}
+          {projectionMarket === 'JP' && projectionWarning && (
+            <div role="alert" className="px-5 py-2 text-xs text-amber-700">{projectionWarning}</div>
           )}
 
           <div className="flex min-h-0 flex-1 flex-col">

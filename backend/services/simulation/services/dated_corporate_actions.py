@@ -43,6 +43,7 @@ class DatedCorporateActionContext:
     event: DatedShareAction
     reader: object
     cash: float
+    suspended_marks: dict[str, float] | None = None
 
     @property
     def currency(self):
@@ -89,9 +90,16 @@ class DatedCorporateActionContext:
             or bar.trade_date != self.event.trade_date
             or StockCodeUtil.to_suffix(bar.symbol, market=self.event.market)
             != StockCodeUtil.to_suffix(symbol, market=self.event.market)
-            or not math.isfinite(bar.open)
-            or bar.open <= 0
         ):
+            raise ValueError(f"Dated corporate-action opening mark missing: {symbol}")
+        if bar.suspended and self.suspended_marks is not None:
+            canonical = StockCodeUtil.to_suffix(symbol, market=self.event.market)
+            mark = self.suspended_marks.get(canonical)
+            if mark is not None and math.isfinite(mark) and mark > 0:
+                # The registered leaf verified this exact suspended row/master.
+                # Preparation already adjusted this mark for the share event.
+                return mark
+        if not math.isfinite(bar.open) or bar.open <= 0:
             raise ValueError(f"Dated corporate-action opening mark missing: {symbol}")
         return bar.open
 
@@ -168,6 +176,18 @@ async def apply_dated_inventory_actions(manager, previous, prepared, trade_date)
         )
     stamp = datetime.combine(trade_date, time.min)
     publication = hashlib.sha256(manager.execution_data_version.encode()).hexdigest()
+    suspended_marks = None
+    marks = getattr(manager.rules, "closing_marks", None)
+    if callable(marks):
+        projection, stale = marks(prepared, trade_date)
+        suspended_marks = {
+            StockCodeUtil.to_suffix(
+                symbol, market=manager.execution_market
+            ): projection["positions"][
+                StockCodeUtil.to_suffix(symbol, market=manager.execution_market)
+            ]["price"]
+            for symbol in stale
+        }
     for event in events:
         context = DatedCorporateActionContext(
             manager.ledger_account_id,
@@ -176,6 +196,7 @@ async def apply_dated_inventory_actions(manager, previous, prepared, trade_date)
             event,
             manager.rules.reader,
             float(prepared["cash"]),
+            suspended_marks,
         )
         action = SimulationCorporateAction(
             symbol=StockCodeUtil.to_prefix(event.symbol, market=event.market),

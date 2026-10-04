@@ -35,6 +35,10 @@ class LocalMarketProvider:
     strategy_runner_date_loader: str | None = None
     inference_calendar_factory: str | None = None
     research_feature_loader: str | None = None
+    sync_required_datasets: tuple[str, ...] = ()
+    sync_default_datasets: tuple[str, ...] = ()
+    sync_dependency_note: str | None = None
+    strategy_lab_watch_latest_publication: bool = False
 
     def open_raw(self, data_version: str | None = None):
         """Latest daily quotes; research open() keeps its complete publication."""
@@ -66,6 +70,22 @@ LOCAL_MARKET_PROVIDERS = {
         "JPY",
         "quantjp_parquet",
         "TOPIX",
+        sync_required_datasets=(
+            "daily_unadjusted",
+            "daily_forward",
+            "index_daily",
+            "master",
+            "trading_calendar",
+        ),
+        sync_default_datasets=(
+            "daily_unadjusted",
+            "daily_forward",
+            "index_daily",
+            "master",
+            "trading_calendar",
+        ),
+        sync_dependency_note="日股按完整核心日包发布：价格、证券主表、交易日历和 TOPIX 必须同时更新；估值可单独勾选加入日包。",
+        strategy_lab_watch_latest_publication=True,
         benchmark_price_loader="backend.services.simulation.jp.analysis_data.read_benchmark_prices",
         position_info_loader="backend.services.simulation.jp.analysis_data.read_position_info",
         style_feature_loader_factory="backend.services.simulation.jp.analysis_data.create_style_feature_loader",

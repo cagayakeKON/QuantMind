@@ -9,6 +9,12 @@ class SymbolsFeaturesRequest(BaseModel):
     symbols: list[str]
 
 
+class ObservedResearchPrediction(BaseModel):
+    symbol: str
+    score: float
+    data_provenance: dict[str, Any] | None = None
+
+
 class BatchFeaturesRequest(BaseModel):
     """QuantDB 全量特征批量查询请求。
 
@@ -23,6 +29,7 @@ class BatchFeaturesRequest(BaseModel):
     data_version: str | None = None
     model_id: str | None = None
     run_id: str | None = None
+    observed_predictions: list[ObservedResearchPrediction] | None = None
 
 
 class WatchlistAddRequest(BaseModel):

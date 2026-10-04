@@ -229,11 +229,12 @@ class TradingService {
      * 获取模拟成交列表（读 sim_trades，模拟盘专用口径）
      * 注意：/api/v1/simulation/trades 不接受 trading_mode/user_id 参数（后端从 JWT 取用户）
      */
-    async listSimulationTrades(params: { limit?: number; offset?: number } = {}): Promise<Trade[]> {
+    async listSimulationTrades(params: { limit?: number; offset?: number; market?: string } = {}): Promise<Trade[]> {
         const queryParams: Record<string, unknown> = {
             limit: params.limit ?? 50,
             offset: params.offset ?? 0,
         };
+        if (params.market) queryParams.market = params.market;
         return await this.client.get<Trade[]>(API_ENDPOINTS.SIMULATION_TRADES, queryParams);
     }
 
@@ -378,14 +379,20 @@ class TradingService {
     async getRecentTrades(
         limit = 10,
         tradingMode?: TradingMode,
+        market?: string,
     ): Promise<{ records: TradeRecord[]; isOffline: boolean; isFallbackToOrders: boolean }> {
         const normalizedTradingMode = this.normalizeTradingMode(tradingMode);
+
+        // This registered market has no live broker; never relabel old fills.
+        if (market?.toUpperCase() === 'JP' && normalizedTradingMode !== 'simulation') {
+            return { records: [], isOffline: false, isFallbackToOrders: false };
+        }
 
         // 模拟模式分流：读 sim_trades 台账（手动/托管任务虚拟成交已补写落库），
         // 不再查实盘 trades 表，避免模拟盘记录恒为空。
         if (normalizedTradingMode === 'simulation') {
             try {
-                const simTrades = await this.listSimulationTrades({ limit });
+                const simTrades = await this.listSimulationTrades({ limit, ...(market ? { market } : {}) });
                 const records = simTrades.map((trade) => this.mapTradeToTradeRecord(trade));
                 return { records, isOffline: false, isFallbackToOrders: false };
             } catch (simError) {

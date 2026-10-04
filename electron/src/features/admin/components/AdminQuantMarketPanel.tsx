@@ -15,6 +15,7 @@ import {
 import { describeError, formatPartitionDate, formatSize } from './quantdb/utils';
 import { SyncSchedulePanel } from './data-management/SyncSchedulePanel';
 import { SectionCard, VerticalStep } from './data-management/SectionCard';
+import { withRequiredDatasets } from './quantdb/syncSelection';
 
 const { Text } = Typography;
 
@@ -50,6 +51,8 @@ export function AdminQuantMarketPanel({ market, marketLabel, color }: AdminQuant
     const [dataDir, setDataDir] = useState('');
     const [loading, setLoading] = useState(false);
     const [selected, setSelected] = useState<string[]>([]);
+    const selectedRef = React.useRef(selected);
+    selectedRef.current = selected;
     const [days, setDays] = useState(market === 'quantbc' ? 365 : 5);
     const [submitting, setSubmitting] = useState(false);
     const [activeJob, setActiveJob] = useState<QuantDBSyncJob | null>(null);
@@ -91,6 +94,9 @@ export function AdminQuantMarketPanel({ market, marketLabel, color }: AdminQuant
             const resp = await dataPlatformService.getMarketCatalog(market);
             setGroups(resp.groups);
             setDatasets(resp.datasets);
+            if (resp.datasets.some((item) => item.sync_required)) {
+                setSelected(withRequiredDatasets(selectedRef.current, resp.datasets));
+            }
             setDataDir(resp.data_dir);
             // 同步刷新详情弹窗中的数据集统计
             if (detailDatasetRef.current) {
@@ -135,7 +141,7 @@ export function AdminQuantMarketPanel({ market, marketLabel, color }: AdminQuant
                 clearInterval(timer);
                 loadCatalog();
                 if (job.status === 'completed') {
-                    message.success(`${marketLabel} 同步完成：${job.datasets.length} 个数据集`);
+                    message.success(`${marketLabel} 同步完成：${(job.effective_datasets ?? job.datasets).length} 个数据集`);
                 } else if (job.status === 'cancelled') {
                     message.warning(`同步已取消`);
                 } else {
@@ -191,9 +197,9 @@ export function AdminQuantMarketPanel({ market, marketLabel, color }: AdminQuant
 
     const toggleGroup = (groupId: string, checked: boolean) => {
         const names = (datasetsByGroup.get(groupId) ?? []).map((d) => d.dataset);
-        setSelected(checked
+        setSelected(withRequiredDatasets(checked
             ? Array.from(new Set([...selected, ...names]))
-            : selected.filter((n) => !names.includes(n)));
+            : selected.filter((n) => !names.includes(n)), datasets));
     };
 
     const columns: ColumnsType<QuantDBDataset> = [
@@ -204,6 +210,7 @@ export function AdminQuantMarketPanel({ market, marketLabel, color }: AdminQuant
             render: (name: string, row) => (
                 <Space direction="vertical" size={0}>
                     <Text strong>{name}</Text>
+                    {row.sync_required && <Tag>发布必需</Tag>}
                     <Text type="secondary" className="text-xs">{row.dataset}</Text>
                 </Space>
             ),
@@ -283,7 +290,7 @@ export function AdminQuantMarketPanel({ market, marketLabel, color }: AdminQuant
                         setTimeout(() => triggerSingleSync(row), 300);
                     }}
                 >
-                    同步
+                    {row.sync_dependencies?.length ? '同步日包' : '同步'}
                 </Button>
             ),
         },
@@ -376,6 +383,9 @@ export function AdminQuantMarketPanel({ market, marketLabel, color }: AdminQuant
                 }
             >
                 <div className="space-y-4">
+                    {datasets.find((item) => item.sync_dependency_note)?.sync_dependency_note && (
+                        <Alert type="info" showIcon message={datasets.find((item) => item.sync_dependency_note)?.sync_dependency_note} />
+                    )}
                     <Collapse
                         defaultActiveKey={groups.length > 0 ? [groups[0].id] : []}
                         items={groups.map((group) => {
@@ -389,6 +399,7 @@ export function AdminQuantMarketPanel({ market, marketLabel, color }: AdminQuant
                                         <Checkbox
                                             checked={checkedCount > 0 && checkedCount === names.length}
                                             indeterminate={checkedCount > 0 && checkedCount < names.length}
+                                            disabled={members.every((item) => item.sync_required)}
                                             onChange={(e) => toggleGroup(group.id, e.target.checked)}
                                         >
                                             <Text strong>{group.name}</Text>
@@ -410,13 +421,14 @@ export function AdminQuantMarketPanel({ market, marketLabel, color }: AdminQuant
                                             style: { cursor: 'pointer' },
                                         })}
                                         rowSelection={{
+                                            getCheckboxProps: (item) => ({ disabled: !!item.sync_required }),
                                             selectedRowKeys: selected.filter((n) => names.includes(n)),
                                             onChange: (keys) => {
                                                 const picked = keys as string[];
-                                                setSelected([
+                                                setSelected(withRequiredDatasets([
                                                     ...selected.filter((n) => !names.includes(n)),
                                                     ...picked,
-                                                ]);
+                                                ], datasets));
                                             },
                                         }}
                                     />
@@ -521,6 +533,7 @@ function MarketSyncJobProgress({ job }: { job: QuantDBSyncJob }) {
                     status={job.status === 'failed' ? 'exception' : (job.status === 'running' || job.status === 'cancelling') ? 'active' : 'success'}
                     format={() => `${job.done}/${job.total}`}
                 />
+                {job.dependency_note && <Text type="secondary">{job.dependency_note} 本次实际同步：{(job.effective_datasets ?? job.datasets).join('、')}</Text>}
                 {job.summary && typeof job.summary === 'object' && (
                     <Text type="secondary" className="text-xs">
                         {JSON.stringify(job.summary)}
@@ -551,7 +564,7 @@ function MarketDataModal({ market, dataset, activeJob, onClose, onRefreshCatalog
     const [syncing, setSyncing] = useState(false);
 
     const isSyncingThis = activeJob?.status === 'running' && dataset
-        ? activeJob.datasets.includes(dataset.dataset)
+        ? (activeJob.effective_datasets ?? activeJob.datasets).includes(dataset.dataset)
         : false;
     const syncingPercent = activeJob && activeJob.total > 0
         ? Math.round((activeJob.done / activeJob.total) * 100)
@@ -598,7 +611,7 @@ function MarketDataModal({ market, dataset, activeJob, onClose, onRefreshCatalog
         const timer = setInterval(async () => {
             const job = await dataPlatformService.listMarketSyncJobs(market);
             const latest = job.jobs[0];
-            if (latest && latest.status === 'completed' && latest.datasets.includes(dataset!.dataset)) {
+            if (latest && latest.status === 'completed' && (latest.effective_datasets ?? latest.datasets).includes(dataset!.dataset)) {
                 clearInterval(timer);
                 setSyncing(false);
                 message.success(`${dataset!.name} 同步完成`);
@@ -646,6 +659,7 @@ function MarketDataModal({ market, dataset, activeJob, onClose, onRefreshCatalog
         >
             {dataset && (
                 <Space direction="vertical" className="w-full" size="middle">
+                    {dataset.sync_dependency_note && <Alert type="info" showIcon message={dataset.sync_dependency_note} />}
                     {/* 数据统计 + 操作 */}
                     <div className="p-3 bg-gray-50 rounded flex flex-wrap items-center gap-3">
                         <Tag color={dataset.synced ? 'green' : 'orange'}>
@@ -688,7 +702,7 @@ function MarketDataModal({ market, dataset, activeJob, onClose, onRefreshCatalog
                             loading={syncing}
                             disabled={isSyncingThis || (activeJob?.status === 'running' && !isSyncingThis)}
                         >
-                            {isSyncingThis ? '同步中...' : (dataset.synced ? '更新' : '同步')}
+                            {isSyncingThis ? '同步中...' : dataset.sync_dependencies?.length ? '同步日包（含必需依赖）' : (dataset.synced ? '更新' : '同步')}
                         </Button>
                     </div>
 

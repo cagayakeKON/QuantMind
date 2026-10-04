@@ -65,6 +65,40 @@ _ENDPOINTS = {
 }
 
 
+def dataset_selection(datasets=None):
+    """Resolve the public provider's declared immutable publication dependencies."""
+    from backend.services.engine.data_platform.market_provider import (
+        LOCAL_MARKET_PROVIDERS,
+    )
+
+    provider = LOCAL_MARKET_PROVIDERS["JP"]
+    aliases = {
+        "daily_prices": "daily_unadjusted",
+        "topix": "index_daily",
+        "calendar": "trading_calendar",
+    }
+    requested = list(
+        dict.fromkeys(
+            aliases.get(name, name)
+            for name in (
+                datasets if datasets is not None else provider.sync_default_datasets
+            )
+        )
+    )
+    allowed = set(provider.sync_required_datasets) | {"valuation"}
+    if not requested or set(requested) - allowed:
+        raise ValueError(
+            "Unsupported JP dataset; see the declared complete daily bundle dependencies"
+        )
+    effective = list(dict.fromkeys([*provider.sync_required_datasets, *requested]))
+    return {
+        "requested_datasets": requested,
+        "effective_datasets": effective,
+        "dependency_datasets": [name for name in effective if name not in requested],
+        "dependency_note": provider.sync_dependency_note,
+    }
+
+
 def _initialize(conn, seed: Path | None):
     conn.execute("CREATE SCHEMA IF NOT EXISTS quantmind_meta")
     conn.execute(
@@ -251,16 +285,7 @@ def _run(
     end=None,
     client=None,
 ):
-    allowed = set(_SCHEMAS) | {
-        "daily_unadjusted",
-        "daily_forward",
-        "index_daily",
-        "trading_calendar",
-    }
-    if datasets and set(datasets) - allowed:
-        raise ValueError(
-            "Unsupported JP dataset; JP publishes a consistent complete daily bundle"
-        )
+    selection = dataset_selection(datasets)
     if int(days) <= 0:
         raise ValueError("JP sync days must be positive")
     target = Path(destination or _resolve_quantjp_data_dir()).resolve()
@@ -312,8 +337,15 @@ def _run(
             if not first <= day <= last:
                 continue
             bundle = {
-                table: api.rows(endpoint, {"date": str(day)})
+                table: api.rows(
+                    endpoint,
+                    {"from": str(day), "to": str(day)}
+                    if table == "topix"
+                    else {"date": str(day)},
+                )
                 for table, endpoint in _ENDPOINTS.items()
+                if table != "valuation"
+                or "valuation" in selection["effective_datasets"]
             }
             conn.execute("BEGIN TRANSACTION")
             try:
@@ -337,6 +369,7 @@ def _run(
         "downloaded_sessions": downloaded,
         "publication": report,
         "publication_status": publication_status(target),
+        **selection,
     }
 
 

@@ -13,8 +13,10 @@ look-back window and harvest trades dated today.
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import json
 import logging
+import uuid
 from typing import Any
 
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
@@ -39,6 +41,7 @@ def add_watch(
     options=None,
     params=None,
     stock_pool=None,
+    tenant_id=None,
 ) -> None:
     r = get_redis_sentinel_client()
     r.sadd(WATCH_LIST_KEY, script_sha.encode("utf-8"))
@@ -50,6 +53,8 @@ def add_watch(
     }
     if options:
         payload.update(options=options, params=params or {}, stock_pool=stock_pool)
+        if str(options.get("market") or "").upper() == "JP":
+            payload["tenant_id"] = str(tenant_id or "")
     r.hset(WATCH_HASH_KEY, script_sha, json.dumps(payload, ensure_ascii=False))
 
 
@@ -108,12 +113,18 @@ def run_daily_scan(*, lookback_days: int = 7) -> dict[str, Any]:
 
     signals: list[dict[str, Any]] = []
     summary = {"watched": 0, "ok": 0, "failed": 0, "with_signal": 0}
+    claims = []
+    redis = None
+    native_seen = False
 
     for entry in list_watch():
+        if str((entry.get("options") or {}).get("market") or "").upper() == "JP":
+            native_seen = True
         summary["watched"] += 1
         code = entry.get("code") or ""
         if not code:
             continue
+        claim = None
         try:
             assert_safe(code)
         except Exception as e:
@@ -127,11 +138,34 @@ def run_daily_scan(*, lookback_days: int = 7) -> dict[str, Any]:
                 options=entry.get("options"),
                 params=entry.get("params"),
                 stock_pool=entry.get("stock_pool"),
+                latest_publication=True,
             )
             scan_day = provider.reader.latest_trade_date(today) if provider else today
             if scan_day is None:
                 raise ValueError("No covered native scan session")
             scan_start = scan_day - _dt.timedelta(days=lookback_days)
+            if provider is not None and provider.market == "JP":
+                redis = redis or get_redis_sentinel_client()
+                fingerprint = {
+                    "tenant_id": entry.get("tenant_id", ""),
+                    "user_id": entry.get("user_id", "0"),
+                    "script_sha": entry.get("script_sha"),
+                    "code": code,
+                    "options": options,
+                    "params": params,
+                    "stock_pool": pool,
+                    "scan_day": str(scan_day),
+                    "start": str(scan_start),
+                }
+                digest = hashlib.sha256(
+                    json.dumps(
+                        fingerprint, sort_keys=True, ensure_ascii=False, default=str
+                    ).encode()
+                ).hexdigest()
+                claim = ("qm:lab:scan:source:" + digest, uuid.uuid4().hex)
+                if not redis.set(claim[0], claim[1], nx=True, ex=3600):
+                    summary["skipped"] = summary.get("skipped", 0) + 1
+                    continue
             result = _run_one(
                 code,
                 start=str(scan_start) if provider else start_str,
@@ -139,12 +173,29 @@ def run_daily_scan(*, lookback_days: int = 7) -> dict[str, Any]:
                 **({"provider": provider, "params": params} if provider else {}),
             )
         except Exception as e:
+            if claim and redis:
+                _release_claim(redis, claim)
             summary["failed"] += 1
             logger.warning("daily_scan: run failed for %s: %s", entry.get("name"), e)
             continue
         if result is None or (provider is not None and result.status != "success"):
+            if claim and redis:
+                _release_claim(redis, claim)
             summary["failed"] += 1
             continue
+        if claim:
+            try:
+                owner = redis.get(claim[0])
+            except Exception:
+                _release_claim(redis, claim)
+                summary["failed"] += 1
+                continue
+            if isinstance(owner, bytes):
+                owner = owner.decode()
+            if owner != claim[1]:
+                summary["failed"] += 1
+                continue
+            claims.append(claim)
         summary["ok"] += 1
         # Trades dated today_str count as fresh signals
         fresh = [
@@ -185,14 +236,56 @@ def run_daily_scan(*, lookback_days: int = 7) -> dict[str, Any]:
     }
     try:
         r = get_redis_sentinel_client()
-        r.set(
-            SIGNALS_KEY,
-            json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"),
-        )
-        r.set(LAST_RUN_KEY, payload["generated_at"].encode("utf-8"))
+        if claims:
+            published = r.eval(
+                "for i=3,#KEYS do if redis.call('GET',KEYS[i]) ~= ARGV[i] then return 0 end end "
+                "redis.call('SET',KEYS[1],ARGV[1]); redis.call('SET',KEYS[2],ARGV[2]); "
+                "for i=3,#KEYS do redis.call('SET',KEYS[i],'completed') end return 1",
+                2 + len(claims),
+                SIGNALS_KEY,
+                LAST_RUN_KEY,
+                *[key for key, _ in claims],
+                json.dumps(payload, ensure_ascii=False, default=str),
+                payload["generated_at"],
+                *[token for _, token in claims],
+            )
+            if not published:
+                raise ValueError(
+                    "Native scan source ownership expired before publication"
+                )
+        elif not native_seen:
+            r.set(
+                SIGNALS_KEY,
+                json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"),
+            )
+        if not claims:
+            r.set(LAST_RUN_KEY, payload["generated_at"].encode("utf-8"))
     except Exception as e:
+        for claim in claims:
+            _release_claim(redis, claim)
+        if claims:
+            payload["signals"] = []
+            payload["persistence_error"] = str(e)
+            summary["failed"] += len(claims)
+            summary["ok"] -= len(claims)
+            summary["with_signal"] = 0
         logger.warning("daily_scan: persist failed: %s", e)
     return payload
+
+
+def _release_claim(redis, claim):
+    """Only the current scan owner may complete or release its source claim."""
+    try:
+        redis.eval(
+            "if redis.call('GET',KEYS[1]) == ARGV[1] then "
+            + "return redis.call('DEL',KEYS[1]) "
+            + "end return 0",
+            1,
+            claim[0],
+            claim[1],
+        )
+    except Exception:
+        logger.warning("daily_scan: source claim cleanup failed", exc_info=True)
 
 
 __all__ = [

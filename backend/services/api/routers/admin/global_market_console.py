@@ -704,6 +704,11 @@ def _build_catalog_payload(market: str, specs: tuple[DatasetSpec, ...], groups: 
     否则单 worker 下 /health 会被长时间饿死并触发 watchdog 重启。
     """
     items = []
+    from backend.services.engine.data_platform.market_provider import (
+        LOCAL_MARKET_PROVIDERS,
+    )
+
+    provider = LOCAL_MARKET_PROVIDERS.get(market)
     for spec in specs:
         items.append(
             {
@@ -714,6 +719,12 @@ def _build_catalog_payload(market: str, specs: tuple[DatasetSpec, ...], groups: 
                 "layout": spec.layout,
                 "rel_dir": spec.rel_dir,
                 "note": spec.note,
+                **(
+                    {"sync_required": spec.dataset in provider.sync_required_datasets,
+                     "sync_dependencies": list(provider.sync_required_datasets),
+                     "sync_dependency_note": provider.sync_dependency_note}
+                    if provider and provider.sync_required_datasets else {}
+                ),
                 **_dataset_stats(spec, root),
             }
         )
@@ -918,6 +929,10 @@ def make_market_router(
                     kwargs["minute_freqs"] = tuple(minute_freqs)
                     kwargs["minute_days"] = min(req.days, 90)
             result = mod.run(**kwargs)
+            effective_datasets = (
+                result.get("effective_datasets", req.datasets)
+                if market == "JP" else req.datasets
+            )
 
             # Phase 2: 同步后重建 Qlib 缓存（勾选 with_qlib 时）
             qlib_cache = None
@@ -974,8 +989,13 @@ def make_market_router(
                 job_id,
                 status="completed",
                 stage="done",
-                done=len(req.datasets),
-                results=[{"dataset": d, "status": "synced"} for d in req.datasets],
+                done=len(effective_datasets),
+                total=len(effective_datasets),
+                results=[
+                    {"dataset": d, "status": "synced",
+                     **({"dependency": d not in req.datasets} if market == "JP" else {})}
+                    for d in effective_datasets
+                ],
                 summary=result,
                 qlib_cache=qlib_cache,
                 finished_at=_now_iso(),
@@ -992,6 +1012,11 @@ def make_market_router(
     ):
         for name in payload.datasets:
             _spec(name)
+        selection = {}
+        if market == "JP":
+            from backend.scripts.quantjp_daily_sync import dataset_selection
+
+            selection = dataset_selection(payload.datasets)
         # CCASS 抓取任务互斥：同时跑两个会相互触发 HKEX 封禁，直接拒绝
         if market == "HK" and "ccass_top50" in payload.datasets:
             with _jobs_lock:
@@ -1010,8 +1035,9 @@ def make_market_router(
             "status": "running",
             "stage": "sync_parquet",
             "datasets": list(payload.datasets),
+            **selection,
             "days": payload.days,
-            "total": len(payload.datasets),
+            "total": len(selection.get("effective_datasets", payload.datasets)),
             "done": 0,
             "results": [],
             "qlib_cache": None,

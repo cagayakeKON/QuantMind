@@ -80,17 +80,47 @@ _NORMAL_TICKS = (
     (50000000, "50000"),
 )
 
+# JPX TOPIX100 pilot: Phase I 2014-01-14, Phase II 2014-07-22,
+# Phase III 2015-09-24. The modern table must not be backdated.
+# Official tables: https://www.jpx.co.jp/files/tse/news/20/
+# b7gje6000004313n-att/leaflet_english.pdf and
+# https://www.jpx.co.jp/english/news/1030/b5b4pj000000pvpf-att/English1.pdf
+_TOPIX100_PHASE_I_TICKS = (
+    (10000, "1"),
+    (50000, "5"),
+    (100000, "10"),
+    (500000, "50"),
+    (1000000, "100"),
+    (5000000, "500"),
+    (10000000, "1000"),
+    (50000000, "5000"),
+)
+_TOPIX100_PHASE_II_TICKS = (
+    (1000, ".1"),
+    (5000, ".5"),
+    *_TOPIX100_PHASE_I_TICKS,
+)
+
 
 def tick_size(price: Decimal, day: date, metadata: dict) -> Decimal:
+    if day < date(2010, 1, 4):
+        raise RuleDataMissing("JP tick tables before 2010-01-04 are not supported")
     if day >= date(2027, 3, 1):
         raise RuleDataMissing("JP STR tick classification is required from 2027-03-01")
     category = metadata.get("scale_category")
     if category is None:
         raise RuleDataMissing("Dated TOPIX classification is required for JP ticks")
-    small = category in {"TOPIX Core30", "TOPIX Large70"} or (
+    topix100 = category in {"TOPIX Core30", "TOPIX Large70"}
+    small = (topix100 and day >= date(2014, 1, 14)) or (
         day >= date(2023, 6, 5) and category == "TOPIX Mid400"
     )
     table = _SMALL_TICKS if small else _NORMAL_TICKS
+    if topix100 and date(2014, 1, 14) <= day < date(2015, 9, 24):
+        table = (
+            _TOPIX100_PHASE_I_TICKS
+            if day < date(2014, 7, 22)
+            else _TOPIX100_PHASE_II_TICKS
+        )
     for ceiling, tick in table:
         if price <= ceiling:
             return Decimal(tick)

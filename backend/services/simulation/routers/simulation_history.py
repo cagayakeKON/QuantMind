@@ -26,6 +26,7 @@ def _require_user_id(raw_user_id: str, tenant_id: str = "default") -> int:
 
 @router.get("/trades", response_model=list[SimTradeResponse])
 async def list_trades(
+    market: str | None = Query(default=None),
     portfolio_id: int | None = Query(default=None),
     symbol: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=1000),
@@ -43,6 +44,7 @@ async def list_trades(
         symbol=symbol,
         limit=limit,
         offset=offset,
+        market=market,
     )
     # 批量 enrich symbol_name，避免前端 N+1 调用 /stocks/{symbol}
     # trades 可能是 ORM 对象或缓存的 dict，统一处理

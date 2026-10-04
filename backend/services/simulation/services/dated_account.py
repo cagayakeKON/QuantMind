@@ -270,14 +270,16 @@ class DatedSimulationAccountManager(SimulationAccountManager):
                 checkpoint["cycle_inputs"] = deepcopy(previous["cycle_inputs"])
         return checkpoint
 
-    async def stage_day_checkpoint(self, projection):
+    async def stage_day_checkpoint(self, projection, *, stale_symbols=()):
         if self._row is None or self._account is None or self._pending_order:
             raise ValueError("Dated marking requires an exclusive prepared day")
         self._account = self.rules.merge_marks(self._account, projection)
         day = date.fromisoformat(
             self.rules.checkpoint(self._account)["metadata"]["prepared_date"]
         )
-        self._account = self.rules.record_account_day(self._account, day, [])
+        self._account = self.rules.record_account_day(
+            self._account, day, list(stale_symbols)
+        )
         states = self._states(self._row)
         states[self.execution_market] = self._checkpoint()
         states[self.execution_market]["cycle_completed"] = True

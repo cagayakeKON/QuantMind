@@ -426,6 +426,7 @@ async def test_original_engine_rejects_unsupported_new_market_input_before_funds
     pg, invalid
 ):
     await initialize(pg)
+    baseline_cache = deepcopy(pg.setup.redis.client.values)
     async with pg.sessions() as db:
         row = await order(
             db,
@@ -436,17 +437,26 @@ async def test_original_engine_rejects_unsupported_new_market_input_before_funds
         shared = engine(pg, db)
         if invalid == "short":
             row.position_side = "short"
-        if invalid == "unit":
+        if invalid == "unregistered_quote":
+            root = await db.get(SimulationAccount, ROOT)
+            checkpoint = deepcopy(root.market_state)
+            result = await shared.execute_order(row)
+            assert not result.success
+            assert root.market_state == checkpoint
+            assert root.cash == root.available_cash == 250000
+            assert root.base_currency == "CNY"
+        elif invalid == "unit":
             result = await shared.execute_from_bar(row, bar(pg), "JP")
             assert not result.success
         else:
             with pytest.raises((ValueError, NotImplementedError)):
-                if invalid == "unregistered_quote":
-                    await shared.execute_order(row)
-                else:
-                    await shared.execute_from_bar(row, bar(pg), "JP")
+                await shared.execute_from_bar(row, bar(pg), "JP")
         await db.rollback()
     assert (await financial_rows(pg))["sim_trades"] == 0
+    if invalid == "unregistered_quote":
+        assert pg.setup.redis.client.values == baseline_cache
+        counts = await financial_rows(pg)
+        assert counts["simulation_fills"] == counts["simulation_cash_ledger"] == 0
 
 
 @pytest.mark.asyncio

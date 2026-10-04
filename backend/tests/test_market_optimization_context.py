@@ -167,7 +167,14 @@ async def test_public_optimizer_executes_native_jp_strategy_in_common_lifecycle(
         assert trial.config["jp_data_version"] == base.jp_data_version
         assert trial.config["strategy_decision_class"] == "RedisRecordingStrategy"
         assert trial.trades[0]["symbol"] == "JP72030"
-        assert trial.trades[0]["quantity"] == 900
+        assert trial.trades[0]["quantity"] == 1800
+        assert float(trial.trades[0]["price"]) == 50
+        assert trial.trades[0]["commission"] == 0
+        assert trial.trades[0]["settlement_date"] == "2026-10-01"
+        assert (
+            sum(float(f["amount"]) for f in trial.advanced_stats["cash_funds"]) == 10000
+        )
+        assert trial.equity_curve[-1]["value"] == 100000
 
 
 @pytest.mark.asyncio

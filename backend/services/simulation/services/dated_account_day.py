@@ -19,6 +19,11 @@ def pending_sessions(rules, account, target):
 
 
 def close_account_day(rules, account, day):
+    marks = getattr(rules, "closing_marks", None)
+    if callable(marks):
+        projection, stale = marks(account, day)
+        marked = rules.merge_marks(account, projection)
+        return rules.record_account_day(marked, day, stale)
     projection = deepcopy(account)
     stale = []
     for symbol, position in projection["positions"].items():

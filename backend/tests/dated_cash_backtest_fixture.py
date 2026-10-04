@@ -1,6 +1,7 @@
 """Controlled raw quotes for the actual registered backtest executor."""
 
 from copy import deepcopy
+from dataclasses import replace
 
 from backend.services.simulation.jp.data import to_daily_bar
 from backend.services.simulation.jp.matching_rules import JapanDailyMatchRules
@@ -37,6 +38,22 @@ class FixtureReader:
         return to_daily_bar(
             day, symbol, self.bars.get(symbol, {}), self.metadata[symbol]
         )
+
+    def load_date(self, day, symbols=None):
+        projected = {}
+        for symbol in symbols if symbols is not None else self.bars:
+            bar = self.get_bar(symbol, day)
+            if bar is None:
+                continue
+            raw = self.bars[StockCodeUtil.to_prefix(symbol, market="JP")]
+            projected[bar.symbol] = replace(
+                bar,
+                suspended=any(
+                    raw.get(field) is None or raw[field] <= 0
+                    for field in ("open", "close", "volume")
+                ),
+            )
+        return projected
 
     def matching_rules(self, symbol, day, *, used_volume=0):
         symbol = StockCodeUtil.to_prefix(symbol, market="JP")

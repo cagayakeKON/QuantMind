@@ -184,14 +184,18 @@ class DatedCashBacktestAccount:
                     fill = self.rules.backtest_state(staged)["fills"][-1]
                     result.update(status="filled", fill=fill)
             results.append(result)
-        projection = deepcopy(staged)
-        stale = []
-        for symbol, position in projection["positions"].items():
-            bar = self.reader.get_bar(symbol, day)
-            if bar is not None and bar.close > 0:
-                position["price"] = bar.close
-            else:
-                stale.append(StockCodeUtil.to_prefix(symbol, market=context.market))
+        marks = getattr(self.rules, "closing_marks", None)
+        if callable(marks):
+            projection, stale = marks(staged, day)
+        else:
+            projection = deepcopy(staged)
+            stale = []
+            for symbol, position in projection["positions"].items():
+                bar = self.reader.get_bar(symbol, day)
+                if bar is not None and bar.close > 0:
+                    position["price"] = bar.close
+                else:
+                    stale.append(StockCodeUtil.to_prefix(symbol, market=context.market))
         staged = self.rules.merge_marks(staged, projection)
         staged = self.rules.complete_backtest_day(staged, day, results, stale)
         snapshot = self.rules.backtest_state(staged)["daily"][-1]

@@ -18,6 +18,7 @@ import { marketDataService } from '../services/marketDataService';
 export interface UseTradeRecordsOptions {
     limit?: number;
     tradingMode?: TradingMode;
+    market?: string;
     autoRefresh?: boolean;
     refreshInterval?: number;
 }
@@ -37,6 +38,7 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
     const {
         limit = 10,
         tradingMode,
+        market,
         autoRefresh = false,
         refreshInterval = 60000, // 1分钟
     } = options;
@@ -55,6 +57,12 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
     const failedSymbolsRef = useRef<Set<string>>(new Set());
 
     const userId = useSelector((state: any) => state.auth?.user?.id);
+    const tenantId = useSelector((state: any) => state.auth?.user?.tenant_id ?? 'default');
+    const scopeKey = market === 'JP' ? `JP:${tradingMode}:${tenantId}:${userId}` : 'legacy';
+    const scopeRef = useRef({ key: scopeKey, revision: 0 });
+    if (scopeRef.current.key !== scopeKey) {
+        scopeRef.current = { key: scopeKey, revision: scopeRef.current.revision + 1 };
+    }
 
 
     const normalizeRecords = useCallback((input: TradeRecord[]): TradeRecord[] => {
@@ -94,6 +102,9 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
 
     // 获取交易记录
     const fetchData = useCallback(async (params?: { silent?: boolean }) => {
+        if (scopeRef.current.key !== scopeKey) return;
+        const revision = scopeRef.current.revision;
+        const accepts = () => scopeRef.current.key === scopeKey && scopeRef.current.revision === revision;
         const silent = params?.silent ?? true;
 
         try {
@@ -102,7 +113,10 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
             }
             setError(null);
 
-            const result = await tradingService.getRecentTrades(limit, tradingMode);
+            const result = market
+                ? await tradingService.getRecentTrades(limit, tradingMode, market)
+                : await tradingService.getRecentTrades(limit, tradingMode);
+            if (!accepts()) return;
             const normalizedRecords = normalizeRecords(result.records);
 
             // 批量获取股票名称并补全
@@ -113,6 +127,7 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
                 try {
                     // 使用分批获取以防超时和并发过载
                     const batchResults = await marketDataService.getStockDetailsBatch(uniqueSymbols, 10, 50);
+                    if (!accepts()) return;
                     const nameMap: Record<string, string> = {};
                     
                     batchResults.forEach(({ code, result }) => {
@@ -133,6 +148,8 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
                     console.warn('Failed to resolve stock names batch in useTradeRecords:', nameError);
                 }
             }
+
+            if (!accepts()) return;
 
             const nextSnapshot = {
                 records: normalizedRecords,
@@ -165,6 +182,7 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
                 backoffMsRef.current = 3000;
             }
         } catch (err) {
+            if (!accepts()) return;
             const errorMessage = err instanceof Error ? err.message : '未知错误';
             setError(errorMessage);
             console.error('获取交易记录失败:', errorMessage);
@@ -185,10 +203,26 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
 
             scheduleRetry();
         } finally {
-            initializedRef.current = true;
-            setLoading(false);
+            if (accepts()) {
+                initializedRef.current = true;
+                setLoading(false);
+            }
         }
-    }, [limit, tradingMode, normalizeRecords, records, scheduleRetry, clearRetryTimer]);
+    }, [limit, tradingMode, market, scopeKey, normalizeRecords, records, scheduleRetry, clearRetryTimer]);
+
+    useEffect(() => {
+        clearRetryTimer();
+        setRecords([]);
+        setError(null);
+        setIsOffline(false);
+        setIsFallbackToOrders(false);
+        setIsStale(false);
+        setLastUpdatedAt(null);
+        fingerprintRef.current = null;
+        initializedRef.current = false;
+        failedSymbolsRef.current.clear();
+        backoffMsRef.current = 3000;
+    }, [scopeKey, clearRetryTimer]);
 
     // 监听实时成交更新事件，收到后立即触发数据刷新
     useTradeWebSocket({

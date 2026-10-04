@@ -763,6 +763,7 @@ async def chart_backtest(
     sell_expr: str = Query("", description="卖出条件；空=持有到结束"),
     days: int = Query(500, ge=50, le=2000),
     current_user: dict = Depends(get_current_user),
+    market: str | None = Query(None),
 ):
     """图表内简单策略回测：表达式条件 -> 次日开盘撮合（防未来函数）。
 
@@ -770,6 +771,8 @@ async def chart_backtest(
     """
     _ = current_user
     sym = symbol.upper().strip()
+    if terminal_source(market=market if isinstance(market, str) else None, symbol=sym):
+        raise HTTPException(status_code=422, detail="当前市场未开放图表表达式回测；请使用公共策略回测入口")
     if not _SYMBOL_RE.match(sym):
         raise HTTPException(status_code=400, detail=f"非法代码 {sym}")
 
@@ -1020,10 +1023,13 @@ async def ai_backtest(
     symbol: str = Query(...),
     hint: str = Query("", description="用户提示词，如 '底部放量突破'"),
     current_user: dict = Depends(get_current_user),
+    market: str | None = Query(None),
 ):
     """AI 生成策略表达式（利用命中标签+技术形态）-> 建议 buy/sell DSL 表达式。"""
     _ = current_user
     sym = symbol.upper().strip()
+    if terminal_source(market=market if isinstance(market, str) else None, symbol=sym):
+        raise HTTPException(status_code=422, detail="当前市场未开放 A 股标签驱动的图表 AI 回测")
     if not _SYMBOL_RE.match(sym):
         raise HTTPException(status_code=400, detail=f"非法代码 {sym}")
 
@@ -1421,6 +1427,8 @@ async def _trend_map(
         if source is not None:
             mwhere += " AND symbol LIKE :market_prefix"
             params["market_prefix"] = f"{source.market}%"
+        else:
+            mwhere += " AND symbol NOT LIKE 'JP%'"
         bwhere = ""
         if before is not None:
             bwhere = "AND trade_date <= :b"
@@ -1519,8 +1527,8 @@ async def list_stocks(
     else:
         df, trade_date = await asyncio.to_thread(_load_universe, asof=date)
     market_params = {"market_prefix": f"{source.market}%"} if source else {}
-    market_where = " AND symbol LIKE :market_prefix" if source else ""
-    market_join = " AND e.symbol LIKE :market_prefix" if source else ""
+    market_where = " AND symbol LIKE :market_prefix" if source else " AND symbol NOT LIKE 'JP%'"
+    market_join = " AND e.symbol LIKE :market_prefix" if source else " AND e.symbol NOT LIKE 'JP%'"
     if source is not None and (concept or index_code or tag):
         raise HTTPException(
             status_code=422,
@@ -1601,6 +1609,8 @@ async def list_stocks(
         if source is not None:
             mwhere += " AND symbol LIKE :market_prefix"
             mparams["market_prefix"] = f"{source.market}%"
+        else:
+            mwhere += " AND symbol NOT LIKE 'JP%'"
         params: dict = {}
         if date:
             _signal_date = _date2.fromisoformat(date)
@@ -1643,6 +1653,8 @@ async def list_stocks(
             if source is not None:
                 where += " AND symbol LIKE :market_prefix"
                 params["market_prefix"] = f"{source.market}%"
+            else:
+                where += " AND symbol NOT LIKE 'JP%'"
             if model:
                 # model_version 列恒为 'inference_script'（历史遗留），真实模型标识
                 # 在 qm_model_inference_runs.model_id，按 run_id 关联过滤
@@ -2029,6 +2041,7 @@ async def market_calendar(
     model: str | None = Query(None, description="按模型过滤推理概况（缺省=全模型）"),
     refresh: bool = Query(False, description="跳过缓存（推理完成后立即刷新）"),
     current_user: dict = Depends(get_current_user),
+    market: str | None = Query(None),
 ):
     """大盘 MA20 日历：近 N 月每个交易日的上证收盘/MA20/偏离度，叠加当日推理概况。
 
@@ -2036,6 +2049,8 @@ async def market_calendar(
     点击有推理的日期切列表基准信号日；无推理日期可触发补推理。
     """
     _ = current_user
+    if terminal_source(market=market if isinstance(market, str) else None):
+        raise HTTPException(status_code=422, detail="当前市场未开放上证指数 MA20 图表日历；请使用市场交易日历入口")
     import asyncio
     from datetime import date as _date, timedelta as _td
 
@@ -2083,7 +2098,7 @@ async def market_calendar(
                 "SELECT trade_date, fusion_score, "
                 "ROW_NUMBER() OVER (PARTITION BY trade_date ORDER BY fusion_score DESC NULLS LAST) AS rn "
                 "FROM engine_signal_scores "
-                f"WHERE tenant_id='default' AND trade_date >= :start {model_where}"
+                f"WHERE tenant_id='default' AND trade_date >= :start AND symbol NOT LIKE 'JP%' {model_where}"
                 ") t GROUP BY trade_date ORDER BY trade_date"
             )
             params: dict[str, Any] = {"start": _date.fromisoformat(cal_start)}

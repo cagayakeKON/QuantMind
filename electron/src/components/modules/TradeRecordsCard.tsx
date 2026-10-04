@@ -16,6 +16,7 @@ export const TradeRecordsCard: React.FC = () => {
   const { records, loading, isOffline, isFallbackToOrders, isStale, lastUpdatedAt, refresh } = useTradeRecords({
     limit: 8,
     tradingMode,
+    market: currentMarket,
     autoRefresh: true,
     refreshInterval: 12000,
   });

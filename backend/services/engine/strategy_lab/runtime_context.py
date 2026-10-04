@@ -4,7 +4,9 @@ from .runner.result_collector import fetch_result
 from .runner.worker import _resolve_provider
 
 
-def auxiliary_context(*, run_id=None, options=None, params=None, stock_pool=None):
+def auxiliary_context(
+    *, run_id=None, options=None, params=None, stock_pool=None, latest_publication=False
+):
     options, params = dict(options or {}), dict(params or {})
     if run_id:
         result = fetch_result(run_id)
@@ -36,6 +38,10 @@ def auxiliary_context(*, run_id=None, options=None, params=None, stock_pool=None
 
     registered = LOCAL_MARKET_PROVIDERS.get(str(options.get("market") or "CN").upper())
     if registered and registered.strategy_lab_provider_factory:
+        if latest_publication and registered.strategy_lab_watch_latest_publication:
+            # A watch follows completed research publications; a backtest/source
+            # run remains pinned. Resolve the mutable pointer exactly once here.
+            options["data_version"] = registered.open().data_dir.name
         provider = _resolve_provider({"options": options}, None)
         options.update(
             market=provider.market, data_version=provider.reader.data_version

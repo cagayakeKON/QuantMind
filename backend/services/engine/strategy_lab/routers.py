@@ -280,7 +280,12 @@ async def post_watch(body: WatchBody, request: Request) -> dict[str, Any]:
         name=body.name,
         code=body.code,
         **(
-            {"options": options, "params": params, "stock_pool": pool}
+            {
+                "options": options, "params": params, "stock_pool": pool,
+                **({"tenant_id": getattr(request.state, "tenant_id", None)
+                    or (getattr(request.state, "user", None) or {}).get("tenant_id")}
+                   if provider.market == "JP" else {}),
+            }
             if provider
             else {}
         ),

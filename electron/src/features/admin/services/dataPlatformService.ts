@@ -141,6 +141,9 @@ export interface QuantDBDataset {
     layout: QuantDBLayout;
     rel_dir: string;
     note: string;
+    sync_required?: boolean;
+    sync_dependencies?: string[];
+    sync_dependency_note?: string;
     synced: boolean;
     files: number;
     size_mb: number;
@@ -170,6 +173,10 @@ export interface QuantDBSyncJob {
     status: 'running' | 'completed' | 'failed' | 'cancelled' | 'cancelling';
     stage: string;
     datasets: string[];
+    requested_datasets?: string[];
+    effective_datasets?: string[];
+    dependency_datasets?: string[];
+    dependency_note?: string;
     total: number;
     done: number;
     current?: string | null;

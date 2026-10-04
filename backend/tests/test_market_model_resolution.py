@@ -210,8 +210,13 @@ def get_strategy_config():
         if action != "system"
     )
     assert [(row["symbol"], row["quantity"]) for row in result.trades] == [
-        ("JP72030", 900)
+        ("JP72030", 1800)
     ]
+    assert float(result.trades[0]["price"]) == 50
+    assert result.trades[0]["commission"] == 0
+    assert result.trades[0]["settlement_date"] == "2026-10-01"
+    assert sum(float(f["amount"]) for f in result.advanced_stats["cash_funds"]) == 10000
+    assert result.equity_curve[-1]["value"] == 100000
 
 
 @pytest.mark.asyncio

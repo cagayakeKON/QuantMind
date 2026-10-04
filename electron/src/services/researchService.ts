@@ -2,6 +2,16 @@ import axios, { AxiosInstance } from 'axios';
 import { SERVICE_ENDPOINTS, resolveWebSafeServiceBase } from '../config/services';
 import { authService } from '../features/auth/services/authService';
 import type { ResearchModelOption, ResearchStockRow } from '../features/research/types';
+
+export class ResearchPredictionSourceChangedError extends Error {
+  constructor() { super('预测来源已更新，请重新读取候选列表'); }
+}
+
+export interface ObservedResearchPrediction {
+  symbol: string;
+  score: number;
+  dataProvenance: ResearchStockRow['dataProvenance'];
+}
 export type { ResearchModelOption, ResearchStockRow } from '../features/research/types';
 
 export type ResearchSignal = 'buy' | 'hold' | 'sell';
@@ -256,7 +266,7 @@ class ResearchService {
     symbols: string[],
     fields: string[],
     tradeDate?: string | null,
-    options?: { market?: string; dataVersion?: string | null; modelId?: string; runId?: string }
+    options?: { market?: string; dataVersion?: string | null; modelId?: string; runId?: string; observedPredictions?: ObservedResearchPrediction[] }
   ): Promise<Record<string, Record<string, number>>> {
     if (!symbols?.length || !fields?.length) return {};
     try {
@@ -269,6 +279,9 @@ class ResearchService {
           ...(options.dataVersion ? { data_version: options.dataVersion } : {}),
           ...(options.modelId ? { model_id: options.modelId } : {}),
           ...(options.runId ? { run_id: options.runId } : {}),
+          ...(options.observedPredictions ? { observed_predictions: options.observedPredictions.map(row => ({
+            symbol: row.symbol, score: row.score, data_provenance: row.dataProvenance ?? null,
+          })) } : {}),
         } : {}),
       });
       const items = resp.data?.data?.items || [];
@@ -277,6 +290,11 @@ class ResearchService {
         return acc;
       }, {});
     } catch (error) {
+      const response = (error as any)?.response;
+      if (options?.market === 'JP' && response?.status === 409 &&
+        response?.data?.detail?.code === 'PREDICTION_SOURCE_CHANGED') {
+        throw new ResearchPredictionSourceChangedError();
+      }
       console.error('[ResearchService] getProjectedQuantDbFeatures failed:', error);
       return {};
     }

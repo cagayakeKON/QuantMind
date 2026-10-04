@@ -199,18 +199,23 @@ class SimulationCycleContext:
             tenant_id=self.tenant_id,
             market=self.market.value,
         )
-        bars = await asyncio.to_thread(
-            self.cash_rules.reader.load_date,
-            self.trade_date,
-            list(account["positions"]),
-        )
-        projection = deepcopy(account)
-        for symbol, position in projection["positions"].items():
-            bar = bars.get(symbol)
-            if bar is None or not math.isfinite(bar.close) or bar.close <= 0:
-                raise ValueError(f"Exact closing mark is unavailable for {symbol}")
-            position["price"] = bar.close
-        await manager.stage_day_checkpoint(projection)
+        marks = getattr(self.cash_rules, "closing_marks", None)
+        if callable(marks):
+            projection, stale = await asyncio.to_thread(marks, account, self.trade_date)
+            await manager.stage_day_checkpoint(projection, stale_symbols=stale)
+        else:
+            bars = await asyncio.to_thread(
+                self.cash_rules.reader.load_date,
+                self.trade_date,
+                list(account["positions"]),
+            )
+            projection = deepcopy(account)
+            for symbol, position in projection["positions"].items():
+                bar = bars.get(symbol)
+                if bar is None or not math.isfinite(bar.close) or bar.close <= 0:
+                    raise ValueError(f"Exact closing mark is unavailable for {symbol}")
+                position["price"] = bar.close
+            await manager.stage_day_checkpoint(projection)
 
     def public_account(self, account):
         public = deepcopy(account)

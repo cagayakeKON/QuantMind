@@ -7,7 +7,9 @@ const state = vi.hoisted(() => ({
 }));
 vi.mock('../../store', () => ({ useAppSelector: () => state.market }));
 vi.mock('../../store/slices/uiSlice', () => ({ selectCurrentMarket: vi.fn() }));
-vi.mock('../../services/researchService', () => ({ researchService: {
+vi.mock('../../services/researchService', () => ({
+  ResearchPredictionSourceChangedError: class extends Error {},
+  researchService: {
   getAvailableModels: state.models, getInferenceRuns: state.runs,
   getResearchUniverseByDate: state.universe, getProjectedQuantDbFeatures: state.projected,
 } }));
@@ -29,6 +31,7 @@ vi.mock('antd', () => {
 });
 
 import { ResearchPlatformPage } from '../ResearchPlatformPage';
+import { ResearchPredictionSourceChangedError } from '../../services/researchService';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -38,6 +41,7 @@ function deferred<T>() {
 function universe(version: string | null, score = 9) {
   return {market:'JP', dataVersion:version, candidates:[{
     key:'toyota', code:'JP72030', name:'Toyota', score, sector:'Auto', sourceWarning:version ? null : 'Missing source',
+    dataProvenance:version ? {market:'JP',data_version:version,data_trade_date:'2026-10-01',prediction_trade_date:'2026-10-02',run_id:version} : null,
   }], summary:{total:1}};
 }
 function rows() { return JSON.parse(screen.getByTestId('rows').textContent || '[]'); }
@@ -62,7 +66,7 @@ it('refreshes the actual JP page without merging old publication features into n
   await waitFor(() => expect(rows()[0]?.score).toBe(10));
   expect(rows()[0]?.closePrice).toBeUndefined();
   expect(state.projected).toHaveBeenLastCalledWith(['72030.JP'], expect.any(Array), '2026-10-01',
-    {market:'JP',modelId:'source-test-model'});
+    {market:'JP',modelId:'source-test-model',observedPredictions:[{symbol:'72030.JP',score:10,dataProvenance:universe('v2',10).candidates[0].dataProvenance}]});
   await act(async () => pending.resolve({'72030.JP':{closePrice:123}}));
   await waitFor(() => expect(rows()[0]?.closePrice).toBe(123));
 });
@@ -90,7 +94,30 @@ it('projects mixed publications through the owned model when the global version 
   });
   expect(rows().map((row: any) => row.closePrice).sort()).toEqual([100,123]);
   expect(state.projected).toHaveBeenLastCalledWith(expect.arrayContaining(['72030.JP','216A0.JP']),expect.any(Array),'2026-10-01',
-    {market:'JP',modelId:'source-test-model'});
+    {market:'JP',modelId:'source-test-model',observedPredictions:expect.any(Array)});
+});
+
+it('reloads the score list when a partial inference changes the observed source before projection', async () => {
+  state.universe.mockResolvedValueOnce(universe('v1',9)).mockResolvedValue(universe('v2',10));
+  state.projected.mockRejectedValueOnce(new ResearchPredictionSourceChangedError())
+    .mockResolvedValue({'72030.JP':{closePrice:123}});
+  render(<ResearchPlatformPage />);
+  await waitFor(() => expect(rows()[0]?.closePrice).toBe(123));
+  expect(rows()[0]?.score).toBe(10);
+  expect(state.universe).toHaveBeenCalledTimes(2);
+  expect(state.projected.mock.calls[0][3].observedPredictions[0]).toEqual({
+    symbol:'72030.JP',score:9,dataProvenance:universe('v1').candidates[0].dataProvenance,
+  });
+  expect(state.projected.mock.calls[1][3].observedPredictions[0].dataProvenance.data_version).toBe('v2');
+});
+
+it('limits automatic source retries and never displays incompatible features', async () => {
+  state.projected.mockRejectedValue(new ResearchPredictionSourceChangedError());
+  render(<ResearchPlatformPage />);
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('加载期间更新'));
+  expect(state.universe).toHaveBeenCalledTimes(2);
+  expect(state.projected).toHaveBeenCalledTimes(2);
+  expect(rows()[0]?.closePrice).toBeUndefined();
 });
 
 it('re-reads JP source rows after remount instead of reusing a model/date-only cache', async () => {
