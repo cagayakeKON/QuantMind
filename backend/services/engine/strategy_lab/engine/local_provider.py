@@ -14,6 +14,8 @@ class LocalLabProvider(InMemoryProvider):
         self.hub = reader.hub
         self.allowed_features = frozenset()
         self.universe_loader = None
+        self.is_active_on = None
+        self.named_universes = frozenset({"all"})
 
     def calendar(self, start, end):
         return [
@@ -64,10 +66,19 @@ class LocalLabProvider(InMemoryProvider):
             raise ValueError("Native snapshot requires a trading date")
         rows = {}
         for symbol in symbols or self.resolve_universe("all"):
-            frame = self._slice(symbol, date, 1)
-            if not frame.empty and frame.index[-1] == date:
+            frame = self.current_bar(symbol, date)
+            if not frame.empty:
                 rows[symbol] = frame.iloc[-1]
         return pd.DataFrame(rows).T
+
+    def current_bar(self, symbol, today):
+        """Exact event-day research bar; as-of history remains unchanged."""
+        frame = self._slice(symbol, today, 1)
+        if frame.empty or frame.index[-1].date() != today.date():
+            return pd.DataFrame()
+        if self.is_active_on is not None and not self.is_active_on(symbol, today):
+            return pd.DataFrame()
+        return frame
 
     def benchmark_history(self, symbol, n, today):
         if symbol != self.benchmark:

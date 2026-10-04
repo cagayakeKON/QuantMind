@@ -138,7 +138,7 @@ const SimulationExecutionInputForm: React.FC<Props> = ({
                 onChange={(value) => updateFees('slippage_bps', value)} />
             </label>
           </div>
-          <div className="text-xs text-slate-500">日线开盘价模拟 · 费用须与已初始化的模拟资金一致 · 数据版本 {inputs.execution_context.data_version}</div>
+          <div className="text-xs text-slate-500">日线开盘价模拟（历史） · 自动托管使用已发布日线延迟模拟，执行计划日期之前的完整交易日日线 · 费用须与已初始化的模拟资金一致 · 数据版本 {inputs.execution_context.data_version}</div>
           <div className="flex flex-wrap items-center gap-3">
             <InputNumber aria-label="初始模拟资金" placeholder={`初始资金（${inputs.currency}）`} className="!w-60"
               min={100000} step={100000} value={initialCash} disabled={loading || resetting}

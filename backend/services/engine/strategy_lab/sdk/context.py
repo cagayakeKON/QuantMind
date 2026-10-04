@@ -137,6 +137,7 @@ class Context:
             "_now_index",
             "_dirty",
             "_drawn_lines",
+            "_registered_universes",
             "stats",
         }
     )
@@ -161,6 +162,7 @@ class Context:
         object.__setattr__(self, "_now_index", 0)
         object.__setattr__(self, "_dirty", False)
         object.__setattr__(self, "_drawn_lines", {})
+        object.__setattr__(self, "_registered_universes", frozenset())
         object.__setattr__(self, "stats", StatsView())
 
     # ------------------------------------------------------------------
@@ -168,7 +170,11 @@ class Context:
     # ------------------------------------------------------------------
     def __setattr__(self, key: str, value: Any) -> None:
         if key in self._CONFIG_KEYS:
-            self._validate_config(key, value)
+            self._validate_config(
+                key,
+                value,
+                allowed_universes=_ALLOWED_UNIVERSES | self._registered_universes,
+            )
             object.__setattr__(self, key, value)
             object.__setattr__(self, "_dirty", True)
             return
@@ -179,15 +185,17 @@ class Context:
         object.__setattr__(self, key, value)
 
     @staticmethod
-    def _validate_config(key: str, value: Any) -> None:
+    def _validate_config(
+        key: str, value: Any, *, allowed_universes=_ALLOWED_UNIVERSES
+    ) -> None:
         if value is None:
             return
         if key == "universe":
             if isinstance(value, str):
-                if value not in _ALLOWED_UNIVERSES:
+                if value not in allowed_universes:
                     raise ValueError(
                         f"universe='{value}' not supported. "
-                        f"choose from {sorted(_ALLOWED_UNIVERSES)} or pass list[str]."
+                        f"choose from {sorted(allowed_universes)} or pass list[str]."
                     )
             elif isinstance(value, (list, tuple, set)):
                 if not all(isinstance(s, str) and s for s in value):
@@ -245,6 +253,13 @@ class Context:
         e = _coerce_date(self.end)
         if s >= e:
             raise ValueError(f"start ({self.start}) must be before end ({self.end})")
+
+    def _bind_universe_names(self, names) -> None:
+        """Bind only this provider's additional pools for the current run."""
+        names = frozenset(names)
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("Registered universe names must be non-empty strings")
+        object.__setattr__(self, "_registered_universes", names)
 
     # ------------------------------------------------------------------
     # Parameters

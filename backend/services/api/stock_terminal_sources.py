@@ -18,7 +18,7 @@ class HubTerminalSource:
     def __init__(self, market: str):
         self.market = market
         self.provider = LOCAL_MARKET_PROVIDERS[market]
-        self.hub = self.provider.open()
+        self.hub = self.provider.open_raw()
 
     def symbol_key(self, symbol: str) -> str:
         return StockCodeUtil.to_prefix(symbol, market=self.market)

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import csv
-import os
+import hashlib
+import json
 from datetime import date
 from pathlib import Path
+from functools import lru_cache
 
 import pandas as pd
 
@@ -13,6 +15,41 @@ from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
 from backend.shared.stock_utils import StockCodeUtil
 from backend.services.simulation.services.local_market_data import DailyBar
 from .rules import RuleDataMissing, TradingCalendar, lot_size
+from backend.services.engine.data_platform.jp_publication import publication_path
+
+
+@lru_cache(maxsize=64)
+def _execution_history_digest(pinned_root, relative, processed_through):
+    """Bounded per-session reads; cache keys identify an immutable publication."""
+    hub = QuantJPDataHub(pinned_root)
+    digest = hashlib.sha256()
+    for partition in hub._partition_dates(relative, end=processed_through):
+        day = date.fromisoformat(f"{partition[:4]}-{partition[4:6]}-{partition[6:]}")
+        frame = hub._read(relative, day, day)
+        frame = frame.drop(columns=["price_factor", "volume_factor"], errors="ignore")
+        frame = frame.reindex(sorted(frame.columns), axis=1)
+        if not frame.empty:
+            frame = frame.sort_values(["dt", "symbol"]).reset_index(drop=True)
+
+        def encode(value):
+            if pd.isna(value):
+                return None
+            if isinstance(value, float):
+                return ["float64", value.hex()]
+            if hasattr(value, "isoformat"):
+                return value.isoformat()
+            return value
+
+        records = [
+            {key: encode(value) for key, value in row.items()}
+            for row in frame.to_dict("records")
+        ]
+        content = json.dumps(
+            records, sort_keys=True, ensure_ascii=False, allow_nan=False
+        )
+        digest.update(partition.encode())
+        digest.update(hashlib.sha256(content.encode()).digest())
+    return digest.hexdigest()
 
 
 def to_daily_bar(
@@ -56,12 +93,68 @@ def open_execution_data(version: str | None = None) -> JPExecutionData:
             raise RuleDataMissing("Pinned JP data version is unavailable")
         hub = QuantJPDataHub(pinned)
     else:
-        hub = QuantJPDataHub(hub.data_dir)
-    return JPExecutionData(hub, os.getenv("QM_JP_TRADING_UNITS_FILE"))
+        hub = QuantJPDataHub(publication_path(root, raw=True))
+    if not (hub.data_dir / "manifest.json").is_file():
+        raise RuleDataMissing("JP immutable publication is unavailable")
+    manifest = json.loads((hub.data_dir / "manifest.json").read_text("utf-8"))
+    units = manifest.get("trading_units")
+    units_path = None
+    if units:
+        units_path = (hub.data_dir / units["path"]).resolve()
+        if (
+            not units_path.is_relative_to(hub.data_dir.resolve())
+            or not units_path.is_file()
+            or hashlib.sha256(units_path.read_bytes()).hexdigest() != units["sha256"]
+        ):
+            raise RuleDataMissing(
+                "Published JP trading units fail integrity validation"
+            )
+    return JPExecutionData(hub, units_path)
 
 
 class JPExecutionData:
     execution_data_errors = (RuleDataMissing,)
+
+    def prove_history_extension(self, old_version, processed_through):
+        """Compare consumed execution inputs, never adjusted research prices.
+
+        Later splits can change forward-adjusted history without changing past
+        raw execution. Revisions to raw prices/master/calendar/units block use.
+        """
+        old = open_execution_data(old_version)
+        if self.latest_price_date() < old.latest_price_date():
+            raise RuleDataMissing("JP publication cannot roll back its price coverage")
+        if old.units_sha256 != self.units_sha256:
+            raise RuleDataMissing("JP publication changed pinned trading units")
+        original_calendar = pd.read_parquet(
+            old.hub.data_dir / "2_base_sector/trading_calendar/calendar.parquet"
+        )
+        cutoff = pd.to_datetime(original_calendar.trade_date).dt.date.max()
+        if [s for s in self.calendar.sessions if s <= cutoff] != old.calendar.sessions:
+            raise RuleDataMissing("JP publication revised its existing calendar")
+        proofs = {}
+        for relative in ("1_kline_data/daily_unadjusted", "2_base_sector/master"):
+            hashes = [
+                _execution_history_digest(
+                    reader.hub.data_dir.resolve(), relative, processed_through
+                )
+                for reader in (old, self)
+            ]
+            if hashes[0] != hashes[1]:
+                raise RuleDataMissing(
+                    "JP publication revised consumed execution inputs: " + relative
+                )
+            proofs[relative] = hashes[0]
+        return {
+            "from_version": old_version,
+            "to_version": self.data_version,
+            "processed_through": str(processed_through),
+            "execution_history_sha256": proofs,
+            "trading_units_sha256": self.units_sha256,
+            "calendar_sha256": hashlib.sha256(
+                "\n".join(map(str, old.calendar.sessions)).encode()
+            ).hexdigest(),
+        }
 
     def __init__(self, hub: QuantJPDataHub, units_path: str | Path | None = None):
         self.hub = hub
@@ -72,6 +165,11 @@ class JPExecutionData:
             pd.to_datetime(calendar.trade_date).dt.date.tolist()
         )
         self.units: dict[str, list[dict]] = {}
+        self.units_sha256 = (
+            hashlib.sha256(Path(units_path).read_bytes()).hexdigest()
+            if units_path
+            else None
+        )
         if units_path and Path(units_path).is_file():
             with Path(units_path).open(encoding="utf-8-sig", newline="") as stream:
                 for row in csv.DictReader(stream):

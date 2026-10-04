@@ -763,8 +763,11 @@ def make_market_router(
 
     def _root() -> Path:
         if market == "JP":
-            from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
-            return QuantJPDataHub().data_dir
+            from backend.services.engine.data_platform.market_provider import (
+                LOCAL_MARKET_PROVIDERS,
+            )
+
+            return LOCAL_MARKET_PROVIDERS[market].open_raw().data_dir
         return _data_dir(env_var, default_dir)
 
     # ------------------------------------------------------------------
@@ -958,6 +961,15 @@ def make_market_router(
                     if market == "JP":
                         raise
 
+            if market == "JP":
+                from backend.services.engine.data_platform.jp_publication import (
+                    publication_status,
+                )
+                from backend.services.engine.data_platform.quantjp_hub import (
+                    _resolve_quantjp_data_dir,
+                )
+
+                result["publication_status"] = publication_status(_resolve_quantjp_data_dir())
             _job_update(
                 job_id,
                 status="completed",

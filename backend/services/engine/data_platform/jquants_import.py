@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import json
 import uuid
+import hashlib
+import os
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 import duckdb
 from .jp_file_lock import exclusive_file_lock
+from .jp_publication import publish_pointer
+from .jp_trading_units import read_trading_units
 
 _DATASETS = {
     "daily_unadjusted": "1_kline_data/daily_unadjusted",
@@ -252,15 +256,28 @@ def _import_jquants_snapshot(
         report["source_mtime_ns"],
     ):
         raise RuntimeError("Source snapshot changed during import")
+    units = os.getenv("QM_JP_TRADING_UNITS_FILE", "").strip()
+    if units and Path(units).is_file():
+        content = Path(units).read_bytes()
+        read_trading_units(content)
+        folder = stage / "execution_inputs"
+        folder.mkdir()
+        (folder / "trading_units.csv").write_bytes(content)
+        report["trading_units"] = {
+            "path": "execution_inputs/trading_units.csv",
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+        report["trading_units_available"] = True
+    else:
+        report["trading_units_available"] = False
     (stage / "manifest.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     published = versions / version
     stage.rename(published)
-    pointer = destination / f".current-{uuid.uuid4().hex}.json"
-    pointer.write_text(
-        json.dumps({"version": version, "path": f"versions/{version}"}),
-        encoding="utf-8",
-    )
-    pointer.replace(destination / "current.json")
+    publish_pointer(destination, version, raw=True)
+    # Keep a usable research publication until its replacement is complete.
+    # First imports still expose raw data (and honestly report features unready).
+    if not (destination / "current.json").is_file():
+        publish_pointer(destination, version)
     return report

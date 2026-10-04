@@ -615,7 +615,7 @@ def list_default_models(
     user_id: str | None = None,
     model_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """列出用户默认模型（is_default=TRUE 且 ready/active）。"""
+    """列出原用户默认模型及已注册 JP 市场默认模型（ready/active）。"""
     import os
 
     from sqlalchemy import create_engine as sa_create_engine
@@ -636,7 +636,8 @@ def list_default_models(
     db = Session()
     try:
         clauses = [
-            "is_default = TRUE",
+            "(is_default = TRUE OR (metadata_json->>'market' = 'JP' "
+            "AND metadata_json->>'market_default' = 'true'))",
             "status IN ('ready', 'active')",
             "storage_path IS NOT NULL",
             "TRIM(storage_path) <> ''",

@@ -371,7 +371,7 @@ def test_local_kline_cache_keeps_publication_window_and_adjustment(
         )
 
     hub.fetch_daily_kline = fetch
-    provider = SimpleNamespace(open=lambda: hub, currency="JPY", source="test-source")
+    provider = SimpleNamespace(open_raw=lambda: hub, currency="JPY", source="test-source")
     monkeypatch.setattr(market_kline, "_LOCAL_KLINE_PROVIDERS", {"JP": provider})
     monkeypatch.setattr(market_kline, "_KLINE_CACHE", {})
     args = (date(2026, 9, 28), date(2026, 9, 29), 2, "qfq")

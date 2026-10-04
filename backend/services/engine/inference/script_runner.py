@@ -60,7 +60,13 @@ _describe_lock = threading.Lock()
 
 def _cached_describe(reader, source: str) -> Any:
     now = time.monotonic()
-    cache_key = f"{reader.data_dir}:{getattr(reader, 'market', '')}:{source}"
+    # Only the new native JP publications need an isolated versioned cache.
+    # Preserve the original source-only cache semantics for other markets.
+    cache_key = (
+        f"JP:{reader.data_dir}:{source}"
+        if getattr(reader, "market", None) == "JP"
+        else source
+    )
     with _describe_lock:
         hit = _describe_cache.get(cache_key)
         if hit and now - hit[0] < _DESCRIBE_TTL:

@@ -108,6 +108,11 @@ class SimulationCycleContext:
                 signal_source="engine_signal_scores",
                 signal_snapshot_sha256=self.hosted_signals.snapshot_sha256,
             )
+        if self.params.get("execution_date_mode"):
+            result.update(
+                scheduled_trade_date=self.params["scheduled_trade_date"],
+                execution_date_mode=self.params["execution_date_mode"],
+            )
         return result
 
     def signals(self):
@@ -180,6 +185,10 @@ class SimulationCycleContext:
 
     async def finish_day(self, manager):
         await manager.prepare_dated_day(self.trade_date)
+        # Completion applies to every cycle, including empty signal batches.
+        # prepare_dated_day holds the root row lock through the caller's commit.
+        if manager.completed_cycle_account(self.trade_date) is not None:
+            return
         account = await manager.get_account(
             canonical_sim_uid(self.user_id),
             tenant_id=self.tenant_id,

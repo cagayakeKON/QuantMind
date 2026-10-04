@@ -436,17 +436,17 @@ class TradingCalendarService:
         mkt = self._normalize_market(market)
         d = self._normalize_trade_date(trade_date)
 
-        if mkt == "XTKS":
-            from backend.services.engine.data_platform.jp_calendar import is_cash_session
-
-            return is_cash_session(d)
-
         # 1. 先查 DB override
         db_override = await self._find_db_override(
             market=mkt, trade_date=d, tenant_id=tenant_id, user_id=user_id
         )
         if db_override is not None:
             return db_override
+
+        if mkt == "XTKS":
+            from backend.services.engine.data_platform.jp_calendar import is_cash_session
+
+            return is_cash_session(d)
 
         # 2. 主数据源：exchange_calendars
         xcal_result = self._is_trading_day_xcal(mkt, d)
@@ -458,6 +458,32 @@ class TradingCalendarService:
             return False
         logger.warning("calendar unavailable for market=%s date=%s, fallback to weekday check", mkt, d)
         return True
+
+    async def _jp_adjacent_session(
+        self, *, trade_date, tenant_id, user_id, direction
+    ) -> date:
+        """Keep the published JP calendar and original override precedence."""
+        from backend.services.engine.data_platform.jp_calendar import cash_sessions
+
+        sessions = cash_sessions(trade_date)
+        candidates = (
+            [day for day in sessions if day > trade_date]
+            if direction == "next"
+            else [day for day in reversed(sessions) if day < trade_date]
+        )
+        for candidate in candidates[:370]:
+            override = await self._find_db_override(
+                market="XTKS",
+                trade_date=candidate,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+            if override is not False:
+                return candidate
+        raise ValueError(
+            f"JP published calendar has no enabled {direction} cash session "
+            f"for {trade_date}"
+        )
 
     async def next_trading_day(
         self,
@@ -471,9 +497,12 @@ class TradingCalendarService:
         cursor = self._normalize_trade_date(trade_date) + timedelta(days=1)
 
         if mkt == "XTKS":
-            from backend.services.engine.data_platform.jp_calendar import resolve_cash_session
-
-            return resolve_cash_session(self._normalize_trade_date(trade_date), direction="next")
+            return await self._jp_adjacent_session(
+                trade_date=self._normalize_trade_date(trade_date),
+                tenant_id=tenant_id,
+                user_id=user_id,
+                direction="next",
+            )
 
         # 1. exchange_calendars 为主
         xcal_next = self._next_trading_day_xcal(mkt, self._normalize_trade_date(trade_date))
@@ -517,9 +546,12 @@ class TradingCalendarService:
         cursor = self._normalize_trade_date(trade_date) - timedelta(days=1)
 
         if mkt == "XTKS":
-            from backend.services.engine.data_platform.jp_calendar import resolve_cash_session
-
-            return resolve_cash_session(self._normalize_trade_date(trade_date), direction="previous")
+            return await self._jp_adjacent_session(
+                trade_date=self._normalize_trade_date(trade_date),
+                tenant_id=tenant_id,
+                user_id=user_id,
+                direction="previous",
+            )
 
         # 1. exchange_calendars 为主
         xcal_prev = self._prev_trading_day_xcal(mkt, self._normalize_trade_date(trade_date))

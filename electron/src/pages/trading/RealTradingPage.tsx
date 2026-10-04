@@ -523,7 +523,7 @@ const RealTradingPage: React.FC = () => {
             tenantId={tenantId}
             userId={userId}
             tradingMode={tradingMode}
-            {...(datedMarket ? { executionContext: selectedInputs?.execution_context, requiresExecutionInputs: true } : {})}
+            {...(datedMarket ? { executionContext: selectedInputs?.execution_context, accountExecutionContext: accountInfo?.execution_context, requiresExecutionInputs: true } : {})}
             onDeploy={handleDeploy}
             onStop={handleStop}
             onOpenManualTask={() => setActiveTab('manual-task')}

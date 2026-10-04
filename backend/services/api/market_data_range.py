@@ -13,7 +13,7 @@ async def registered_market_data_range(market: str | None) -> dict | None:
         return None
 
     def read():
-        hub = provider.open()
+        hub = provider.open_raw()
         calendar = hub.fetch_calendar()
         coverage = pd.to_datetime(
             hub._partition_dates(provider.daily_partition_dir), format="%Y%m%d"

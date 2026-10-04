@@ -59,6 +59,19 @@ async def execute_registered_bar(engine, order, bar, market):
     symbol = StockCodeUtil.to_suffix(order.symbol, market=context.market)
     # Validate bar identity before preparing any cash state.
     context.matching_rules(symbol, bar)
+    # All callers (including sandbox signals) share the lock and completed-day
+    # guard. Keep this transaction locked through the original apply_filled;
+    # a closing valuation must never become a historical opening-order budget.
+    root = await manager._lock_row()
+    if root is not None:
+        checkpoint = manager._states(root).get(context.market) or {}
+        if checkpoint.get("cycle_completed") is True and (
+            (checkpoint.get("metadata") or {}).get("prepared_date")
+            == str(context.trade_date)
+        ):
+            return ExecutionResult(
+                success=False, message="Dated submission day is already completed"
+            )
     await manager.prepare_dated_day(context.trade_date)
     before = await manager.get_account(
         order.user_id, tenant_id=order.tenant_id, market=context.market

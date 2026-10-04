@@ -56,7 +56,7 @@ def _local_stock_items(market: str, version: str, asof: date | None):
 
 
 def _local_stocks(market, asof=None):
-    hub = _LOCAL_STOCK_PROVIDERS[market].open()
+    hub = _LOCAL_STOCK_PROVIDERS[market].open_raw()
     return list(_local_stock_items(market, str(hub.data_dir), asof))
 
 

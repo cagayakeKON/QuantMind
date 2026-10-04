@@ -30,6 +30,14 @@ class LocalMarketProvider:
     strategy_lab_provider_factory: str | None = None
     trading_agents_router: str | None = None
     native_api_symbol_pattern: str | None = None
+    raw_hub_factory: str | None = None
+
+    def open_raw(self, data_version: str | None = None):
+        """Latest daily quotes; research open() keeps its complete publication."""
+        if data_version is None and self.raw_hub_factory:
+            module, factory = self.raw_hub_factory.rsplit(".", 1)
+            return getattr(importlib.import_module(module), factory)()
+        return self.open(data_version)
 
     def open(self, data_version: str | None = None):
         if data_version is not None:
@@ -59,6 +67,7 @@ LOCAL_MARKET_PROVIDERS = {
         style_feature_loader_factory="backend.services.simulation.jp.analysis_data.create_style_feature_loader",
         backtest_result_adapter="backend.services.simulation.jp.analysis_data.public_legacy_result_view",
         execution_data_factory="backend.services.simulation.jp.data.open_execution_data",
+        raw_hub_factory="backend.services.engine.data_platform.jp_publication.open_raw_hub",
         replay_signal_input_loader="backend.services.simulation.jp.replay_data.read_signal_input",
         replay_cash_rules_factory="backend.services.simulation.jp.replay_cash_rules.open_cash_rules",
         replay_session_input_preparer="backend.services.simulation.jp.replay_data.prepare_session_inputs",

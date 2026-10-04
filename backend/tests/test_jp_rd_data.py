@@ -5,9 +5,11 @@ import pandas as pd
 import pytest
 
 from backend.services.engine.data_platform.jquants_import import import_jquants_snapshot
+from backend.services.engine.data_platform.jp_features import build_jp_features
 from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
 from backend.services.engine.rd_agent.data_pipeline.jp_data import prepare_jp_rd_data
 from backend.tests.test_jp_data_platform import snapshot as source_fixture
+from backend.tests.test_jp_features import fake_evaluator
 
 snapshot = source_fixture
 
@@ -66,6 +68,9 @@ def test_rd_export_cache_changes_with_source_publication(snapshot, tmp_path):
     with duckdb.connect(str(snapshot)) as conn:
         conn.execute("UPDATE research.daily_prices SET Vo=2000 WHERE Code='72030'")
     import_jquants_snapshot(snapshot, root)
+    assert prepare_jp_rd_data(root) == old_output
+    assert QuantJPDataHub(root).data_dir == old_publication
+    build_jp_features(root, evaluator=fake_evaluator)
     new_output = prepare_jp_rd_data(root)
     assert new_output.parent != old_output.parent
     old_data = pd.read_hdf(old_output, key="data").xs("jp_72030", level="instrument")

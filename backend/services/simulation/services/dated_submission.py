@@ -72,24 +72,9 @@ async def prepare_dated_submission(
 
 
 async def execute_dated_submission(engine, order, bar):
-    # The original create/submitted commits precede this lock. Hold it through
-    # original apply_filled, so a concurrent day-close cannot turn its closing
-    # valuation into the next opening-order budget.
-    manager, context = engine.manager, engine.execution_context
-    root = await manager._lock_row()
-    if root is not None:
-        checkpoint = manager._states(root).get(context.market) or {}
-        if checkpoint.get("cycle_completed") is True and (
-            (checkpoint.get("metadata") or {}).get("prepared_date")
-            == str(context.trade_date)
-        ):
-            from backend.services.simulation.services.execution_engine import (
-                ExecutionResult,
-            )
-
-            return ExecutionResult(
-                success=False, message="Dated submission day is already completed"
-            )
+    # Row locking and completed-day protection belong to the common dated
+    # execute_from_bar boundary, covering ordinary and sandbox submissions.
+    context = engine.execution_context
     try:
         return await engine.execute_from_bar(order, bar, market=context.market)
     except NotImplementedError as error:

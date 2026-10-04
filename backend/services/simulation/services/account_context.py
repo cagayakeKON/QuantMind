@@ -222,7 +222,16 @@ async def read_registered_simulation_account(
             raise RegisteredAccountUnavailable("Wrong registered account read context")
         # Use this single PG checkpoint for date, publication and cash. A second
         # account read could observe a newer day after opening its publication.
-        account = context.rules.restore_checkpoint(
+        restore = (
+            getattr(
+                context.rules, "restore_execution_checkpoint",
+                context.rules.restore_checkpoint,
+            )
+            if execution_inputs is not None
+            else context.rules.restore_checkpoint
+        )
+        account = await asyncio.to_thread(
+            restore,
             checkpoint,
             saved_date if execution_inputs is not None else context.trade_date,
         )

@@ -118,7 +118,9 @@ def _restore_publication(conn, target: Path):
     """Seed our owned cache from published raw partitions, never discard history."""
     from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
 
-    hub = QuantJPDataHub(target)
+    from backend.services.engine.data_platform.jp_publication import publication_path
+
+    hub = QuantJPDataHub(publication_path(target, raw=True))
     if not hub.available:
         raise ValueError(
             "Import the historical JP snapshot, or provide --seed, before automatic sync"
@@ -329,7 +331,13 @@ def _run(
         conn.unregister("incoming_calendar")
         conn.execute("CHECKPOINT")
     report = import_jquants_snapshot(owned, target)
-    return {"downloaded_sessions": downloaded, "publication": report}
+    from backend.services.engine.data_platform.jp_publication import publication_status
+
+    return {
+        "downloaded_sessions": downloaded,
+        "publication": report,
+        "publication_status": publication_status(target),
+    }
 
 
 if __name__ == "__main__":

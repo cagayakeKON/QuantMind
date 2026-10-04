@@ -18,6 +18,10 @@ from ..sdk.position import Position
 class DatedLabBroker:
     def __init__(self, ctx, provider, cash):
         self.ctx, self.provider = ctx, provider
+        if ctx.freq != "day":
+            raise NotImplementedError(
+                "Native published cash execution supports daily SDK bars only"
+            )
         if ctx.tax_sell or ctx.transfer_fee:
             raise ValueError("Native cash fee settings must use the selected market")
         self.executor = DatedCashBacktestAccount.create(

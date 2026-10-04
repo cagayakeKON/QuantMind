@@ -479,6 +479,7 @@ services:
       - QM_JQUANTS_CACHE_DB=/data/jquants_jp/source.duckdb
       - JQUANTS_API_KEY=${JQUANTS_API_KEY:-}
       - QUANTDB_STATE_DIR=/data/quantdb/.sync_state
+      - QM_JP_TRADING_UNITS_FILE=/data/quantjp/trading_units.csv
 
       # Huntly 资讯 enrich (news_enrich_recent 任务在 worker 执行, 需要凭据)
       - HUNTLY_BASE_URL=${HUNTLY_BASE_URL:-http://quantmind-huntly}

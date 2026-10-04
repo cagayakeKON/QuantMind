@@ -37,7 +37,9 @@ def publication(tmp_path, monkeypatch):
         }
     ).to_parquet(calendar / "data.parquet")
     (version / "manifest.json").write_text("{}")
-    (root / "current.json").write_text(json.dumps({"path": "versions/fixture"}))
+    (root / "current.json").write_text(
+        json.dumps({"version": "fixture", "path": "versions/fixture"})
+    )
     monkeypatch.setenv("QM_QUANTJP_DATA_DIR", str(root))
     return root, version
 

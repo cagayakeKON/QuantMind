@@ -87,7 +87,7 @@ def test_explicit_kline_range_keeps_all_240_rows(monkeypatch):
     monkeypatch.setattr(
         api,
         "_LOCAL_KLINE_PROVIDERS",
-        {"JP": SimpleNamespace(open=lambda: hub, currency="JPY", source="native")},
+        {"JP": SimpleNamespace(open_raw=lambda: hub, currency="JPY", source="native")},
     )
     api._KLINE_CACHE.clear()
     full = api._local_provider_kline(

@@ -63,7 +63,7 @@ async def test_no_published_bars_returns_unavailable_without_fallback(
     monkeypatch.setitem(
         coverage.LOCAL_MARKET_PROVIDERS,
         "JP",
-        SimpleNamespace(open=lambda: hub, daily_partition_dir="daily"),
+        SimpleNamespace(open_raw=lambda: hub, daily_partition_dir="daily"),
     )
     result = await coverage.registered_market_data_range("JP")
     assert result == {

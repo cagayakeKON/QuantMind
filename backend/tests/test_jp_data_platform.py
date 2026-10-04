@@ -147,7 +147,7 @@ def test_jp_market_selection():
     rules = rules_for("JP")
     assert rules.currency == "JPY" and rules.has_price_limit
     assert not rules.t_plus_1
-    assert get_hub_for_market("NO_SUCH_MARKET") is None
+    assert get_hub_for_market("NO_SUCH_MARKET") is get_hub_for_market("CN")
 
 
 def test_import_preserves_source_and_separates_adjustments(snapshot, tmp_path):
@@ -278,7 +278,11 @@ def test_partition_inventory_tracks_atomic_publication(snapshot, tmp_path):
     hub = QuantJPDataHub(root)
     assert len(hub._partition_dates("1_kline_data/daily_unadjusted")) == 3
     import_jquants_snapshot(snapshot, root, end=date(2026, 9, 29))
-    assert hub._partition_dates("1_kline_data/daily_unadjusted") == [
+    assert len(hub._partition_dates("1_kline_data/daily_unadjusted")) == 3
+    from backend.services.engine.data_platform.jp_publication import publication_path
+
+    raw = QuantJPDataHub(publication_path(root, raw=True))
+    assert raw._partition_dates("1_kline_data/daily_unadjusted") == [
         "20260928",
         "20260929",
     ]

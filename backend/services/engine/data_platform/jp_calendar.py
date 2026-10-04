@@ -21,7 +21,15 @@ def _calendar(version: Path) -> tuple[frozenset[date], tuple[date, ...]]:
 
 
 def cash_sessions(day: date, hub: QuantJPDataHub | None = None) -> tuple[date, ...]:
-    covered, sessions = _calendar((hub or QuantJPDataHub()).data_dir)
+    if hub is None:
+        # Scheduling follows the newest complete raw calendar even while the
+        # independent research feature publication remains on an older version.
+        from backend.services.engine.data_platform.market_provider import (
+            LOCAL_MARKET_PROVIDERS,
+        )
+
+        hub = LOCAL_MARKET_PROVIDERS["JP"].open_raw()
+    covered, sessions = _calendar(hub.data_dir)
     if day not in covered:
         raise ValueError(f"JP published calendar does not cover {day}")
     return sessions

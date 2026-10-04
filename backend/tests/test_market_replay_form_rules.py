@@ -7,6 +7,7 @@ import pytest
 
 from backend.services.simulation.models.replay import ReplaySession
 from backend.services.simulation.replay.router import list_strategy_templates
+from backend.services.engine.data_platform.jquants_import import import_jquants_snapshot
 from backend.tests.test_market_replay_api import (
     api as api_fixture,
     pg as pg_fixture,
@@ -28,7 +29,7 @@ snapshot = snapshot_fixture
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unit", [100, 200])
 async def test_form_units_use_pinned_reader_date_without_financial_writes(
-    api, monkeypatch, tmp_path, unit
+    api, monkeypatch, tmp_path, unit, snapshot, published
 ):
     path = tmp_path / "controlled-units.csv"
     path.write_text(
@@ -36,8 +37,12 @@ async def test_form_units_use_pinned_reader_date_without_financial_writes(
         f"JP72030,2026-09-28,2026-09-29,{unit},controlled fixture\n"
     )
     monkeypatch.setenv("QM_JP_TRADING_UNITS_FILE", str(path))
+    # Units are publication inputs. The existing fixture's earlier publications
+    # intentionally remain without this newly supplied source file.
+    publication = import_jquants_snapshot(snapshot, published)
     created = await create(api, auto=False)
     assert created.status_code == 201, created.text
+    assert created.json()["strategy_params"]["data_version"] == publication["version"]
     sid = created.json()["session_id"]
     base = f"/api/v1/replay/sessions/{sid}"
     assert (await api.client.get(base + "/execution-rules")).status_code == 400
@@ -53,6 +58,12 @@ async def test_form_units_use_pinned_reader_date_without_financial_writes(
         "data_version": created.json()["strategy_params"]["data_version"],
         "trading_units": {"JP72030": unit},
     }
+    path.write_text(
+        "symbol,valid_from,valid_to,lot_size,source\n"
+        f"JP72030,2026-09-28,2026-09-29,{unit + 100},changed external file\n"
+    )
+    again = await api.client.get(base + "/execution-rules")
+    assert again.status_code == 200 and again.json() == rules.json()
     assert await quantities(api, sid) == [0, 0, 0]
     assert api.pg.setup.redis.client.values == {}
     api.auth.user_id = "8"

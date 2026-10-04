@@ -61,6 +61,7 @@ class JapanReplayCashRules:
                 METADATA_KEY: {
                     "market": self.market,
                     "data_version": self.data_version,
+                    "trading_units_sha256": getattr(self.reader, "units_sha256", None),
                     "prepared_date": None,
                     "first_buy_dates": {},
                     "state": state,
@@ -97,23 +98,53 @@ class JapanReplayCashRules:
             "metadata": deepcopy(self._metadata(account)),
         }
 
-    def restore_checkpoint(self, checkpoint, trade_date):
+    def restore_execution_checkpoint(self, checkpoint, trade_date):
+        """Ordinary simulation can advance only with consumed-input proof.
+
+        Replay/backtest restore_checkpoint remains pinned to its exact version.
+        """
+        return self.restore_checkpoint(
+            checkpoint, trade_date, allow_publication_advance=True
+        )
+
+    def restore_checkpoint(
+        self, checkpoint, trade_date, *, allow_publication_advance=False
+    ):
         if (
             not isinstance(checkpoint, dict)
             or type(checkpoint.get("schema_version")) is not int
             or checkpoint.get("schema_version") != 1
             or checkpoint.get("market") != self.market
-            or checkpoint.get("data_version") != self.data_version
+            or not isinstance(checkpoint.get("data_version"), str)
+            or not checkpoint.get("data_version")
+            or (
+                not allow_publication_advance
+                and checkpoint.get("data_version") != self.data_version
+            )
         ):
             raise ValueError(
                 "Replay checkpoint does not match market/publication/schema"
             )
         metadata = checkpoint.get("metadata")
-        if not isinstance(metadata, dict) or metadata.get("prepared_date") != str(
-            trade_date
+        if (
+            not isinstance(metadata, dict)
+            or metadata.get("prepared_date") != str(trade_date)
+            or metadata.get("data_version") != checkpoint.get("data_version")
         ):
             raise ValueError("Replay checkpoint does not match snapshot date")
-        return self.project({METADATA_KEY: deepcopy(metadata)})
+        metadata = deepcopy(metadata)
+        if metadata.get("trading_units_sha256") != getattr(
+            self.reader, "units_sha256", None
+        ):
+            raise RuleDataMissing("JP checkpoint trading units differ from publication")
+        if checkpoint.get("data_version") != self.data_version:
+            prove = getattr(self.reader, "prove_history_extension", None)
+            if prove is None:
+                raise ValueError("Replay checkpoint does not match publication")
+            proof = prove(checkpoint.get("data_version"), trade_date)
+            metadata.setdefault("publication_advances", []).append(proof)
+            metadata["data_version"] = self.data_version
+        return self.project({METADATA_KEY: metadata})
 
     def _metadata(self, account):
         if account is None:

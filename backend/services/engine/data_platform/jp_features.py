@@ -24,6 +24,7 @@ from backend.shared.stock_utils import StockCodeUtil
 from .jp_file_lock import exclusive_file_lock
 from .jquants_import import _copy_partitions
 from .quantjp_hub import QuantJPDataHub
+from .jp_publication import publication_path, publish_pointer
 
 
 def build_jp_features_in_process(root: str | Path, *, timeout: int = 3600) -> dict:
@@ -137,7 +138,7 @@ def build_jp_features(
     if batch_size < 1 or workers < 1:
         raise ValueError("Feature batch size and worker count must be positive")
     with exclusive_file_lock(root / ".publish.lock"):
-        source = QuantJPDataHub(root).data_dir.resolve()
+        source = publication_path(root, raw=True)
         if (
             not source.is_relative_to(root / "versions")
             or not (source / "manifest.json").is_file()
@@ -147,6 +148,11 @@ def build_jp_features(
         dates = hub._partition_dates("1_kline_data/daily_unadjusted", start, end)
         if not dates:
             raise ValueError("No JP sessions in the requested feature window")
+        if dates != hub._partition_dates("1_kline_data/daily_unadjusted"):
+            raise ValueError(
+                "A complete JP research publication requires every raw session; "
+                "partial feature windows cannot replace current.json"
+            )
         first, last = (
             date.fromisoformat(f"{v[:4]}-{v[4:6]}-{v[6:]}")
             for v in (dates[0], dates[-1])
@@ -246,10 +252,5 @@ def build_jp_features(
             json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         stage.rename(root / "versions" / version)
-        pointer = root / (".current-" + uuid.uuid4().hex + ".json")
-        pointer.write_text(
-            json.dumps({"version": version, "path": "versions/" + version}),
-            encoding="utf-8",
-        )
-        pointer.replace(root / "current.json")
+        publish_pointer(root, version)
         return manifest["datasets"]["l1_factors"] | {"version": version}

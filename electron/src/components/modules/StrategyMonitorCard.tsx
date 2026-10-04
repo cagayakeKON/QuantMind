@@ -4,6 +4,9 @@ import { motion } from 'framer-motion';
 import { useStrategies } from '../../hooks/useStrategies';
 import { StrategyMonitorSkeleton } from '../common/CardSkeletons';
 import { formatBackendTime } from '../../utils/format';
+import { useAppSelector } from '../../store';
+import { selectCurrentMarket, selectTradingMode } from '../../store/slices/uiSlice';
+import { getMarketConfig } from '../../config/marketConfig';
 
 interface StrategyMonitorCardProps {
   expanded?: boolean;
@@ -31,6 +34,9 @@ export const StrategyMonitorCard: React.FC<StrategyMonitorCardProps> = ({
   onCloseExpand,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
+  const market = useAppSelector(selectCurrentMarket);
+  const tradingMode = useAppSelector(selectTradingMode);
+  const datedDaily = tradingMode === 'simulation' && getMarketConfig(market).simulationExecution === 'dated_daily';
 
   const {
     strategies,
@@ -129,6 +135,7 @@ export const StrategyMonitorCard: React.FC<StrategyMonitorCardProps> = ({
           <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">
             {realtimeStatus === 'connected' ? 'REAL-TIME UPDATES ENABLED' : 'POLLING MODE ACTIVE'}
           </p>
+          {datedDaily && <p className="mt-1 text-xs text-indigo-600">已发布日线延迟模拟</p>}
         </div>
         
         <div className="absolute top-[-4px] right-[-4px] flex gap-1">

@@ -49,7 +49,7 @@ def _local_provider_kline(market, symbol, start, end, days, adjust):
     from backend.shared.stock_utils import StockCodeUtil
 
     provider = _LOCAL_KLINE_PROVIDERS[market]
-    hub = provider.open()
+    hub = provider.open_raw()
     suffix = StockCodeUtil.to_suffix(symbol, market=market)
     key = _kline_cache_key(market, suffix, str(start), str(end), adjust)
     key += f"|{hub.data_dir}|{days}"
@@ -475,7 +475,7 @@ async def get_index_kline(
         from datetime import date, timedelta
         from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
 
-        hub = provider.open() if provider else QuantDBDataHub()
+        hub = provider.open_raw() if provider else QuantDBDataHub()
         end = date.today()
         start = end - timedelta(days=int(days * 1.6))
         df = hub.fetch_index_kline(symbol, start, end)
@@ -531,7 +531,7 @@ async def get_index_ma(
     try:
         from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
 
-        hub = provider.open() if provider else QuantDBDataHub()
+        hub = provider.open_raw() if provider else QuantDBDataHub()
         end = date.fromisoformat(asof) if asof else date.today()
         start = end - timedelta(days=160)
         df = hub.fetch_index_kline(symbol, start, end)
@@ -680,7 +680,8 @@ def _hub_latest_quote(market: str, symbol: str, asof: str | None = None) -> dict
     try:
         mod = importlib.import_module(entry[0])
         cls = getattr(mod, entry[1])
-        hub = cls.get_instance()
+        provider = LOCAL_MARKET_PROVIDERS.get(market)
+        hub = provider.open_raw() if provider else cls.get_instance()
         method = getattr(hub, entry[2])
         if asof:
             try:

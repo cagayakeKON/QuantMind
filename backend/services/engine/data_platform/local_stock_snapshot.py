@@ -16,7 +16,7 @@ def local_stock_snapshot(
     provider = LOCAL_MARKET_PROVIDERS[market]
     if data_version is not None and asof is None:
         raise ValueError("A pinned stock snapshot requires an explicit asof date")
-    hub = provider.open(data_version) if data_version is not None else provider.open()
+    hub = provider.open(data_version) if data_version is not None else provider.open_raw()
     prefix = StockCodeUtil.to_prefix(symbol, market=market)
     suffix = StockCodeUtil.to_suffix(prefix, market=market)
     end = asof or date.today()

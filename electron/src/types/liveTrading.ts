@@ -14,6 +14,13 @@ export interface DatedExecutionContext {
   slippage_bps: string | number;
   model_data_version?: string;
   prediction_sha256?: string;
+  /** Read-only provenance of the last committed dated account cycle. */
+  last_cycle_inputs?: {
+    market?: string;
+    trade_date: string;
+    scheduled_trade_date?: string;
+    execution_date_mode?: 'published_daily_delayed';
+  };
 }
 
 export interface SimulationExecutionInputs {

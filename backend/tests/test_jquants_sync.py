@@ -147,7 +147,11 @@ def test_sync_restores_published_history_into_new_cache(snapshot, tmp_path):
         client=fake,
     )
     assert result["publication"]["rows"] == 8
-    restored = QuantJPDataHub(target).fetch_daily_kline("JP72030", adjust="none")
+    from backend.services.engine.data_platform.jp_publication import publication_path
+
+    restored = QuantJPDataHub(publication_path(target, raw=True)).fetch_daily_kline(
+        "JP72030", adjust="none"
+    )
     assert len(restored) == 4
 
 

@@ -250,6 +250,17 @@ def test_saved_sync_updates_features_before_cache_and_reports_failure(
     monkeypatch.setattr(quantjp_daily_sync, "run", download)
     monkeypatch.setattr(jp_features, "build_jp_features_in_process", features)
     monkeypatch.setattr(qlib_data_builder, "ensure_qlib_cache", cache)
+    from backend.services.engine.data_platform import jp_publication
+
+    monkeypatch.setattr(
+        jp_publication,
+        "publication_status",
+        lambda root: {
+            "raw_version": "raw-test",
+            "research_version": "features-test",
+            "research_update_pending": feature_failure,
+        },
+    )
     report = run_market_sync("JP", {"with_qlib": True})
     assert report["qlib"]["status"] == ("error" if feature_failure else "ok")
     assert calls == (

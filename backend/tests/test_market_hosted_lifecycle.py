@@ -18,6 +18,7 @@ from backend.services.live_trading.routers import real_trading_lifecycle as rout
 from backend.services.live_trading.routers import real_trading_utils as utils
 from backend.services.live_trading.services import signal_readiness_service as signals
 from backend.services.simulation.models.account import SimulationAccount
+from backend.services.simulation.services import hosted_cycle_context as hosted_inputs
 from backend.services.trade.services import trading_precheck_service as precheck
 from backend.services.trade_shared.deps import AuthContext
 from backend.services.trade_shared.utils import redis_cache as cache_module
@@ -33,7 +34,7 @@ from backend.tests.test_market_hosted_cycle import (
     snapshot as snapshot_fixture,
 )
 from backend.tests.test_market_manual_execution import count_fills, initialize, request
-from backend.tests.test_market_simulation_checkpoint import ROOT
+from backend.tests.test_market_simulation_checkpoint import ROOT, financial_rows
 
 boundary = boundary_fixture
 cash_setup = cash_setup_fixture
@@ -391,6 +392,15 @@ async def test_public_http_actual_readiness_bootstrap_ledger_and_status(
                 )
             )
             await db.commit()
+    async with pipe.pg.sessions() as db:
+        root = await db.get(SimulationAccount, ROOT)
+        original_root = {
+            column.name: deepcopy(getattr(root, column.name))
+            for column in SimulationAccount.__table__.columns
+            if column.name not in {"market_state", "updated_at"}
+        }
+        initial_market_state = deepcopy(root.market_state)
+    initial_financial_rows = await financial_rows(pipe.pg)
     controller.redis.values["qm:signal:latest:test:00000007"] = "native-run"
     cn = deepcopy(pipe.pg.setup.redis.client.values["simulation:account:test:7"])
     monkeypatch.setattr(
@@ -445,6 +455,8 @@ async def test_public_http_actual_readiness_bootstrap_ledger_and_status(
             assert await count_fills(pipe) == 0
             if case == "observe":
                 assert payload["trading_permission"] == "observe_only"
+                assert payload["bootstrap"]["status"] == "succeeded"
+                assert payload["bootstrap"]["filled_count"] == 0
             else:
                 assert payload["bootstrap"]["status"] == "failed"
         status = await client.get("/status")
@@ -466,10 +478,55 @@ async def test_public_http_actual_readiness_bootstrap_ledger_and_status(
             == payload["execution_context"]
         )
     assert pipe.pg.setup.redis.client.values["simulation:account:test:7"] == cn
+    if case == "observe":
+        expected_cycle = await hosted_inputs.prepare_hosted_cycle_context(
+            payload["execution_context"],
+            tenant_id="test",
+            user_id="00000007",
+            strategy_id="2",
+            config=controller.manager.submit_strategy.call_args.kwargs[
+                "live_trade_config"
+            ],
+        )
+        assert expected_cycle.signals() == []
+    if case != "filled":
+        assert await financial_rows(pipe.pg) == initial_financial_rows
     async with pipe.pg.sessions() as db:
         root = await db.get(SimulationAccount, ROOT)
         assert root.base_currency == "CNY"
-        if case != "filled":
-            assert not root.market_state or not root.market_state["JP"].get(
-                "cycle_inputs"
+        assert {name: getattr(root, name) for name in original_root} == original_root
+        if case == "observe":
+            checkpoint = root.market_state["JP"]
+            assert checkpoint["cycle_completed"] is True
+            assert checkpoint["cycle_inputs"] == expected_cycle.provenance()
+            assert checkpoint["metadata"]["prepared_date"] == str(
+                expected_cycle.trade_date
             )
+            state = checkpoint["metadata"]["state"]
+            initial_state = initial_market_state["JP"]["metadata"]["state"]
+            # No-signal sessions still close the dated cash journal, but cannot
+            # create orders, fills, positions or change the existing cash funds.
+            assert {
+                key: value
+                for key, value in state.items()
+                if key not in {"daily", "cursor"}
+            } == {
+                key: value
+                for key, value in initial_state.items()
+                if key not in {"daily", "cursor"}
+            }
+            assert state["cursor"] == str(expected_cycle.trade_date)
+            assert state["daily"] == [
+                {
+                    "trade_date": str(expected_cycle.trade_date),
+                    "cash": initial_state["initial_cash"],
+                    "settled_cash": initial_state["settled_cash"],
+                    "market_value": "0",
+                    "equity": initial_state["initial_cash"],
+                    "stale_symbols": [],
+                    "currency": "JPY",
+                }
+            ]
+        elif case == "missing-cash":
+            assert root.market_state == initial_market_state
+            assert not root.market_state or "JP" not in root.market_state

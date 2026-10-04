@@ -1,7 +1,8 @@
 """Registered dated inputs for the original ordinary hosted cycle."""
 
 from dataclasses import dataclass, field, replace
-from datetime import date
+from datetime import date, timedelta
+import asyncio
 import hashlib
 import json
 import logging
@@ -87,10 +88,52 @@ async def prepare_hosted_cycle_context(
     )
     if scheduled_trade_date is not None:
         scheduled = date.fromisoformat(str(scheduled_trade_date))
+        from backend.services.simulation.services.market_execution_data import (
+            open_market_execution_data,
+        )
+
+        # Daily publications cannot supply a live opening quote. Hosted processing
+        # uses the latest completed published session before the planned date.
+        reader = await asyncio.to_thread(open_market_execution_data, inputs.market)
+        execution_day = reader.latest_trade_date(scheduled - timedelta(days=1))
+        if execution_day is None:
+            raise ValueError("published_daily_waiting: no completed published session")
+        from backend.services.simulation.models.account import SimulationAccount
+        from backend.services.simulation.services.ledger_service import (
+            SimulationLedgerService,
+        )
+
+        # Waiting for a new daily publication is not a new execution of an
+        # already closed session. Never resubmit yesterday's opening fills.
+        async with get_session(read_only=False) as db:
+            await db.execute(text("SET TRANSACTION READ ONLY"))
+            owner = require_sim_user_id(user_id, tenant_id)
+            root = await db.get(
+                SimulationAccount,
+                SimulationLedgerService.build_account_id(tenant_id, str(owner)),
+            )
+            checkpoint = (
+                (root.market_state or {}).get(inputs.market, {}) if root else {}
+            )
+            saved_day = (checkpoint.get("metadata") or {}).get("prepared_date")
+            if saved_day and (
+                saved_day > str(execution_day)
+                or (
+                    saved_day == str(execution_day)
+                    and checkpoint.get("cycle_completed") is True
+                )
+            ):
+                raise ValueError(
+                    "published_daily_waiting: completed history already processed; "
+                    "waiting for a new published session"
+                )
         # Startup artifact hashes belong to that one inference session. Resolve and
         # validate fresh model inputs for a new cycle while pinning execution data/fees.
-        changes = {"trade_date": scheduled}
-        if scheduled != inputs.trade_date:
+        changes = {"trade_date": execution_day, "data_version": reader.data_version}
+        if (
+            execution_day != inputs.trade_date
+            or reader.data_version != inputs.data_version
+        ):
             changes.update(prediction_sha256=None, model_data_version=None)
         inputs = inputs.model_copy(update=changes)
     status = await manual_execution_service.get_default_model_hosted_status(
@@ -137,6 +180,15 @@ async def prepare_hosted_cycle_context(
         strategy_id=strategy_id,
         mode="SIMULATION",
     )
+    if scheduled_trade_date is not None:
+        context = replace(
+            context,
+            params={
+                **context.params,
+                "scheduled_trade_date": str(scheduled_trade_date),
+                "execution_date_mode": "published_daily_delayed",
+            },
+        )
     adapter = registered_account_input_adapter(context.market.value)
     if adapter is None:
         raise ValueError("Hosted dated account inputs are unavailable")

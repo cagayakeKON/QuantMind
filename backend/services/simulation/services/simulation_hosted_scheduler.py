@@ -258,7 +258,10 @@ async def run_simulation_cycle_for_active(
         max_orders=int(cfg.get("max_orders_per_cycle") or 0) or None,
         **({"cycle_context": cycle_context} if cycle_context is not None else {}),
     )
-    return report_to_hosted_result(report)
+    result = report_to_hosted_result(report)
+    if cycle_context is not None:
+        result["execution_context"] = cycle_context.provenance()
+    return result
 
 
 def _parse_started_at(value: Any, *, context=None) -> date | None:

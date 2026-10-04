@@ -289,7 +289,7 @@ async def test_new_inputs_fail_closed_without_legacy_fallback(
     if failure != "missing_cash":
         await initialize(pipe.pg, cash=30000)
     if failure == "wrong_day":
-        kwargs["scheduled_trade_date"] = pipe.context.trade_date + timedelta(days=1)
+        kwargs["scheduled_trade_date"] = pipe.context.trade_date + timedelta(days=2)
     elif failure == "wrong_market":
         kwargs["live_trade_config"]["market"] = "CN"
     elif failure == "wrong_mode":
@@ -364,7 +364,7 @@ async def test_original_scheduler_persists_job_and_preserves_wall_clock_and_lock
 ):
     pipe = ordinary
     await initialize(pipe.pg, cash=30000)
-    day = pipe.context.trade_date
+    day = pipe.context.trade_date + timedelta(days=1)
     saved_inputs = request(pipe)["execution_context"]
     if expired:
         saved_inputs["trade_date"] = (day - timedelta(days=1)).isoformat()
@@ -479,7 +479,7 @@ async def test_hosted_next_session_resolves_fresh_artifact_and_preserves_cny(
             pipe,
             run_id="ordinary-hosted-2",
             execution_context=startup,
-            scheduled_trade_date=day,
+            scheduled_trade_date=day + timedelta(days=1),
         )
     )
     assert result["status"] == "succeeded", result
@@ -489,7 +489,46 @@ async def test_hosted_next_session_resolves_fresh_artifact_and_preserves_cny(
         checkpoint = root.market_state["JP"]
         assert root.cash == 250000 and root.base_currency == "CNY"
         assert checkpoint["cycle_inputs"]["trade_date"] == str(day)
+        assert checkpoint["cycle_inputs"]["scheduled_trade_date"] == str(
+            day + timedelta(days=1)
+        )
+        assert (
+            checkpoint["cycle_inputs"]["execution_date_mode"]
+            == "published_daily_delayed"
+        )
         assert checkpoint["cycle_inputs"]["prediction_sha256"] == "b" * 64
         assert [
             row["trade_date"] for row in checkpoint["metadata"]["state"]["daily"]
         ] == ["2026-09-28", "2026-09-29"]
+
+
+@pg_test
+@pytest.mark.asyncio
+async def test_hosted_waits_for_new_published_day_without_reusing_closed_opening(
+    ordinary, monkeypatch
+):
+    from backend.services.simulation.jp.data import JPExecutionData
+
+    pipe = ordinary
+    await initialize(pipe.pg, cash=30000)
+    assert (await scheduler.run_simulation_cycle_for_active(**cycle_kwargs(pipe)))[
+        "status"
+    ] == "succeeded"
+    cash = deepcopy(pipe.pg.setup.redis.client.values)
+    monkeypatch.setattr(
+        JPExecutionData,
+        "latest_trade_date",
+        lambda self, on_or_before=None: pipe.context.trade_date,
+    )
+    result = await scheduler.run_simulation_cycle_for_active(
+        **cycle_kwargs(
+            pipe,
+            run_id="waiting-publication",
+            scheduled_trade_date=pipe.context.trade_date + timedelta(days=2),
+        )
+    )
+    assert (
+        result["status"] == "skipped" and "published_daily_waiting" in result["error"]
+    )
+    assert await count_fills(pipe) == 1
+    assert pipe.pg.setup.redis.client.values == cash

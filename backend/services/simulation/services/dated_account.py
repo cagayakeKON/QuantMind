@@ -6,6 +6,7 @@ is published after commit; cache loss never reconstructs funding from balances.
 """
 
 from copy import deepcopy
+import asyncio
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from functools import wraps
@@ -159,7 +160,7 @@ class DatedSimulationAccountManager(SimulationAccountManager):
             raise ValueError("Finish the current dated operation first")
         row = await self._lock_row()
         if row and self.execution_market in self._states(row):
-            account = self._restore(row)
+            account = await asyncio.to_thread(self._restore, row)
             return self.rules.validate_initial_cash(account, initial_cash)
         # Existing market fills need migration, not inferred funding history.
         symbols = select(SimTrade.symbol).where(
@@ -199,7 +200,10 @@ class DatedSimulationAccountManager(SimulationAccountManager):
         saved_day = (checkpoint.get("metadata") or {}).get("prepared_date")
         if not isinstance(saved_day, str):
             raise ValueError("Registered cash checkpoint has no prepared date")
-        return self.rules.restore_checkpoint(checkpoint, date.fromisoformat(saved_day))
+        restore = getattr(
+            self.rules, "restore_execution_checkpoint", self.rules.restore_checkpoint
+        )
+        return restore(checkpoint, date.fromisoformat(saved_day))
 
     async def get_account(self, user_id, tenant_id="default", market="CN"):
         if market != self.execution_market:
@@ -218,7 +222,7 @@ class DatedSimulationAccountManager(SimulationAccountManager):
         ).scalar_one_or_none()
         if row and (row.tenant_id != self.tenant_id or row.user_id != self.user_id):
             raise ValueError("Dated account root does not match its original owner")
-        return self._restore(row) if row else None
+        return await asyncio.to_thread(self._restore, row) if row else None
 
     async def prepare_dated_day(self, trade_date):
         if self._pending_order is not None:
@@ -226,7 +230,7 @@ class DatedSimulationAccountManager(SimulationAccountManager):
         self._row = await self._lock_row()
         if self._row is None:
             raise ValueError("Registered cash account is not initialized")
-        previous = self._restore(self._row)
+        previous = await asyncio.to_thread(self._restore, self._row)
         from .dated_account_day import pending_sessions, close_account_day
 
         days = pending_sessions(self.rules, previous, trade_date)
@@ -284,9 +288,14 @@ class DatedSimulationAccountManager(SimulationAccountManager):
     def completed_cycle_account(self, trade_date):
         checkpoint = self._states(self._row).get(self.execution_market, {})
         if checkpoint.get("cycle_completed") is True and (
-            checkpoint.get("cycle_inputs") or {}
-        ).get("trade_date") == str(trade_date):
-            if checkpoint.get("cycle_inputs") != self.cycle_inputs:
+            checkpoint.get("metadata") or {}
+        ).get("prepared_date") == str(trade_date):
+            inputs = checkpoint.get("cycle_inputs")
+            if not isinstance(inputs, dict) or inputs.get("trade_date") != str(
+                trade_date
+            ):
+                raise ValueError("Completed dated cycle has no matching model inputs")
+            if inputs != self.cycle_inputs:
                 raise ValueError("Cycle day was completed with different model inputs")
             return deepcopy(self._account)
         return None

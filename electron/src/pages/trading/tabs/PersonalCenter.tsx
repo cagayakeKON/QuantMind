@@ -8,6 +8,8 @@ import { strategyManagementService } from '../../../services/strategyManagementS
 import { userCenterService } from '../../../features/user-center/services/userCenterService';
 import { authService } from '../../../features/auth/services/authService';
 import { resolveTradingAccountMode } from '../utils/accountAdapter';
+import { getMarketConfig } from '../../../config/marketConfig';
+import SimulationExecutionInputForm from '../components/SimulationExecutionInputForm';
 
 interface PersonalCenterProps {
     tenantId: string;
@@ -18,6 +20,10 @@ interface PersonalCenterProps {
 
 const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, status, tradingMode }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
+    const marketConfig = getMarketConfig(currentMarket);
+    const datedMarket = marketConfig.simulationExecution === 'dated_daily' ? currentMarket : undefined;
+    const selectedMarketRef = useRef(currentMarket);
+    selectedMarketRef.current = currentMarket;
     const isRunning = status?.status === 'running';
     const activeStrategy = status?.strategy;
     
@@ -85,33 +91,44 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
 
     const loadAccountSettings = React.useCallback(async (mounted: boolean = true) => {
         setLoadingSettings(true);
+        const requestMarket = currentMarket;
+        const isCurrentScope = () => (requestMarket !== 'JP' && selectedMarketRef.current !== 'JP')
+            || requestMarket === selectedMarketRef.current;
         try {
-            const runtimeMode = resolveTradingAccountMode(status?.mode, tradingMode);
+            const runtimeMode = datedMarket && tradingMode === 'simulation'
+                ? 'simulation' : resolveTradingAccountMode(status?.mode, tradingMode);
             const { realTradingService } = await import('../../../services/realTradingService');
             const accountResp = await realTradingService.getRuntimeAccount(userId, tenantId, runtimeMode, currentMarket).catch(() => null);
 
-            if (!mounted) return;
+            if (!mounted || !isCurrentScope()) return;
 
             if (tradingMode === 'simulation') {
-                const { realTradingService } = await import('../../../services/realTradingService');
-                const settings = await realTradingService.getSimulationSettings();
-                if (settings) {
-                    const value = Number(settings.initial_cash || 1_000_000);
-                    if (value > 0) {
-                        setConfiguredInitialCash(value);
+                if (datedMarket) {
+                    const value = Number(accountResp?.initial_equity ?? accountResp?.baseline?.initial_equity ?? 0);
+                    setConfiguredInitialCash(Number.isFinite(value) && value > 0 ? value : 0);
+                } else {
+                    const { realTradingService } = await import('../../../services/realTradingService');
+                    const settings = await realTradingService.getSimulationSettings();
+                    if (!isCurrentScope()) return;
+                    if (settings) {
+                        const value = Number(settings.initial_cash || 1_000_000);
+                        if (value > 0) {
+                            setConfiguredInitialCash(value);
+                        }
                     }
                 }
             } else {
                 // Real Mode: Restore settings
                 const { realTradingService } = await import('../../../services/realTradingService');
                 const settings = await realTradingService.getRealAccountSettings();
+                if (!isCurrentScope()) return;
                 if (settings) {
                     const value = Number(settings.initial_equity || 0);
                     setConfiguredInitialCash(value);
                 }
             }
 
-            if (accountResp) {
+            if (accountResp || datedMarket) {
                 setSelectedAccount(accountResp);
             }
 
@@ -121,9 +138,9 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
         } catch (err) {
             console.error('Failed to load account settings', err);
         } finally {
-            if (mounted) setLoadingSettings(false);
+            if (mounted && isCurrentScope()) setLoadingSettings(false);
         }
-    }, [status?.mode, tenantId, tradingMode, userId]);
+    }, [datedMarket, status?.mode, tenantId, tradingMode, userId]);
 
     useEffect(() => {
         let mounted = true;
@@ -133,7 +150,14 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
         };
     }, [loadAccountSettings, tenantId, tradingMode, userId]);
 
-    const modeAccount = selectedAccount;
+    const modeAccount = datedMarket && selectedAccount?.execution_context?.market !== datedMarket ? null : selectedAccount;
+    const amountLabel = (value: number) => datedMarket && tradingMode === 'simulation'
+        ? `${value.toLocaleString()} ${marketConfig.currency}` : `¥${value.toLocaleString()}`;
+    const ignoreExecutionInputs = React.useCallback(() => undefined, []);
+    const handleDatedAccountReset = React.useCallback(() => {
+        void loadAccountSettings();
+        window.dispatchEvent(new CustomEvent('refresh-account-data'));
+    }, [loadAccountSettings]);
 
     // handleSaveInitialCash removed as initial cash modification is deprecated.
 
@@ -366,7 +390,7 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
                                 {tradingMode === 'simulation' ? '当前模拟盘总资产' : '当前模拟总资产'}
                             </div>
                             <div className="text-base font-bold text-gray-800">
-                                ¥{(modeAccount?.total_asset || 0).toLocaleString()}
+                                {amountLabel(modeAccount?.total_asset || 0)}
                             </div>
                         </div>
                         <div>
@@ -374,7 +398,7 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
                                 {tradingMode === 'simulation' ? '当前现金（模拟账户）' : '当前现金（模拟账户）'}
                             </div>
                             <div className="text-base font-bold text-gray-800">
-                                {independentCash === null ? '账户未上报' : `¥${independentCash.toLocaleString()}`}
+                                {independentCash === null || (datedMarket && !modeAccount) ? '账户未上报' : amountLabel(independentCash)}
                             </div>
                         </div>
                     </div>
@@ -386,11 +410,18 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
                                         模拟盘运行状态
                                     </div>
                                     <div className="text-xs text-gray-500 leading-relaxed">
-                                        当前统计基准固定为 <span className="font-bold text-gray-700">¥{configuredInitialCash.toLocaleString()}</span>。
+                                        当前统计基准固定为 <span className="font-bold text-gray-700">{amountLabel(datedMarket && !modeAccount ? 0 : configuredInitialCash)}</span>。
                                         如需重新开始，请点击下方重置按钮。重置将清空所有持仓并恢复初始现金。
                                     </div>
                                 </div>
-                                <div className="grid grid-cols-2 gap-2 mt-2">
+                                {datedMarket ? (
+                                    <SimulationExecutionInputForm
+                                        key={datedMarket} market={datedMarket} userId={userId} tenantId={tenantId}
+                                        savedContext={modeAccount?.execution_context}
+                                        runtimeActive={isRunning || status?.status === 'starting'}
+                                        onChange={ignoreExecutionInputs} onAccountReset={handleDatedAccountReset}
+                                    />
+                                ) : <div className="grid grid-cols-2 gap-2 mt-2">
                                     <button
                                         onClick={handleResetSimulation}
                                         disabled={resettingSimulation || loadingSettings}
@@ -407,7 +438,7 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
                                         <Camera size={14} />
                                         持仓图片同步
                                     </button>
-                                </div>
+                                </div>}
                             </>
                         ) : (
                             <div className="p-2 rounded-xl border border-gray-200">
@@ -457,7 +488,7 @@ const PersonalCenter: React.FC<PersonalCenterProps> = ({ tenantId, userId, statu
                         )}
 
                     <div className="text-xs text-gray-500">
-                        当前统计基准：¥{configuredInitialCash.toLocaleString()}
+                        当前统计基准：{amountLabel(datedMarket && !modeAccount ? 0 : configuredInitialCash)}
                     </div>
                     {snapshotNotice && (
                         <div className="mt-1 text-xs font-medium text-emerald-600">

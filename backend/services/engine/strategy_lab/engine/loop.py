@@ -64,6 +64,7 @@ def run_backtest(
     setup_fn = user_globals.get("setup")
     if not callable(setup_fn):
         raise RuntimeError("setup(ctx) is required")
+    ctx._bind_universe_names(getattr(provider, "named_universes", ()))
     setup_fn(ctx)
     ctx.assert_ready()
 
@@ -145,11 +146,15 @@ def run_backtest(
         if on_bar is not None:
             for sym in symbols:
                 try:
-                    df = provider.history(
-                        symbol=sym, n=1,
-                        fields=["open", "high", "low", "close", "volume"],
-                        today=today,
-                    )
+                    event_bar = getattr(provider, "current_bar", None)
+                    if callable(event_bar):
+                        df = event_bar(sym, today)
+                    else:
+                        df = provider.history(
+                            symbol=sym, n=1,
+                            fields=["open", "high", "low", "close", "volume"],
+                            today=today,
+                        )
                 except Exception:
                     continue
                 if df is None or len(df) == 0:

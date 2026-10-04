@@ -16,12 +16,14 @@ from backend.services.engine.alpha_agent.launcher import (
     EvolutionTask,
 )
 from backend.services.engine.data_platform.jquants_import import import_jquants_snapshot
+from backend.services.engine.data_platform.jp_features import build_jp_features
 from backend.services.engine.rd_agent.data_pipeline.research_reader import (
     read_research_features,
 )
 from backend.services.engine.rd_agent.market_adapters import get_adapter, list_markets
 from backend.services.engine.rd_agent.rd_loop_wrapper import RDLoopWrapper
 from backend.tests.test_jp_data_platform import snapshot as source_fixture
+from backend.tests.test_jp_features import fake_evaluator
 from backend.tests.test_rd_configured_runner import experiment_source as price_fixture
 
 snapshot = source_fixture
@@ -144,6 +146,18 @@ def test_pinned_adapter_survives_publication_change_and_missing_data_never_uses_
     import_jquants_snapshot(snapshot, jp_adapter.root)
     assert jp_adapter.get_qlib_provider_uri() == old
     assert jp_adapter.is_data_ready()
+    current = get_adapter("japan")
+    assert current.get_qlib_provider_uri() == old
+    assert current.is_data_ready()
+    assert (
+        alpha_agent._resolve_factor_h5_path("all", "japan")
+        == (
+            jp_adapter.get_research_config("all")["data"]["extra"]["rd_data_files"][
+                "all"
+            ]
+        )
+    )
+    build_jp_features(jp_adapter.root, evaluator=fake_evaluator)
     current = get_adapter("japan")
     assert current.get_qlib_provider_uri() != old
     assert not current.is_data_ready()

@@ -13,12 +13,14 @@ import OutputLayer from './layers/OutputLayer';
 import LogPanel from './layers/LogPanel';
 import { RUN_STATE_META } from './topologyTypes';
 import { sortTradingStrategies } from '../../utils/sortTradingStrategies';
+import { getMarketConfig } from '../../../../config/marketConfig';
 
 interface TopologyConsoleProps {
     tenantId: string;
     userId: string;
     tradingMode?: 'real' | 'simulation';
     executionContext?: DatedExecutionContext;
+    accountExecutionContext?: DatedExecutionContext;
     requiresExecutionInputs?: boolean;
     onDeploy: (
         strategyId: string,
@@ -48,6 +50,7 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
     userId,
     tradingMode,
     executionContext,
+    accountExecutionContext,
     requiresExecutionInputs,
     onDeploy,
     onStop,
@@ -57,6 +60,7 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
     const currentMarket = useAppSelector(selectCurrentMarket);
     const mode: ConsoleTradingMode = tradingMode === 'simulation' ? 'simulation' : 'real';
     const isSim = mode === 'simulation';
+    const datedDaily = isSim && getMarketConfig(currentMarket).simulationExecution === 'dated_daily';
     const overview = useRuntimeOverview(tenantId, userId, mode, currentMarket, true, executionContext, requiresExecutionInputs);
     const { status, latestRun, defaultModel, runState, nodes, ready } = overview;
 
@@ -95,7 +99,7 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
                         <div className="flex items-center gap-3 mb-1.5">
                             <div className={`w-2.5 h-2.5 rounded-full ${runMeta.dot}`} />
                             <h2 className="text-lg font-bold text-slate-800">
-                                {isSim ? '全自动实盘模拟控制台' : '全自动实盘交易控制台'}
+                                {datedDaily ? '全自动日线模拟控制台' : (isSim ? '全自动实盘模拟控制台' : '全自动实盘交易控制台')}
                             </h2>
                             <span className={`px-2 py-0.5 rounded-full text-[10px] font-black border ${runMeta.banner}`}>
                                 {runMeta.label}
@@ -105,7 +109,7 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
                             <span className="flex items-center gap-1.5">
                                 <Activity size={13} className={isSim ? 'text-indigo-500' : 'text-rose-500'} />
                                 模式: <span className={`font-bold ${isSim ? 'text-indigo-600' : 'text-rose-600'}`}>
-                                    {isSim ? '实盘模拟运行' : (MARKET_BROKER_LABEL[currentMarket] || '通达信实盘交易')}
+                                    {datedDaily ? '已发布日线延迟模拟' : (isSim ? '实盘模拟运行' : (MARKET_BROKER_LABEL[currentMarket] || '通达信实盘交易'))}
                                 </span>
                             </span>
                             <span className="text-slate-200">|</span>
@@ -152,7 +156,7 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
                                     className={`px-6 py-2 rounded-xl text-xs font-bold text-white transition-all ${isDeployDisabled ? 'bg-slate-300' : (isSim ? 'bg-indigo-500 hover:bg-indigo-600' : 'bg-blue-600 hover:bg-blue-700')}`}
                                 >
                                     <Play size={16} className="inline mr-1.5" />
-                                    {selectedStrategy?.is_verified ? (isSim ? '开启实时模拟' : '启动模拟交易') : '未经验证'}
+                                    {selectedStrategy?.is_verified ? (datedDaily ? '开启日线托管' : (isSim ? '开启实时模拟' : '启动模拟交易')) : '未经验证'}
                                 </button>
                             </>
                         ) : (
@@ -176,6 +180,7 @@ const TopologyConsole: React.FC<TopologyConsoleProps> = ({
                     loading={!ready.status}
                     latestRun={latestRun}
                     defaultModelName={defaultModelName}
+                    {...(datedDaily ? { datedDaily: true, accountExecutionContext } : {})}
                 />
 
                 {/* L3 交易记录（全宽） */}
