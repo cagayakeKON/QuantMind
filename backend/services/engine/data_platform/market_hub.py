@@ -19,9 +19,6 @@ def get_hub_for_market(market: str | None = None) -> Any | None:
     返回 None 表示市场无对应 hub 或不可用。
     """
     market_upper = str(market or "").upper() or "CN"
-    market_upper = {"A": "CN", "A_SHARE": "CN", "BC": "CRYPTO"}.get(
-        market_upper, market_upper
-    )
 
     _MARKET_HUB = {
         "CN": ("backend.services.engine.data_platform.quantdb_hub", "QuantDBDataHub"),
@@ -34,8 +31,8 @@ def get_hub_for_market(market: str | None = None) -> Any | None:
 
     entry = _MARKET_HUB.get(market_upper)
     if entry is None:
-        logger.warning("未知市场 %s，没有对应数据中枢", market_upper)
-        return None
+        logger.debug("未知市场 %s，回退 CN", market_upper)
+        entry = _MARKET_HUB["CN"]
 
     try:
         import importlib

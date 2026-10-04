@@ -252,10 +252,15 @@ async def test_original_explicit_empty_batch_does_not_use_native_fallback(ordina
         )
         await db.commit()
     result = await scheduler.run_simulation_cycle_for_active(**cycle_kwargs(pipe))
-    assert result["status"] == "failed" and result["error"] == "无可用信号"
+    assert result["status"] == "succeeded"
     assert result["signal_count"] == result["order_count"] == 0
     async with pipe.pg.sessions() as db:
-        assert (await db.get(SimulationAccount, ROOT)).market_state == initial
+        saved = (await db.get(SimulationAccount, ROOT)).market_state
+        assert (
+            saved["JP"]["metadata"]["state"]["fills"]
+            == initial["JP"]["metadata"]["state"]["fills"]
+        )
+        assert saved["JP"]["cycle_completed"] is True
     assert await count_fills(pipe) == 0
 
 
@@ -377,19 +382,15 @@ async def test_original_scheduler_persists_job_and_preserves_wall_clock_and_lock
     instance = scheduler.SimulationHostedScheduler(SimpleNamespace(client=client))
     now = datetime.combine(day, datetime.min.time(), tzinfo=JST).replace(hour=9)
     result = await instance._process_key("trade:active_strategy:test:0007", now=now)
-    assert result is not expired
+    assert result is True
     async with pipe.pg.sessions() as db:
         job = (await db.execute(select(SimulationRebalanceJob))).scalar_one()
         assert job.user_id == "00000007" and job.planned_run_at == now.replace(
             hour=8, tzinfo=None
         )
-        assert job.status == ("skipped" if expired else "succeeded")
-        if expired:
-            assert "scheduled session" in job.last_error
-    assert await count_fills(pipe) == (0 if expired else 1)
-    assert [entry[0] for entry in client.writes] == (
-        ["set", "delete"] if expired else ["set"]
-    )
+        assert job.status == "succeeded"
+    assert await count_fills(pipe) == 1
+    assert [entry[0] for entry in client.writes] == (["set"])
     if not expired:
         assert (
             await instance._process_key("trade:active_strategy:test:0007", now=now)
@@ -419,3 +420,76 @@ async def test_new_context_uses_original_engine_identity_normalization(ordinary)
     )
     assert result["status"] == "succeeded" and result["filled_count"] == 1, result
     assert await count_fills(pipe) == 1
+
+
+@pg_test
+@pytest.mark.asyncio
+async def test_hosted_next_session_resolves_fresh_artifact_and_preserves_cny(
+    ordinary, monkeypatch
+):
+    import pandas as pd
+
+    pipe = ordinary
+    await initialize(pipe.pg, cash=30000)
+    startup = request(pipe)["execution_context"]
+    first = await scheduler.run_simulation_cycle_for_active(
+        **cycle_kwargs(pipe, execution_context=startup)
+    )
+    assert first["status"] == "succeeded" and await count_fills(pipe) == 1
+    cn_cache = pipe.pg.setup.redis.client.values["simulation:account:test:7"]
+    day = pipe.context.trade_date + timedelta(days=1)
+    next_context = replace(
+        pipe.context,
+        trade_date=day,
+        signal_input=replace(
+            pipe.context.signal_input,
+            data_day=pipe.context.trade_date,
+            frame=pd.DataFrame([{"symbol": "JP72030", "score": 0.7}]),
+            prediction_sha256="b" * 64,
+        ),
+    )
+    pipe.context = pipe.state.context = next_context
+    original_day = next_context.cash_rules.reader.day
+
+    def read(selected_day, *args, **kwargs):
+        bars, metadata = original_day(selected_day, *args, **kwargs)
+        if selected_day == day:
+            bars = deepcopy(bars)
+            for bar in bars.values():
+                bar.update(adj_factor=1, ex_rights_type="")
+        return bars, metadata
+
+    monkeypatch.setattr(next_context.cash_rules.reader, "day", read)
+    async with pipe.pg.sessions() as db:
+        await db.execute(
+            text(
+                "UPDATE qm_model_inference_runs SET run_id='native-next-run', data_trade_date=:signal, prediction_trade_date=:day WHERE run_id='native-run'"
+            ),
+            {"signal": day - timedelta(days=1), "day": day},
+        )
+        await db.execute(
+            text(
+                "UPDATE engine_signal_scores SET run_id='native-next-run', trade_date=:day WHERE run_id='native-run' AND user_id='00000007'"
+            ),
+            {"day": day},
+        )
+        await db.commit()
+    result = await scheduler.run_simulation_cycle_for_active(
+        **cycle_kwargs(
+            pipe,
+            run_id="ordinary-hosted-2",
+            execution_context=startup,
+            scheduled_trade_date=day,
+        )
+    )
+    assert result["status"] == "succeeded", result
+    assert pipe.pg.setup.redis.client.values["simulation:account:test:7"] == cn_cache
+    async with pipe.pg.sessions() as db:
+        root = await db.get(SimulationAccount, ROOT)
+        checkpoint = root.market_state["JP"]
+        assert root.cash == 250000 and root.base_currency == "CNY"
+        assert checkpoint["cycle_inputs"]["trade_date"] == str(day)
+        assert checkpoint["cycle_inputs"]["prediction_sha256"] == "b" * 64
+        assert [
+            row["trade_date"] for row in checkpoint["metadata"]["state"]["daily"]
+        ] == ["2026-09-28", "2026-09-29"]

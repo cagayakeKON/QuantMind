@@ -119,14 +119,27 @@ class SimTradeService:
         port = str(portfolio_id) if portfolio_id is not None else "all"
         return f"sim_trade:stats:{tenant_id}:{user_id}:{port}"
 
-    async def get_stats(self, tenant_id: str, user_id: int, portfolio_id: int | None = None) -> dict:
+    async def get_stats(self, tenant_id: str, user_id: int, portfolio_id: int | None = None, market: str | None = None) -> dict:
+        from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
+        from backend.services.simulation.services.account_context import read_registered_simulation_account
+        provider = LOCAL_MARKET_PROVIDERS.get(str(market or "").upper())
+        if provider and provider.simulation_account_input_adapter:
+            if portfolio_id is not None:
+                raise ValueError("Native cash statistics require their owner account scope")
+            _, account = await read_registered_simulation_account(market.upper(),
+                redis=self.redis, tenant_id=tenant_id, raw_user_id=str(user_id), user_id=user_id,
+                include_trade_stats=True)
+            if account is None:
+                return {"total_trades": 0, "total_value": 0, "total_commission": 0, "buy_trades": 0, "sell_trades": 0,
+                    "daily_counts": [], "realized_pnl": 0, "win_trades": 0, "loss_trades": 0, "win_rate": 0, "profit_loss_ratio": 0}
+            return account["trade_stats"]
         cache_key = self._stats_cache_key(tenant_id, user_id, portfolio_id)
         if self.redis and getattr(self.redis, "client", None):
             try:
                 cached = self.redis.get(cache_key)
                 if cached is not None:
                     # trade RedisClient.get already json.loads
-                    if isinstance(cached, dict) and cached.get("total_trades") is not None:
+                    if isinstance(cached, dict) and cached.get("total_trades") is not None and cached.get("_native_currency_excluded") is True:
                         return cached
             except Exception:
                 pass
@@ -134,6 +147,10 @@ class SimTradeService:
         if portfolio_id is not None:
             conditions.append(SimTrade.portfolio_id == portfolio_id)
 
+        # Do not add newly registered native currency fills to the old financial aggregate.
+        for native in LOCAL_MARKET_PROVIDERS.values():
+            if native.native_api_symbol_pattern:
+                conditions.append(~SimTrade.symbol.op("~")(native.native_api_symbol_pattern))
         summary_stmt = select(
             func.count(SimTrade.id).label("total_trades"),
             func.coalesce(func.sum(SimTrade.trade_value), 0.0).label("total_value"),
@@ -166,6 +183,7 @@ class SimTradeService:
             )
 
         result = {
+            "_native_currency_excluded": True,
             "daily_counts": daily_counts,
             "total_trades": int(summary_row.total_trades or 0),
             "total_value": float(summary_row.total_value or 0.0),

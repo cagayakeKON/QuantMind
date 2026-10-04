@@ -1,3 +1,5 @@
+import { useAppSelector } from '../../../store';
+import { selectCurrentMarket } from '../../../store/slices/uiSlice';
 import React, { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Layout, Button, Tag, Space, message, Progress, Tooltip, Typography, Alert, Button as AntButton } from 'antd';
 import { PlayCircleOutlined, StopOutlined, RobotOutlined, SaveOutlined, ReloadOutlined } from '@ant-design/icons';
@@ -33,6 +35,7 @@ const phaseLabel: Record<StrategyLabPhase, string> = {
 };
 
 const StrategyLabPage: React.FC = () => {
+  const currentMarket = useAppSelector(selectCurrentMarket);
   const [code, setCode] = useState<string>(STRATEGY_LAB_SNIPPETS[0].code);
   const [activeSnippet, setActiveSnippet] = useState<string>(STRATEGY_LAB_SNIPPETS[0].id);
   const [running, setRunning] = useState(false);
@@ -124,6 +127,7 @@ const StrategyLabPage: React.FC = () => {
     try {
       const submitResp = await strategyLabService.submit({
         code,
+        options: {market: currentMarket},
         drawn_lines: drawnLines,
         stock_pool: stockPool?.ref || null,
       });
@@ -162,7 +166,7 @@ const StrategyLabPage: React.FC = () => {
       const detail = err?.response?.data?.detail || err?.message || '提交失败';
       message.error(`提交失败: ${detail}`);
     }
-  }, [code, running, stopPolling, drawnLines, stockPool]);
+  }, [code, running, stopPolling, drawnLines, stockPool, currentMarket]);
 
   const handleStop = useCallback(() => {
     stopPolling();

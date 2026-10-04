@@ -910,10 +910,10 @@ export const realTradingService = {
     },
 
     // Get Simulation Fund Snapshots (from DB table simulation_fund_snapshots)
-    getSimulationDailySnapshots: async (days: number = 1): Promise<SimulationFundSnapshot[]> => {
+    getSimulationDailySnapshots: async (days: number = 1, market?: string): Promise<SimulationFundSnapshot[]> => {
         const token = authService.getAccessToken();
         const response = await axios.get(`${SERVICE_ENDPOINTS.API_GATEWAY}/simulation/snapshots/daily`, {
-            params: { days },
+            params: { days, ...(market ? {market} : {}) },
             headers: token ? new AxiosHeaders({ Authorization: `Bearer ${token}` }) : undefined,
             timeout: 30000,
         });

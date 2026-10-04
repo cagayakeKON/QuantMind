@@ -76,6 +76,9 @@ class SimulationAccountContext:
 
     def serialize(self, account, checkpoint=None):
         public = deepcopy(account)
+        from .dated_account_day import native_account_metrics
+
+        public.update(native_account_metrics(self.rules, account, self.trade_date))
         public.pop(METADATA_KEY, None)
         public["positions"] = {
             StockCodeUtil.to_prefix(symbol, market=self.market): position
@@ -147,7 +150,15 @@ async def prepare_registered_account_reset(
 
 
 async def read_registered_simulation_account(
-    market, *, redis, tenant_id, raw_user_id, user_id, execution_inputs=None
+    market,
+    *,
+    redis,
+    tenant_id,
+    raw_user_id,
+    user_id,
+    execution_inputs=None,
+    history_days=None,
+    include_trade_stats=False,
 ):
     adapter = registered_account_input_adapter(market)
     if adapter is None:
@@ -218,7 +229,42 @@ async def read_registered_simulation_account(
         if execution_inputs is not None:
             # The same rules as execution project the committed checkpoint to the
             # requested day. This read does not advance the persisted account.
-            prepared = context.rules.prepare_day(account, context.trade_date)
-            context.rules.corporate_action_inputs(account, prepared, context.trade_date)
-            account = prepared
-        return True, context.serialize(account, checkpoint)
+            from .dated_account_day import pending_sessions, close_account_day
+
+            days = pending_sessions(context.rules, account, context.trade_date)
+            if days and context.rules.backtest_state(account)["cursor"] != str(saved_date):
+                account = close_account_day(context.rules, account, saved_date)
+            for day in days:
+                prepared = context.rules.prepare_day(account, day)
+                context.rules.corporate_action_inputs(account, prepared, day)
+                account = prepared
+                if day < context.trade_date:
+                    account = close_account_day(context.rules, account, day)
+        public = context.serialize(account, checkpoint)
+        if include_trade_stats:
+            from .dated_account_day import native_trade_stats
+
+            public["trade_stats"] = native_trade_stats(context.rules, account)
+        if history_days is not None:
+            state = context.rules.backtest_state(account)
+            initial = Decimal(state["initial_cash"])
+            previous = initial
+            rows = []
+            for row in state["daily"]:
+                equity = Decimal(row["equity"])
+                rows.append(
+                    {
+                        "snapshot_date": row["trade_date"],
+                        "total_asset": equity,
+                        "available_balance": Decimal(row["cash"]),
+                        "frozen_balance": Decimal(0),
+                        "market_value": Decimal(row["market_value"]),
+                        "initial_capital": initial,
+                        "total_pnl": equity - initial,
+                        "today_pnl": equity - previous,
+                        "source": "dated_market_checkpoint",
+                    }
+                )
+                previous = equity
+            public["fund_snapshots"] = rows[-history_days:]
+        return True, public

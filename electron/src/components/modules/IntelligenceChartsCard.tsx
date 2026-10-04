@@ -15,7 +15,7 @@ const ChartShimmer: React.FC<{ className?: string }> = ({ className = '' }) => (
   <div className={`animate-pulse bg-gray-100/80 rounded-lg ${className}`} />
 );
 
-const StandardIntelligenceChartsCard: React.FC = () => {
+const IntelligenceChartsCard: React.FC = () => {
   const tradingMode = useAppSelector((state) => state.ui.tradingMode);
   const {
     data: chartData,
@@ -120,4 +120,4 @@ const StandardIntelligenceChartsCard: React.FC = () => {
   );
 };
 
-export default StandardIntelligenceChartsCard;
+export default IntelligenceChartsCard;

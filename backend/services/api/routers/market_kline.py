@@ -55,7 +55,9 @@ def _local_provider_kline(market, symbol, start, end, days, adjust):
     key += f"|{hub.data_dir}|{days}"
     items = _kline_cache_get(key)
     if items is None:
-        frame = hub.fetch_daily_kline(suffix, start, end, adjust=adjust).tail(days)
+        frame = hub.fetch_daily_kline(suffix, start, end, adjust=adjust)
+        if days is not None:
+            frame = frame.tail(days)
         items = [
             {
                 "date": str(pd.Timestamp(row["trade_date"]).date()),
@@ -352,7 +354,7 @@ async def get_kline(
 
         try:
             return await asyncio.to_thread(
-                _local_provider_kline, m, sym, sd, ed, days, adj
+                _local_provider_kline, m, sym, sd, ed, None if (start or end) else days, adj
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc

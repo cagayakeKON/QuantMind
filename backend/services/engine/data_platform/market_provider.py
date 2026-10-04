@@ -27,6 +27,9 @@ class LocalMarketProvider:
     fundamental_snapshot_reader_factory: str | None = None
     dated_strategy_input_factory: str | None = None
     stock_pool_input_factory: str | None = None
+    strategy_lab_provider_factory: str | None = None
+    trading_agents_router: str | None = None
+    native_api_symbol_pattern: str | None = None
 
     def open(self, data_version: str | None = None):
         if data_version is not None:
@@ -65,6 +68,9 @@ LOCAL_MARKET_PROVIDERS = {
         simulation_account_input_adapter="backend.services.simulation.jp.account_data.open_account_input_adapter",
         fundamental_snapshot_reader_factory="backend.services.simulation.jp.feature_snapshot.create_reader",
         dated_strategy_input_factory="backend.services.simulation.jp.strategy_snapshot.open_backtest_inputs",
+        native_api_symbol_pattern=r"^JP[0-9][A-Z0-9]{3}[0-9]$",
+        trading_agents_router="backend.services.simulation.jp.research_data.route_tool",
+        strategy_lab_provider_factory="backend.services.simulation.jp.lab_data.open_lab_provider",
         stock_pool_input_factory=(
             "backend.services.simulation.jp.stock_pool.open_stock_pool_inputs"
         ),

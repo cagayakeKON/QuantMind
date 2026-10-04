@@ -291,7 +291,7 @@ async def test_action_lots_and_cash_checkpoint_roll_back_together(
 
 
 @pytest.mark.asyncio
-async def test_skipped_held_session_is_unavailable_instead_of_silent_split_loss(
+async def test_sparse_cycle_advances_intermediate_sessions_without_losing_split(
     action_pg, monkeypatch
 ):
     pg = action_pg
@@ -301,12 +301,19 @@ async def test_skipped_held_session_is_unavailable_instead_of_silent_split_loss(
     )
     before = await rows(pg)
     async with pg.sessions() as db:
-        with pytest.raises(ValueError, match="consecutive"):
-            await context.accounts(db, pg.setup.redis).prepare_dated_day(
-                date(2026, 9, 30)
-            )
-        await db.rollback()
-    assert await rows(pg) == before
+        manager = context.accounts(db, pg.setup.redis)
+        await manager.prepare_dated_day(date(2026, 9, 30))
+        await db.commit()
+    saved = await rows(pg)
+    state = saved["state"]["JP"]["metadata"]["state"]
+    assert [row["trade_date"] for row in state["daily"]] == ["2026-09-28", "2026-09-29"]
+    assert saved["lots"][1][2] == 200
+    assert before["lots"][1][2] == 100
+    assert len(state["applied_actions"]) == 1
+    async with pg.sessions() as db:
+        await context.accounts(db, pg.setup.redis).prepare_dated_day(date(2026, 9, 30))
+        await db.commit()
+    assert await rows(pg) == saved
 
 
 @pytest.mark.asyncio

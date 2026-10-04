@@ -33,7 +33,8 @@ def _build_calendar(provider: Any, start: pd.Timestamp, end: pd.Timestamp) -> li
             cal = provider.calendar(start, end)
             return [pd.Timestamp(d) for d in cal]
         except Exception:
-            pass
+            if hasattr(provider, "make_broker"):
+                raise
     # In-memory provider path: scrape dates from any known DataFrame
     if hasattr(provider, "_data"):
         seen: set[pd.Timestamp] = set()
@@ -67,7 +68,8 @@ def run_backtest(
     ctx.assert_ready()
 
     cash = float(ctx.cash) if ctx.cash is not None else 1_000_000.0
-    broker = SimpleBroker(ctx=ctx, provider=provider, cash=cash)
+    factory = getattr(provider, "make_broker", None)
+    broker = factory(ctx, cash) if factory else SimpleBroker(ctx=ctx, provider=provider, cash=cash)
     ctx._attach(data_provider=provider, broker=broker, cash=cash)
 
     on_bar = user_globals.get("on_bar")
@@ -96,6 +98,10 @@ def run_backtest(
     else:
         symbols = [str(s) for s in (universe or [])]
 
+    if getattr(provider, "market", None):
+        from backend.shared.stock_utils import StockCodeUtil
+        symbols = [StockCodeUtil.to_prefix(s, market=provider.market) for s in symbols]
+
     # 全局股票池（P5）：ctx.stock_pool 非空时与 universe 取交集。
     # 同一套解析入口（shared.stock_pool.strategy），模拟盘 code 模式共用，
     # 同一行代码两边生效。空池/零交集抛错，不退化全市场。
@@ -103,7 +109,8 @@ def run_backtest(
     if isinstance(pool_ref, str) and pool_ref.strip():
         from backend.shared.stock_pool.strategy import apply_pool_to_universe
 
-        pool_out = apply_pool_to_universe(symbols, pool_ref, strict=True)
+        pool_out = apply_pool_to_universe(symbols, pool_ref, strict=True,
+            **({"market": provider.market} if getattr(provider, "market", None) else {}))
         symbols = pool_out.symbols
         if publisher:
             publisher.publish(
@@ -122,6 +129,8 @@ def run_backtest(
     last_emit_pct = 15.0
     for i, today in enumerate(calendar):
         ctx._set_today(today)
+        if hasattr(broker, "prepare_day"):
+            broker.prepare_day(today)
 
         if on_universe is not None:
             try:

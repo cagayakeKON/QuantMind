@@ -74,7 +74,7 @@ const getErrorHttpStatus = (err: unknown): number | undefined => {
 
 // 实盘通道文案已随模拟专用化移除（恢复见 git 历史）。
 
-export const StandardTradingPage: React.FC = () => {
+const RealTradingPage: React.FC = () => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     const datedMarket = getMarketConfig(currentMarket).simulationExecution ? currentMarket : undefined;
     const [executionInputs, setExecutionInputs] = useState<SimulationExecutionInputs>();
@@ -888,4 +888,4 @@ export const StandardTradingPage: React.FC = () => {
     );
 };
 
-export default StandardTradingPage;
+export default RealTradingPage;

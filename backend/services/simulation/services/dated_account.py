@@ -227,12 +227,23 @@ class DatedSimulationAccountManager(SimulationAccountManager):
         if self._row is None:
             raise ValueError("Registered cash account is not initialized")
         previous = self._restore(self._row)
-        prepared = self.rules.prepare_day(previous, trade_date)
-        applied = await apply_dated_inventory_actions(
-            self, previous, prepared, trade_date
-        )
-        self._account = prepared
-        if applied:
+        from .dated_account_day import pending_sessions, close_account_day
+
+        days = pending_sessions(self.rules, previous, trade_date)
+        if days:
+            saved = self.rules.checkpoint(previous)["metadata"]["prepared_date"]
+            if saved and self.rules.backtest_state(previous)["cursor"] != saved:
+                previous = close_account_day(
+                    self.rules, previous, date.fromisoformat(saved)
+                )
+        for day in days:
+            prepared = self.rules.prepare_day(previous, day)
+            await apply_dated_inventory_actions(self, previous, prepared, day)
+            previous = prepared
+            if day < trade_date:
+                previous = close_account_day(self.rules, previous, day)
+        self._account = previous
+        if days:
             states = self._states(self._row)
             states[self.execution_market] = self._checkpoint()
             self._row.market_state = states
@@ -259,6 +270,10 @@ class DatedSimulationAccountManager(SimulationAccountManager):
         if self._row is None or self._account is None or self._pending_order:
             raise ValueError("Dated marking requires an exclusive prepared day")
         self._account = self.rules.merge_marks(self._account, projection)
+        day = date.fromisoformat(
+            self.rules.checkpoint(self._account)["metadata"]["prepared_date"]
+        )
+        self._account = self.rules.record_account_day(self._account, day, [])
         states = self._states(self._row)
         states[self.execution_market] = self._checkpoint()
         states[self.execution_market]["cycle_completed"] = True

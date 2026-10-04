@@ -43,6 +43,7 @@ class StopRequest(BaseModel):
 # 市场 → 数据供应商。quantmind_local 读本地 parquet，各市场网络回退源不同。
 _MARKET_VENDOR_FALLBACK = {
     "CN": "a_stock",
+    "JP": "quantmind_local",
     "HK": "hk_stock",
     "US": "us_stock",
     "CRYPTO": "crypto",

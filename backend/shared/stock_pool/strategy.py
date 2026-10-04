@@ -37,6 +37,7 @@ def apply_pool_to_universe(
     user_id: str | None = None,
     *,
     strict: bool = True,
+    market: str | None = None,
 ) -> PoolUniverseResult:
     """把 ``universe`` 符号表按股票池引用裁剪，返回交集（前缀式，保序）。
 
@@ -57,7 +58,7 @@ def apply_pool_to_universe(
 
     snapshot = pool_resolver.resolve_sync(
         ref,
-        ResolveContext(tenant_id=tenant_id, user_id=user_id),
+        ResolveContext(tenant_id=tenant_id, user_id=user_id, **({"market": market} if market else {})),
         strict=strict,
     )
     if snapshot.unfiltered:

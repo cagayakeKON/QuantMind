@@ -380,6 +380,17 @@ class JapanReplayCashRules:
         """Read the exact cash journal without exposing mutable account state."""
         return deepcopy(self._metadata(account)["state"])
 
+    def record_account_day(self, account, day, stale_symbols):
+        # Simulation can mark a still-open session again after another manual fill.
+        updated = deepcopy(account)
+        state = self._metadata(updated)["state"]
+        if state["cursor"] == str(day):
+            state["daily"].pop()
+            state["cursor"] = (
+                state["daily"][-1]["trade_date"] if state["daily"] else None
+            )
+        return self.complete_backtest_day(updated, day, [], stale_symbols)
+
     def complete_backtest_day(self, account, day, orders, stale_symbols):
         """Attach a closing journal to already matched/prepared cash metadata."""
         updated = deepcopy(account)

@@ -87,10 +87,12 @@ async def prepare_hosted_cycle_context(
     )
     if scheduled_trade_date is not None:
         scheduled = date.fromisoformat(str(scheduled_trade_date))
-        if inputs.trade_date != scheduled:
-            raise ValueError(
-                "Hosted execution inputs do not match the scheduled session"
-            )
+        # Startup artifact hashes belong to that one inference session. Resolve and
+        # validate fresh model inputs for a new cycle while pinning execution data/fees.
+        changes = {"trade_date": scheduled}
+        if scheduled != inputs.trade_date:
+            changes.update(prediction_sha256=None, model_data_version=None)
+        inputs = inputs.model_copy(update=changes)
     status = await manual_execution_service.get_default_model_hosted_status(
         tenant_id=tenant_id,
         user_id=user_id,

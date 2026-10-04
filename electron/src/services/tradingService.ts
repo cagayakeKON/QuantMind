@@ -295,11 +295,12 @@ class TradingService {
      * @param range 时间范围
      * @param tradingMode 交易模式
      */
-    async getTradeStats(userId: string, range = '1m', tradingMode?: TradingMode): Promise<ChartDataPoint[]> {
+    async getTradeStats(userId: string, range = '1m', tradingMode?: TradingMode, market?: string): Promise<ChartDataPoint[]> {
         try {
             const params: Record<string, unknown> = {
                 user_id: userId,
-                range
+                range,
+                ...(market ? {market} : {})
             };
             if (tradingMode) {
                 params['trading_mode'] = String(tradingMode).toUpperCase();
@@ -343,9 +344,9 @@ class TradingService {
      * 获取模拟成交统计摘要（含已实现盈亏、胜率、盈亏比，手续费计入口径）
      * 后端不可用时返回 null，调用方自行降级展示。
      */
-    async getSimulationTradeStatsOverview(): Promise<TradeStatsOverview | null> {
+    async getSimulationTradeStatsOverview(market?: string): Promise<TradeStatsOverview | null> {
         try {
-            const response = await this.client.get<Record<string, unknown>>(API_ENDPOINTS.SIMULATION_TRADES_STATS, {});
+            const response = await this.client.get<Record<string, unknown>>(API_ENDPOINTS.SIMULATION_TRADES_STATS, market ? {market} : {});
             const data: any = (response as any)?.data ?? response;
             const totalTrades = Number(data?.total_trades);
             if (!Number.isFinite(totalTrades)) {

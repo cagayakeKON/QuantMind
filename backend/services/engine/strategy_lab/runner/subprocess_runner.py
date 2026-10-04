@@ -72,6 +72,8 @@ def _safe_env() -> dict[str, str]:
         "REDIS_SENTINEL_HOSTS",
         "REDIS_SENTINEL_SERVICE_NAME",
         "QLIB_DATA_PATH",
+        "QM_QUANTJP_DATA_DIR",
+        "QM_JP_TRADING_UNITS_FILE",
     }
     env = {k: v for k, v in os.environ.items() if k in keep}
     env.setdefault("PYTHONUNBUFFERED", "1")
@@ -95,6 +97,7 @@ async def submit_run(req: RunRequest, *, timeout_sec: int | None = None) -> str:
         "code": req.code,
         "params": req.params,
         "qlib_data_path": req.qlib_data_path,
+        "options": req.options,
         "stock_pool": req.stock_pool,
         "drawn_lines": req.drawn_lines or {},
     }
@@ -116,6 +119,7 @@ async def run_sync(req: RunRequest, *, timeout_sec: int | None = None) -> RunRes
         "code": req.code,
         "params": req.params,
         "qlib_data_path": req.qlib_data_path,
+        "options": req.options,
         "stock_pool": req.stock_pool,
         "drawn_lines": req.drawn_lines or {},
     }

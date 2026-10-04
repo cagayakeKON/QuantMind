@@ -30,6 +30,13 @@ class LocalDataUnavailable(RuntimeError):
 
 
 def _hub():
+    from .config import get_config
+    if str(get_config().get("market", "CN")).upper() == "JP":
+        from backend.services.engine.data_platform.market_hub import get_hub_for_market
+        hub = get_hub_for_market("JP")
+        if hub is None or not hub.available:
+            raise LocalDataUnavailable("Published Japan market data is unavailable")
+        return hub
     try:
         from backend.services.engine.data_platform.quantdb_hub import QuantDBDataHub
     except ImportError as e:
@@ -48,7 +55,9 @@ def _to_suffix(symbol: str) -> str:
         from backend.shared.stock_utils import StockCodeUtil
     except ImportError as e:
         raise LocalDataUnavailable(f"stock_utils not importable: {e}") from e
-    suffix = StockCodeUtil.to_suffix(code)
+    from .config import get_config
+    market = str(get_config().get("market", "CN")).upper()
+    suffix = StockCodeUtil.to_suffix(code, market="JP" if market == "JP" else None)
     if not suffix:
         raise LocalDataUnavailable(f"cannot normalize ticker {symbol!r}")
     return suffix
@@ -62,7 +71,13 @@ def _parse_date(value: str, field: str):
 
 
 def _header(title: str, extra: list[str] | None = None) -> str:
-    lines = [f"# {title}", "# Data source: QuantMind local QuantDB (parquet)"]
+    from .config import get_config
+    if str(get_config().get("market", "CN")).upper() == "JP":
+        title = title.replace("A-stock", "JP stock / JPY")
+        source = "QuantMind published QuantJP (parquet)"
+    else:
+        source = "QuantMind local QuantDB (parquet)"
+    lines = [f"# {title}", f"# Data source: {source}"]
     lines.extend(extra or [])
     lines.append(f"# Data retrieved on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     return "\n".join(lines) + "\n\n"
@@ -280,6 +295,15 @@ def get_fundamentals(
     suffix = _to_suffix(ticker)
     hub = _hub()
     as_of = _parse_date(curr_date, "curr_date") if curr_date else None
+
+    from .config import get_config
+    if str(get_config().get("market", "CN")).upper() == "JP":
+        if as_of is None:
+            raise LocalDataUnavailable("Japan fundamentals require an as-of date")
+        valuation = hub.fetch_valuation(suffix, end=as_of)
+        if valuation.empty:
+            raise LocalDataUnavailable(f"No published JP valuation for {suffix} on {as_of}")
+        return _header(f"Company Fundamentals for {suffix} (JP stock / JPY)") + valuation.sort_values("trade_date").tail(1).to_csv(index=False)
 
     lines: list[str] = []
 
@@ -502,3 +526,32 @@ def get_industry_comparison(
     _block(f"领跌行业 Bottom {top_n}", grouped.tail(top_n).iloc[::-1])
 
     return "\n".join(lines)
+
+
+def route_registered_market(method, *args, **kwargs):
+    """Route only Japan-qualified inputs; do not extend the legacy CN fallback chain."""
+    local = {"get_stock_data": get_stock_data, "get_indicators": get_indicators,
+             "get_fundamentals": get_fundamentals}
+    if method in local:
+        try:
+            return local[method](*args, **kwargs)
+        except LocalDataUnavailable as exc:
+            return f"JP / JPY data unavailable: {exc}. Do not substitute data from another market."
+    if method in {"get_news", "get_global_news"}:
+        try:
+            from .yfinance_news import get_news_yfinance, get_global_news_yfinance
+        except ImportError as exc:
+            return f"JP news capability unavailable: missing runtime dependency ({exc.name})."
+        if method == "get_global_news":
+            return get_global_news_yfinance(*args, **kwargs)
+        from backend.shared.stock_utils import StockCodeUtil
+        args = list(args)
+        kwargs = dict(kwargs)
+        if args:
+            args[0] = StockCodeUtil.to_yahoo(args[0], market="JP")
+        else:
+            key = "ticker" if "ticker" in kwargs else "symbol"
+            kwargs[key] = StockCodeUtil.to_yahoo(kwargs[key], market="JP")
+        return get_news_yfinance(*args, **kwargs)
+    return (f"JP / JPY capability unavailable: {method}. The published Japan dataset does not "
+            "provide this source. Do not infer China-market signals or historical financial statements.")

@@ -13,7 +13,7 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe('existing user aggregate fund calculation in all markets', () => {
-  it.each(['CN', 'JP', 'HK', 'US', 'CRYPTO', 'FUTURES'])('retains the original simulation calculation and request in %s', async market => {
+  it.each(['CN', 'HK', 'US', 'CRYPTO', 'FUTURES'])('retains the original simulation calculation and request in %s', async market => {
     const expected = await portfolioService.getFundOverview('owner', 'simulation', 'tenant', 'CN');
     mocks.simulation.mockClear();
     const actual = await portfolioService.getFundOverview('owner', 'simulation', 'tenant', market);
@@ -30,11 +30,21 @@ describe('existing user aggregate fund calculation in all markets', () => {
     expect(actual.isSimulated).toBe(false);
     expect(mocks.real).toHaveBeenCalledWith('owner', 'tenant');
   });
-  it('preserves original unavailable-real-account fallback for JP', async () => {
+  it('uses the native JP simulation account when no real account exists', async () => {
     mocks.real.mockResolvedValue(null);
     const result = await portfolioService.getFundOverview('owner', 'real', 'tenant', 'JP');
     expect(result.isSimulated).toBe(true);
-    expect(mocks.simulation).toHaveBeenCalledWith('owner', 'tenant', undefined, {timeoutMs: 8000});
+    expect(mocks.simulation).toHaveBeenCalledWith('owner', 'tenant', 'JP', {timeoutMs: 8000});
+    expect(result.data.currency).toBe('JPY');
+  });
+  it('shows native JPY capital and daily PnL without the CNY user baseline', async () => {
+    mocks.simulation.mockResolvedValue({...account, currency: 'JPY', total_asset: 30000, cash: 20000,
+      initial_equity: 30000, total_pnl: 0, today_pnl: 0});
+    const result = await portfolioService.getFundOverview('owner', 'simulation', 'tenant', 'JP');
+    expect(result.data.totalAsset).toBe(30000);
+    expect(result.data.todayPnL).toBe(0);
+    expect(result.data.currency).toBe('JPY');
+    expect(mocks.simulation).toHaveBeenCalledWith('owner', 'tenant', 'JP', {timeoutMs: 8000});
   });
   it('does not invent capital or import replay money when the common account is unavailable', async () => {
     mocks.simulation.mockRejectedValue(new Error('Common account unavailable'));

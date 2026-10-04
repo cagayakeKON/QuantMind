@@ -7,6 +7,7 @@ import { tradingService } from '../../services/tradingService';
 import { realTradingService } from '../../services/realTradingService';
 import { modelTrainingService } from '../../services/modelTrainingService';
 import { useWebSocket } from '../../contexts/WebSocketContext';
+import { useAppSelector } from '../../store';
 import { authService } from '../../features/auth/services/authService';
 
 // Mock services
@@ -67,6 +68,8 @@ describe('useIntelligenceCharts', () => {
 
     beforeEach(() => {
         vi.clearAllMocks();
+        vi.mocked(useAppSelector).mockImplementation((selector: any) =>
+            selector({ui: {currentMarket: 'CN', tradingMode: 'real'}}));
         vi.mocked(authService.getStoredUser).mockReturnValue(null as any);
         vi.mocked(modelTrainingService.resolveInferenceDateByCalendar).mockResolvedValue({ date: '2023-01-03', adjusted: false } as any);
         vi.mocked(modelTrainingService.prevTradingDay)
@@ -82,6 +85,26 @@ describe('useIntelligenceCharts', () => {
         vi.mocked(tradingService.getSimulationTradeStatsOverview).mockResolvedValue(null as any);
         // Setup default mock implementation for onMessage to return unsubscribe function
         mockOnMessage.mockReturnValue(() => { });
+    });
+
+    it('uses only native JP simulation sources for charts and trade statistics', async () => {
+        vi.mocked(useAppSelector).mockImplementation((selector: any) =>
+            selector({ui: {currentMarket: 'JP', tradingMode: 'simulation'}}));
+        vi.mocked(authService.getStoredUser).mockReturnValue({id: '7'} as any);
+        vi.mocked(realTradingService.getRuntimeAccount).mockResolvedValue({
+            cash: 20000, total_asset: 30000, today_pnl: 0, positions: {},
+            metrics_meta: {as_of: '2023-01-03', today_pnl_available: true},
+        } as any);
+        vi.mocked(tradingService.getTradeStats).mockResolvedValue([]);
+        const {result, unmount} = renderHook(() => useIntelligenceCharts('7', {tradingMode: 'simulation'}));
+        await waitFor(() => expect(result.current.loading).toBe(false));
+        expect(realTradingService.getRuntimeAccount).toHaveBeenCalledWith('7', 'default', 'simulation', 'JP');
+        expect(realTradingService.getSimulationDailySnapshots).toHaveBeenCalledWith(30, 'JP');
+        expect(tradingService.getSimulationTradeStatsOverview).toHaveBeenCalledWith('JP');
+        expect(portfolioService.getDailyReturns).not.toHaveBeenCalled();
+        expect(portfolioService.getPositionDistribution).not.toHaveBeenCalled();
+        expect(result.current.data.dailyReturn.at(-1)?.value).toBe(0);
+        unmount();
     });
 
     it('should fetch all chart data successfully', async () => {

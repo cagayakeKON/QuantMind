@@ -182,7 +182,14 @@ class SimulationFundSnapshotService:
         # 同一用户跨市场账户（CN/HK/US/...）合并为一条用户级快照：
         # 资产字段累加，盈亏在合并后的总资产上计算（与台账口径一致）。
         grouped: dict[tuple[str, str], dict[str, Decimal]] = {}
+        from backend.services.simulation.services.account_context import (
+            registered_account_input_adapter,
+        )
+
         for key in keys:
+            # Native currency caches must not enter the legacy CNY aggregate.
+            if registered_account_input_adapter(str(key).rsplit(":", 1)[-1]):
+                continue
             parsed = _parse_account_key(str(key))
             if not parsed:
                 continue
@@ -193,6 +200,9 @@ class SimulationFundSnapshotService:
             try:
                 account = json.loads(raw)
             except Exception:
+                continue
+
+            if registered_account_input_adapter(str(account.get("market") or "")):
                 continue
 
             bucket = grouped.setdefault(

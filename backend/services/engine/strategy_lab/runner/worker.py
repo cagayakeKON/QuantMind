@@ -90,6 +90,11 @@ def run_request(req: dict[str, Any]) -> int:
         provider = _resolve_provider(req, qlib_data_path)
 
         ctx = Context()
+        if getattr(provider, "market", None):
+            ctx.market = provider.market
+            ctx.benchmark = provider.benchmark
+            ctx.tax_sell = 0
+            ctx.transfer_fee = 0
         if stock_pool and str(stock_pool).strip():
             ctx.stock_pool = str(stock_pool).strip()
         for k, v in params.items():
@@ -135,6 +140,8 @@ def run_request(req: dict[str, Any]) -> int:
         result.run_id = run_id
         result.script_sha = compute_script_sha(code, params)
         result.config = ctx.to_config_dict()
+        if getattr(provider, "market", None):
+            result.config.update(market=provider.market, currency=provider.currency, data_version=provider.reader.data_version, execution_model="dated_cash")
         # Re-attach data_snapshot_at via provider helper if present
         try:
             from ..engine.data_provider import data_snapshot_at
@@ -169,6 +176,15 @@ def _resolve_provider(req: dict[str, Any], qlib_data_path: str | None) -> Any:
     test_provider = globals().get("_TEST_PROVIDER")
     if test_provider is not None:
         return test_provider
+    from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
+    from importlib import import_module
+
+    options = req.get("options") or {}
+    market = str(options.get("market") or "CN").upper()
+    registered = LOCAL_MARKET_PROVIDERS.get(market)
+    if registered and registered.strategy_lab_provider_factory:
+        module, name = registered.strategy_lab_provider_factory.rsplit(".", 1)
+        return getattr(import_module(module), name)(options)
     from ..engine.data_provider import QlibProvider
     return QlibProvider(data_path=qlib_data_path)
 

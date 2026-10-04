@@ -29,7 +29,7 @@ vi.mock('../../tabs/SettingsCenter', () => ({ default: () => null }));
 vi.mock('../../tabs/ReplayPage', () => ({ default: () => <div>共用回放入口</div> }));
 
 import SimulationExecutionInputForm from '../SimulationExecutionInputForm';
-import RealTradingPage, { StandardTradingPage } from '../../RealTradingPage';
+import RealTradingPage from '../../RealTradingPage';
 
 const inputs: SimulationExecutionInputs = {
   market: 'JP', currency: 'JPY', timezone: 'Asia/Tokyo', trade_dates: ['2026-09-29', '2026-09-30'],
@@ -71,7 +71,7 @@ describe('common simulation controller input flow', () => {
   });
 
   it('shares selected inputs with the console and manual task without reloading them on tab switches', async () => {
-    render(<StandardTradingPage />);
+    render(<RealTradingPage />);
     await waitFor(() => expect(screen.getByTestId('console-context')).toHaveTextContent('2026-09-30'));
     await chooseDate('2026-09-29');
     await waitFor(() => expect(screen.getByTestId('console-context')).toHaveTextContent('2026-09-29'));
@@ -86,7 +86,7 @@ describe('common simulation controller input flow', () => {
   });
 
   it('passes one confirmed context through the actual wizard, precheck and final start', async () => {
-    render(<StandardTradingPage />);
+    render(<RealTradingPage />);
     await screen.findByText(/日线开盘价模拟/);
     await deployThroughWizard();
     expect(mocks.precheck).toHaveBeenCalledWith('SIMULATION', inputs.execution_context);
@@ -106,7 +106,7 @@ describe('common simulation controller input flow', () => {
 
   it('keeps CN requests and configuration on their original path', async () => {
     mocks.market = 'CN';
-    render(<StandardTradingPage />);
+    render(<RealTradingPage />);
     await waitFor(() => expect(mocks.status).toHaveBeenCalledWith('7', 'simulation', 'default'));
     expect(screen.queryByLabelText('模拟执行输入')).not.toBeInTheDocument();
     expect(mocks.inputs).not.toHaveBeenCalled();

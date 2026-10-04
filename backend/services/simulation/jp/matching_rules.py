@@ -76,6 +76,26 @@ class JapanDailyMatchRules:
         )
         if price <= 0:
             raise ValueError("Nonpositive execution price")
+        low = self.raw_bar.get("low", bar.low)
+        high = self.raw_bar.get("high", bar.high)
+        if (
+            low is None
+            or high is None
+            or not (_decimal(low) <= price <= _decimal(high))
+        ):
+            raise ValueError("Slipped JP execution price outside observed daily range")
+        base = self.metadata.get("limit_base_price")
+        if base is None and self.metadata.get("previous_close") is not None:
+            base = _decimal(self.metadata["previous_close"]) * _decimal(
+                self.raw_bar.get("adj_factor", "1")
+            )
+        if base is not None:
+            base = _decimal(base)
+            width = daily_limit_width(base)
+            if not (max(Decimal(0), base - width) <= price <= base + width):
+                raise ValueError(
+                    "Slipped JP execution price outside daily price limits"
+                )
         return price
 
     def fees(

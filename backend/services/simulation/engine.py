@@ -217,6 +217,18 @@ class SimulationEngine:
                     )
                 report.signal_count = len(signals)
 
+                if not signals and cycle_context is not None:
+                    # A no-signal session still advances funding, actions and marks.
+                    self._ensure_redis()
+                    account_manager = cycle_context.accounts(db, self.redis)
+                    await cycle_context.finish_day(account_manager)
+                    await db.commit()
+                    account = await account_manager.get_account(
+                        canonical_sim_uid(uid), tenant_id=tenant, market=cycle_context.market.value,
+                    )
+                    report.account_snapshot = cycle_context.public_account(account)
+                    return report
+
                 if not signals:
                     logger.info(
                         "SimulationEngine: 无信号, tenant=%s user=%s strategy=%s",

@@ -222,6 +222,18 @@ def get_vendor(category: str, method: str = None) -> str:
 
 def route_to_vendor(method: str, *args, **kwargs):
     """Route method calls to appropriate vendor implementation with fallback support."""
+    from importlib import import_module
+    market = str(get_config().get("market", "CN")).upper()
+    try:
+        from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
+    except ImportError:
+        if market == "JP":
+            raise LocalDataUnavailable("JP requires the QuantMind market provider") from None
+        LOCAL_MARKET_PROVIDERS = {}
+    provider = LOCAL_MARKET_PROVIDERS.get(market)
+    if provider and provider.trading_agents_router:
+        module, name = provider.trading_agents_router.rsplit(".", 1)
+        return getattr(import_module(module), name)(method, *args, **kwargs)
     category = get_category_for_method(method)
     vendor_config = get_vendor(category, method)
     primary_vendors = [v.strip() for v in vendor_config.split(',')]

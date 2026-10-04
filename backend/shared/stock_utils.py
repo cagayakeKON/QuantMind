@@ -46,6 +46,16 @@ class StockCodeUtil:
         return True
 
     @staticmethod
+    def to_yahoo(code: str, *, market: str) -> str:
+        """Explicit vendor-boundary conversion for Japanese ordinary shares."""
+        if market.upper() != "JP":
+            raise ValueError("Yahoo conversion is registered only for JP")
+        native = StockCodeUtil.to_jp_code(code)
+        if native[-1] != "0":
+            raise ValueError("Yahoo Japan adapter supports ordinary shares only")
+        return native[:-1] + ".T"
+
+    @staticmethod
     def to_suffix(code: str, *, market: str | None = None) -> str:
         """转换为 suffix 格式 600036.SH（QuantDB parquet / Qlib / 行情层口径）。
 

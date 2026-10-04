@@ -77,7 +77,7 @@ describe('common dashboard for every registered market', () => {
 
   it('shows user aggregate currency without relabelling it as JPY or folding replay money into it', () => {
     mount('JP');
-    expect(screen.getByText('资金概览 (日本市场/模拟) · 用户合计（CNY）')).toBeTruthy();
+    expect(screen.getByText('资金概览 (日本市场/模拟) · JPY')).toBeTruthy();
     expect(screen.queryByText('JPY 123,456.00')).toBeNull();
     expect(screen.getByText('实时交易记录 (日本市场)')).toBeTruthy();
   });

@@ -1,3 +1,5 @@
+import { getMarketConfig } from '../config/marketConfig';
+import type { AppMarket } from '../store/slices/uiSlice';
 /**
  * 投资组合服务
  *
@@ -338,7 +340,7 @@ class PortfolioService {
         userId: string,
         mode: 'real' | 'simulation' = 'simulation',
         tenantId = 'default',
-        _market = 'CN',
+        market = 'CN',
     ): Promise<{ data: FundData; isSimulated: boolean }> {
         try {
             const { realTradingService } = await import('./realTradingService');
@@ -360,7 +362,7 @@ class PortfolioService {
                     account = await realTradingService.getSimulationAccount(
                         userId,
                         tenantId,
-                        undefined,
+                        getMarketConfig(market as AppMarket).simulationExecution === 'dated_daily' ? market : undefined,
                         { timeoutMs: 8_000 },
                     );
                     useSimulation = true;
@@ -369,7 +371,7 @@ class PortfolioService {
                 account = await realTradingService.getSimulationAccount(
                     userId,
                     tenantId,
-                    undefined,
+                    getMarketConfig(market as AppMarket).simulationExecution === 'dated_daily' ? market : undefined,
                     { timeoutMs: 8_000 },
                 );
                 useSimulation = true;
@@ -435,7 +437,7 @@ class PortfolioService {
             }
             if (initialCapital <= 0) {
                 if (useSimulation) {
-                    initialCapital = DEFAULT_INITIAL_CAPITAL;
+                    initialCapital = getMarketConfig(market as AppMarket).simulationExecution === 'dated_daily' ? 0 : DEFAULT_INITIAL_CAPITAL;
                 } else {
                     // 实盘未知初始权益时，不再用当前总资产硬回退，避免总收益率长期假 0。
                     initialCapital = totalAsset;
@@ -534,6 +536,8 @@ class PortfolioService {
 
             return {
                 data: {
+                    ...(useSimulation && getMarketConfig(market as AppMarket).simulationExecution === 'dated_daily'
+                        ? {currency: account.currency || getMarketConfig(market as AppMarket).currency, accountName: getMarketConfig(market as AppMarket).label} : {}),
                     totalAsset,
                     availableBalance,
                     frozenBalance,

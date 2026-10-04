@@ -37,6 +37,10 @@ DEFAULT_QLIB_DATA = _default_qlib_data()
 # Qlib daily store uses lowercase prefix-form, e.g. "sh600036".
 # ---------------------------------------------------------------------------
 def to_qlib(symbol: str) -> str:
+    from backend.shared.stock_utils import StockCodeUtil
+
+    if StockCodeUtil.is_jp_symbol(symbol):
+        return StockCodeUtil.to_qlib(symbol, market="JP")
     s = symbol.strip().upper()
     if "." in s:
         code, ex = s.split(".", 1)
@@ -49,6 +53,10 @@ def to_qlib(symbol: str) -> str:
 
 
 def to_internal(symbol: str) -> str:
+    from backend.shared.stock_utils import StockCodeUtil
+
+    if str(symbol).lower().startswith("jp_"):
+        return StockCodeUtil.to_prefix(symbol, market="JP")
     s = symbol.strip().upper()
     if "." in s:
         code, ex = s.split(".", 1)

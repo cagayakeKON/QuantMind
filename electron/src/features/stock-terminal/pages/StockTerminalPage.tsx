@@ -72,7 +72,7 @@ function weekKey(date: string): string {
   return d.toISOString().slice(0, 10);
 }
 
-function StandardStockTerminalPage() {
+function StockTerminalContent() {
   const market = useAppSelector(selectCurrentMarket);
   const config = getMarketConfig(market);
   const terminal = config.stockTerminal;
@@ -496,5 +496,5 @@ function StandardStockTerminalPage() {
 
 export default function StockTerminalPage() {
   const market = useAppSelector(selectCurrentMarket);
-  return <StandardStockTerminalPage key={getMarketConfig(market).stockTerminal?.market || 'legacy'} />;
+  return <StockTerminalContent key={getMarketConfig(market).stockTerminal?.market || 'legacy'} />;
 }

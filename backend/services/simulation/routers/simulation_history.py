@@ -78,6 +78,7 @@ async def get_trade(
 
 @router.get("/trades/stats/summary", response_model=SimTradeStatsResponse)
 async def get_trade_stats(
+    market: str | None = Query(default=None),
     portfolio_id: int | None = Query(default=None),
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_read_db),
@@ -85,7 +86,10 @@ async def get_trade_stats(
 ):
     user_id = _require_user_id(auth.user_id, auth.tenant_id)
     service = SimTradeService(db, redis)
-    stats = await service.get_stats(auth.tenant_id, user_id, portfolio_id=portfolio_id)
+    try:
+        stats = await service.get_stats(auth.tenant_id, user_id, portfolio_id=portfolio_id, market=market)
+    except (ValueError, NotImplementedError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     logger.info(
         "simulation trade stats ready: tenant_id=%s user_id=%s portfolio_id=%s total_trades=%s daily_points=%s",
         auth.tenant_id,

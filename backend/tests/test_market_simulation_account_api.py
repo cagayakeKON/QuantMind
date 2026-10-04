@@ -191,7 +191,7 @@ async def test_reset_runs_original_cleanup_settings_stops_and_user_aggregate(
     settings = await routes.SimulationAccountManager(pg.setup.redis).get_settings(
         7, tenant_id="test"
     )
-    assert settings["initial_cash"] == 300000
+    assert settings["initial_cash"] == 1000000  # JPY reset must not change CNY settings
     async with pg.sessions() as db:
         root = await db.get(SimulationAccount, ROOT)
         assert root.base_currency == "CNY"  # original user root policy
@@ -203,9 +203,9 @@ async def test_reset_runs_original_cleanup_settings_stops_and_user_aggregate(
         assert (await db.get(SimulationAccount, "sim:other:8")).cash == 77777
         portfolio = (await db.execute(select(Portfolio))).scalar_one()
         assert portfolio.run_status == "stopped"
-        # Original global fund snapshot still sums both market cache keys.
+        # Native JPY cache does not enter the original CNY snapshot.
         snap = (await db.execute(select(SimulationFundSnapshot))).scalar_one()
-        assert snap.total_asset == 550000 and snap.initial_capital == 300000
+        assert snap.total_asset == 250000 and snap.initial_capital != 300000
     context = controlled_context(pg)
     engine = original_engine(pg, monkeypatch)
     # The raw fixture trades 1,000 shares. Use an ordinary 5% strategy cap
@@ -224,7 +224,7 @@ async def test_reset_runs_original_cleanup_settings_stops_and_user_aggregate(
 
 
 @pytest.mark.asyncio
-async def test_read_keeps_original_user_baselines_and_does_not_repair_cache(api):
+async def test_native_read_ignores_cny_baselines_and_does_not_repair_cache(api):
     pg = api.pg
     await initialize(pg, cash=100000)
     await routes.SimulationAccountManager(pg.setup.redis).set_initial_cash(
@@ -247,10 +247,10 @@ async def test_read_keeps_original_user_baselines_and_does_not_repair_cache(api)
     assert response.status_code == 200, response.text
     data = response.json()["data"]
     assert data["initial_equity"] == 100000
-    assert data["baseline"]["day_open_equity"] == 250000
+    assert data["baseline"]["day_open_equity"] == 100000
     assert (
-        data["daily_pnl"] == -150000
-    )  # original user baseline, not JP historical date
+        data["daily_pnl"] == 0
+    )  # native JP checkpoint baseline, independent of user CNY history
     assert pg.setup.redis.client.values == cache
     async with pg.sessions() as db:
         assert (await db.get(SimulationAccount, ROOT)).market_state == state
@@ -439,3 +439,37 @@ async def test_initialization_commit_failure_does_not_publish_dated_cash(api):
     assert api.pg.setup.redis.client.values == cache
     async with api.pg.sessions() as db:
         assert await db.get(SimulationAccount, ROOT) is None
+
+
+@pytest.mark.asyncio
+async def test_native_daily_history_and_trade_pnl_do_not_fall_back_to_cny(
+    api, monkeypatch
+):
+    from backend.services.simulation.services.trade_service import SimTradeService
+
+    pg = api.pg
+    await initialize(pg, cash=30000)
+    context = controlled_context(pg)
+    engine = original_engine(pg, monkeypatch)
+    result = await engine.run_cycle("test", "00000007", "2", cycle_context=context)
+    assert result.error is None and result.filled_count == 1
+    response = await api.http.get(
+        "/api/v1/simulation/snapshots/daily", params={"market": "JP", "days": 30}
+    )
+    assert response.status_code == 200, response.text
+    rows = response.json()
+    assert len(rows) == 1 and rows[0]["snapshot_date"] == "2026-09-28"
+    assert float(rows[0]["initial_capital"]) == 30000
+    assert rows[0]["source"] == "dated_market_checkpoint"
+    async with pg.sessions() as db:
+        service = SimTradeService(db)
+        native = await service.get_stats("test", 7, market="JP")
+        legacy = await service.get_stats("test", 7)
+        assert native["total_trades"] == 1 and native["total_value"] == 10000
+        assert native["realized_pnl"] == 0 and native["total_commission"] == 0
+        assert (
+            legacy["total_trades"]
+            == legacy["total_value"]
+            == legacy["realized_pnl"]
+            == 0
+        )

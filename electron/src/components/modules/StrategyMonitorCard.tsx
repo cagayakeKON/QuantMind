@@ -25,7 +25,7 @@ const RISK_CONFIG = {
   high: { color: 'text-[var(--error)]', text: '高风险' },
 } as const;
 
-const StandardStrategyMonitorCard: React.FC<StrategyMonitorCardProps> = ({
+export const StrategyMonitorCard: React.FC<StrategyMonitorCardProps> = ({
   expanded = false,
   onExpand,
   onCloseExpand,
@@ -278,5 +278,3 @@ const StandardStrategyMonitorCard: React.FC<StrategyMonitorCardProps> = ({
     </motion.div>
   );
 };
-
-export const StrategyMonitorCard = StandardStrategyMonitorCard;

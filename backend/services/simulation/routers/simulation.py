@@ -308,7 +308,7 @@ async def reset_simulation_account(
         )
 
     # 当显式传入 initial_cash 时，同步更新 settings，保证后续 initial_equity 口径一致。
-    if request.initial_cash is not None:
+    if request.initial_cash is not None and account_context is None:
         await manager.set_initial_cash(uid, initial_cash, tenant_id=auth.tenant_id)
 
     # 清空数据库中的历史交易/订单/快照，避免重置后前端仍拉到旧数据。
@@ -522,6 +522,10 @@ async def get_simulation_account(
             "market": market,
         }
 
+    if registered:
+        # Native P&L comes from the same dated PG checkpoint as its cash/positions.
+        return {"success": True, "data": account}
+
     # 从 settings 中读取 initial_cash 作为 initial_equity
     settings = await manager.get_settings(
         user_id=uid,
@@ -596,9 +600,21 @@ async def capture_simulation_fund_snapshot(
 @router.get("/snapshots/daily", response_model=list[SimulationFundSnapshotResponse])
 async def list_simulation_fund_snapshots(
     days: int = Query(default=30, ge=1, le=3650),
+    market: str = Query(default="CN"),
     auth: AuthContext = Depends(get_auth_context),
+    redis: RedisClient = Depends(get_redis),
 ):
     """查询当前用户的模拟盘日级资金快照历史。"""
+    try:
+        registered, account = await read_registered_simulation_account(
+            market.upper(), redis=redis, tenant_id=auth.tenant_id,
+            raw_user_id=auth.user_id, user_id=_require_user_id(auth.user_id, auth.tenant_id),
+            history_days=days,
+        )
+    except (ValueError, NotImplementedError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if registered:
+        return [SimulationFundSnapshotResponse(**row) for row in (account or {}).get("fund_snapshots", [])]
     snapshots = await SimulationFundSnapshotService.list_user_daily(
         tenant_id=auth.tenant_id,
         user_id=str(auth.user_id),

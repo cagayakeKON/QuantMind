@@ -504,17 +504,18 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
         try {
             // 根据模式动态选择接口
             const { realTradingService } = await import('../services/realTradingService');
+            const nativeMarket = !isLive && getMarketConfig(currentMarket).simulationExecution === 'dated_daily' ? currentMarket : undefined;
             const [dailyReturn, tradeCount, positionRatio, account, ledgerDaily, tradeStats] = await Promise.all([
-                portfolioService.getDailyReturns(resolvedUserId, '1m', mode),
-                tradingService.getTradeStats(resolvedUserId, '1w', mode),
-                portfolioService.getPositionDistribution(resolvedUserId, mode),
-                realTradingService.getRuntimeAccount(resolvedUserId, 'default', mode).catch(() => null),
+                nativeMarket ? Promise.resolve([]) : portfolioService.getDailyReturns(resolvedUserId, '1m', mode),
+                nativeMarket ? tradingService.getTradeStats(resolvedUserId, '1w', mode, nativeMarket) : tradingService.getTradeStats(resolvedUserId, '1w', mode),
+                nativeMarket ? Promise.resolve([]) : portfolioService.getPositionDistribution(resolvedUserId, mode),
+                realTradingService.getRuntimeAccount(resolvedUserId, 'default', mode, getMarketConfig(currentMarket).simulationExecution === 'dated_daily' ? currentMarket : undefined).catch(() => null),
                 isLive 
                     ? realTradingService.getAccountLedgerDaily(30, resolvedUserId).catch(() => [])
-                    : realTradingService.getSimulationDailySnapshots(30).catch(() => []),
+                    : realTradingService.getSimulationDailySnapshots(30, getMarketConfig(currentMarket).simulationExecution === 'dated_daily' ? currentMarket : undefined).catch(() => []),
                 isLive
                     ? Promise.resolve(null)
-                    : tradingService.getSimulationTradeStatsOverview().catch(() => null),
+                    : (nativeMarket ? tradingService.getSimulationTradeStatsOverview(nativeMarket) : tradingService.getSimulationTradeStatsOverview()).catch(() => null),
             ]);
 
             let normalizedPositionRatio: PositionDistribution[] = [];
@@ -560,7 +561,7 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
             
             // 锚点用上海日历日，避免凌晨 UTC 错日把当日快照挤出窗口
             const todayIso = shanghaiTodayIso();
-            const fallbackAnchorDate = parseIsoDateFromTimestamp(todayIso) || todayIso;
+            const fallbackAnchorDate = (nativeMarket ? parseIsoDateFromTimestamp(String((account as any)?.metrics_meta?.as_of || '')) : null) || parseIsoDateFromTimestamp(todayIso) || todayIso;
             
             let anchorTradingDate = fallbackAnchorDate;
             try {
@@ -651,7 +652,7 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
             initializedRef.current = true;
             setLoading(false);
         }
-    }, [autoFetchEnabled, resolvedUserId, mode, isLive, calendar]);
+    }, [autoFetchEnabled, resolvedUserId, mode, isLive, calendar, currentMarket]);
 
     useEffect(() => {
         if (!autoFetchEnabled) {

@@ -28,7 +28,7 @@ export const FundOverviewCard: React.FC = () => {
   const marketConfig = getMarketConfig(currentMarket);
   const marketLabel = MARKET_LABELS[currentMarket] || (marketConfig.stockCodePattern ? marketConfig.label : '');
   const modeLabel = tradingMode === 'real' ? '实盘' : '模拟';
-  const cardTitle = `资金概览 (${marketLabel}/${modeLabel})${marketConfig.simulationExecution === 'dated_daily' ? ' · 用户合计（CNY）' : ''}`;
+  const cardTitle = `资金概览 (${marketLabel}/${modeLabel})${marketConfig.simulationExecution === 'dated_daily' ? ` · ${marketConfig.currency}` : ''}`;
   const currency = '￥';
 
   if (loading && !data) {

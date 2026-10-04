@@ -293,7 +293,7 @@ STRATEGY_PARAMETER_RULES = [
     RequiredRule("market", "市场不能为空"),
     RequiredRule("risk_level", "风险等级不能为空"),
     # 枚举字段
-    EnumRule("market", ["CN", "US", "HK", "GLOBAL"]),
+    EnumRule("market", ["CN", "US", "HK", "JP", "GLOBAL"]),
     EnumRule("risk_level", ["low", "medium", "high"]),
     EnumRule("timeframe", ["1m", "5m", "15m",
              "30m", "1h", "4h", "1d", "1w", "1M"]),
