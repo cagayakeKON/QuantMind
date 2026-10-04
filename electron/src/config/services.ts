@@ -69,9 +69,7 @@ function persistServerUrl(url: string | null): void {
  * 检测是否为 Electron 桌面环境
  */
 export function isElectronEnv(): boolean {
-  if (typeof window === 'undefined') return false;
-  const api = (window as any).electronAPI;
-  return api !== null && typeof api === 'object' && api.__quantmindWebCompat !== true;
+  return typeof window !== 'undefined' && typeof (window as any).electronAPI === 'object';
 }
 
 /**

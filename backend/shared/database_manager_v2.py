@@ -24,7 +24,6 @@ except Exception:
     pass
 
 from sqlalchemy import event, text
-from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -126,10 +125,7 @@ class DatabaseManager:
 
         # 创建主库引擎
         master_url = self.config.get_master_url()
-        logger.info(
-            "Creating master database engine with URL: %s",
-            make_url(master_url).render_as_string(hide_password=True),
-        )
+        logger.info(f"Creating master database engine with URL: {master_url}")
         self._master_engine = create_async_engine(
             master_url,
             pool_size=self.config.pool_size,

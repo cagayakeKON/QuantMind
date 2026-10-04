@@ -4,9 +4,6 @@
 .vscode
 .idea
 .DS_Store
-.env
-.env.*
-!.env.example
 
 # rd-agent git subdirectory (rd-agent source is needed, but not its .git)
 rd-agent/.git
