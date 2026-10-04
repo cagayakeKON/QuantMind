@@ -27,7 +27,6 @@ export interface MarketConfig {
   adapterId: string;
   trainingDefaults?: { commissionRate: number; dealPrice: 'open' | 'close' };
   trainingCapabilities?: {dealPrices: ('open' | 'close')[]; industryFeature: boolean; executionNodes?: ('local' | 'remote')[]};
-  simulationExecution?: 'dated_daily';
   simulationTimeZone?: string;
   stockCodePattern?: RegExp;
   replay?: {market: AppMarket; currency: string; priceUnit: string; stopLoss?: boolean; code?: boolean};
@@ -46,14 +45,13 @@ export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
     defaultUniverse: 'all', benchmark: 'TOPIX', benchmarkName: 'TOPIX 价格指数',
     currency: 'JPY', calendar: 'XTKS', adapterId: 'japan',
     trainingDefaults: { commissionRate: 0, dealPrice: 'open' },
-    trainingCapabilities: {dealPrices: ['open'], industryFeature: false, executionNodes: ['local']},
-    simulationExecution: 'dated_daily',
+    trainingCapabilities: {dealPrices: ['open', 'close'], industryFeature: false, executionNodes: ['local', 'remote']},
     simulationTimeZone: 'Asia/Tokyo',
     stockCodePattern: /^JP\d[A-Z0-9]{3}\d$/,
-    replay: {market: 'JP', currency: 'JPY', priceUnit: 'JPY', stopLoss: false, code: false},
+    replay: {market: 'JP', currency: 'CNY', priceUnit: 'JPY', stopLoss: true, code: true},
     stockSearch: 'gateway',
     stockTerminal: { market: 'JP', adjustments: ['none', 'qfq'], requestTimeoutMs: 120000 },
-    backtest: { market: 'JP', commission: 0, requireModelMarket: true, dealPrice: 'open', dealPrices: ['open'] },
+    backtest: { market: 'JP', commission: 0, requireModelMarket: true, dealPrice: 'open', dealPrices: ['open', 'close'] },
     analysis: { benchmarks: [{ id: 'TOPIX', name: 'TOPIX 价格指数' }] },
     scoreChartIndex: {symbol: 'TOPIX.JP', name: 'TOPIX', maName: 'TOPIX MA20'},
   },

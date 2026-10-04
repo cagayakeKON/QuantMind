@@ -1,14 +1,9 @@
-"""Dated TSE cash-equity rules; missing historical metadata is an error.
-
-Sources: JPX domestic trading rules (units, ticks, daily limits), JPX T+2
-settlement transition, and SBI's domestic cash-account difference settlement
-help. The execution engine is a daily-bar approximation of an opening order.
-"""
+"""TSE cash-equity calendar, ticks and daily price limits."""
 
 from __future__ import annotations
 
 from bisect import bisect_left
-from datetime import date, datetime, time, timezone
+from datetime import date, time
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 
@@ -29,29 +24,12 @@ class TradingCalendar:
             raise RuleDataMissing(f"JP calendar does not cover {day} + {offset}")
         return self.sessions[target]
 
-    def settlement_date(self, day: date) -> date:
-        return self.next_session(day, 2 if day >= date(2019, 7, 16) else 3)
 
 
 def session_close(day: date) -> time:
     return time(15, 30) if day >= date(2024, 11, 5) else time(15)
 
 
-def opening_utc(day: date) -> datetime:
-    # 09:00 JST = 00:00 UTC, independent of the host timezone.
-    return datetime.combine(day, time(), tzinfo=timezone.utc)
-
-
-def lot_size(day: date, metadata: dict) -> int:
-    explicit = metadata.get("lot_size")
-    if explicit is not None:
-        value = int(explicit)
-        if value <= 0 or Decimal(str(explicit)) != value:
-            raise RuleDataMissing("Invalid historical JP trading unit")
-        return value
-    if day >= date(2018, 10, 1):
-        return 100
-    raise RuleDataMissing(f"Historical trading unit is required on {day}")
 
 
 # Inclusive upper price boundaries, unlike the exclusive daily-limit brackets.

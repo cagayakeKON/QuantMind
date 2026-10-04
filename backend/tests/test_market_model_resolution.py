@@ -9,7 +9,7 @@ from backend.shared.model_registry import ModelRegistryService
 from backend.services.simulation.jp import model_signals
 
 
-pytest_plugins = ["backend.tests.test_jp_model_backtest"]
+pytest_plugins = ["backend.tests.jp_standard_fixtures"]
 
 
 def record(model_id, market="JP", status="ready", **kwargs):
@@ -172,8 +172,12 @@ async def test_legacy_unscoped_call_keeps_unmarked_default_and_call_arguments(re
 async def test_common_model_resolution_runs_actual_jp_backtest_without_explicit_id(
     registry, model_data, monkeypatch, runtime_factory, source, strategy_type
 ):
+    from backend.tests.test_jp_standard_qlib_backtest import ready_service, prepare_standard_predictions
+    from backend.shared import model_registry
+
     service, state = registry
     request, directory, meta = model_data
+    prepare_standard_predictions(request, directory)
     request.tenant_id, request.user_id = "tenant-a", "alice"
     (directory / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
     available = record("jp-test", storage_path=str(directory))
@@ -192,31 +196,32 @@ def get_strategy_config():
 """
     request.model_id = None
     request.strategy_params.n_drop = 1
-    monkeypatch.setattr(model_signals, "model_registry_service", service)
+    monkeypatch.setattr(model_registry, "model_registry_service", service)
     saved = []
 
     async def save(**kwargs):
         saved.append(kwargs["status"])
 
-    result = await runtime_factory(SimpleNamespace(save_run=save)).run_backtest(request)
+    runtime, store, _ = ready_service(runtime_factory, monkeypatch)
+    runtime._persistence = SimpleNamespace(save_run=save)
+    result = await runtime.run_backtest(request)
     assert result.status == "completed", result.error_message
     assert saved == ["running", "completed"]
-    assert result.config["effective_model_id"] == "jp-test"
-    assert result.config["model_source"] == source
-    assert result.config["prediction_sha256"]
+    assert result.config["model_id"] == "jp-test"
+    assert result.config["signal_meta"]["model_source"] == source
+    assert result.config["execution_engine"] == "qlib"
     assert all(
         owner["tenant_id"] == "tenant-a" and owner["user_id"] == "alice"
         for action, owner in state.calls
         if action != "system"
     )
-    assert [(row["symbol"], row["quantity"]) for row in result.trades] == [
-        ("JP72030", 1800)
-    ]
-    assert float(result.trades[0]["price"]) == 50
+    assert len(result.trades) == 1
+    assert result.trades[0]["symbol"] == "jp_72030"
+    assert result.trades[0]["quantity"] > 0
     assert result.trades[0]["commission"] == 0
-    assert result.trades[0]["settlement_date"] == "2026-10-01"
-    assert sum(float(f["amount"]) for f in result.advanced_stats["cash_funds"]) == 10000
+    assert "settlement_date" not in result.trades[0]
     assert result.equity_curve[-1]["value"] == 100000
+
 
 
 @pytest.mark.asyncio

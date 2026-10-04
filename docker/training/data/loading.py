@@ -123,6 +123,7 @@ def load_data(
     factor_field_sources: dict[str, str] | None = None,
     pool_symbols: list[str] | None = None,
     factor_coverage: dict | None = None,
+    deal_price: str | None = None,
 ) -> tuple:
     local_root = Path(local_dir).expanduser() if local_dir else None
     if local_root is None:
@@ -575,8 +576,8 @@ def load_data(
     df = df.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
     _mom_col = f"mom_ret_{_horizon}d"
     if market_upper == "JP":
-        from backend.services.engine.data_platform.jp_labels import forward_open_labels
-        df["label"] = forward_open_labels(df, jp_sessions, _horizon, _EXECUTION_LAG_DAYS)
+        from backend.services.engine.data_platform.jp_labels import forward_price_labels
+        df["label"] = forward_price_labels(df, jp_sessions, _horizon, _EXECUTION_LAG_DAYS, deal_price=deal_price or "open")
         df = df[(df["volume"] > 0) & (df["close"] > 0)].copy()
     elif direct_factor_source:
         # Raw factor sources carry close, so labels are always true forward returns.
@@ -600,7 +601,7 @@ def load_data(
     logger.info(
         "Label built with target_horizon_days=%s (%s)",
         _horizon,
-        "JP exact cash-session open" if market_upper == "JP" else "direct close" if direct_factor_source else _mom_col if _mom_col in df.columns else "rolling",
+        f"JP exact-session {deal_price or 'open'}" if market_upper == "JP" else "direct close" if direct_factor_source else _mom_col if _mom_col in df.columns else "rolling",
     )
 
     valid_count_before = len(df)

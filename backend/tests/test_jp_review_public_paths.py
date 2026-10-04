@@ -129,6 +129,7 @@ def test_native_return_conditions_use_adjusted_sessions():
     )
     hub = SimpleNamespace(
         _partition_dates=lambda *a, **kw: [d.strftime("%Y%m%d") for d in days],
+        fetch_calendar=lambda **kw: pd.DataFrame({"trade_date": days}),
         _normalize_kline=lambda f: f,
         _read=lambda *a: history,
     )
@@ -139,25 +140,35 @@ def test_native_return_conditions_use_adjusted_sessions():
 
 
 @pytest.mark.asyncio
-async def test_remote_jp_rejected_before_public_submit_side_effects(monkeypatch):
+async def test_missing_remote_jp_publication_rejected_before_record_or_dispatch(
+    monkeypatch,
+):
     from backend.services.api.routers.admin import admin_training_utils as submit
-    from backend.services.api.routers.model_training import get_data_window
-    from backend.services.engine.training import window_probe
 
-    resolver = AsyncMock(
-        side_effect=AssertionError("must reject before feature/probe/DB")
+    payload = {"context": {"market": "JP"}, "node_id": "autodl-1"}
+    resolver = AsyncMock(return_value=(payload, ["feature_0"]))
+    probe = AsyncMock(
+        side_effect=HTTPException(
+            status_code=422, detail="Remote JP publication is unavailable"
+        )
     )
     monkeypatch.setattr(submit, "_resolve_quantdb_factor_payload", resolver)
-    with pytest.raises(HTTPException, match="local node only") as exc:
-        await submit.submit_training_job(
-            {"context": {"market": "JP"}, "node_id": "autodl-1"}, None, {}
-        )
-    assert exc.value.status_code == 422 and not resolver.called
-    with pytest.raises(ValueError, match="local node only"):
-        await window_probe.probe_data_window("autodl-1", "l1_factors", "JP")
-    with pytest.raises(HTTPException, match="local node only") as exc:
-        await get_data_window(node_id="autodl-1", market="JP", current_user={})
+    monkeypatch.setattr(submit, "_apply_window_probe", probe)
+    monkeypatch.setattr(
+        submit,
+        "get_session",
+        lambda **kw: pytest.fail("no DB record before remote data is ready"),
+    )
+    monkeypatch.setattr(
+        submit,
+        "get_orchestrator",
+        lambda **kw: pytest.fail("no dispatch before remote data is ready"),
+    )
+    with pytest.raises(HTTPException, match="publication is unavailable") as exc:
+        await submit.submit_training_job(payload, None, {})
     assert exc.value.status_code == 422
+    resolver.assert_awaited_once_with(payload, "JP")
+    probe.assert_awaited_once_with(payload, "JP")
 
 
 @pytest.mark.parametrize("market", ["JP", "US"])
@@ -439,11 +450,7 @@ def test_shap_uses_prediction_pinned_publication_and_exact_asof(
     assert {d["name"]: d["value"] for d in drivers}["KMID"] == 0.1
 
 
-def test_dynamic_position_rejects_missing_volume_without_changing_legacy(monkeypatch):
-    from backend.services.engine.qlib_app.services.market_strategy_context import (
-        MarketStrategyContext,
-        StrategyContextSpec,
-    )
+def test_dynamic_position_preserves_original_missing_volume_algorithm(monkeypatch):
     from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestRequest
     from backend.services.engine.qlib_app.services.market_state_service import (
         MarketStateService,
@@ -466,49 +473,9 @@ def test_dynamic_position_rejects_missing_volume_without_changing_legacy(monkeyp
         end_date="2026-08-18",
         market_state_window=5,
     )
-    # Original service rule is deliberately preserved; only the native adapter rejects absent input.
+    # The original shared state algorithm retains its missing-volume behavior.
     assert MarketStateService(
         data_provider=SimpleNamespace(features=lambda *a, **kw: frame)
     ).build_risk_degree_series("TOPIX", request.start_date, request.end_date, window=5)[
         0
     ]
-    context = object.__new__(MarketStrategyContext)
-    context.mapper = lambda s: s
-    context.spec = StrategyContextSpec(
-        "unused", "us", "version", "unused", required_market_state_fields=("$volume",)
-    )
-    context.errors = []
-    context.provider = SimpleNamespace(features=lambda *a, **kw: frame)
-    with pytest.raises(ValueError, match="benchmark.*volume"):
-        context.market_state_kwargs(request)
-    request.dynamic_position = False
-    context.errors.clear()
-    assert context.market_state_kwargs(request) == {}
-
-
-def test_real_qlib_topix_missing_volume_is_explicit_failure(native_publication):
-    _, version = native_publication
-    code = """
-from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestRequest
-from backend.services.simulation.jp.strategy_context import prepare_context
-from backend.services.engine.qlib_app.services.market_strategy_context import MarketStrategyContext
-import sys
-request = QlibBacktestRequest(market='JP', jp_data_version=sys.argv[1], benchmark='TOPIX', dynamic_position=True, start_date='2026-09-29', end_date='2026-09-30')
-context = MarketStrategyContext(prepare_context(request))
-try:
-    context.market_state_kwargs(request)
-except ValueError as error:
-    assert 'benchmark $volume' in str(error), error
-    assert context.errors
-    print('REVIEW_MISSING_VOLUME_BLOCKED')
-else:
-    raise AssertionError('NaN volume must not silently yield successful risk degrees')
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", code, version],
-        capture_output=True,
-        text=True,
-        timeout=45,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "REVIEW_MISSING_VOLUME_BLOCKED" in result.stdout

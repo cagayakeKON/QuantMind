@@ -11,22 +11,49 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 import pytest
+import pytest_asyncio
 
 from backend.services.engine.inference.pred_merge import merge_signals_into_pred
 from backend.services.engine.inference.prediction_provenance import read_pred_sources
 from backend.tests.test_jp_inference_continuity import (
     research_publication as research_fixture,
     snapshot as snapshot_fixture,
-    pg as pg_fixture,
-    cash_setup as cash_setup_fixture,
-    published as published_fixture,
 )
 
 snapshot = snapshot_fixture
 research_publication = research_fixture
-pg = pg_fixture
-cash_setup = cash_setup_fixture
-published = published_fixture
+
+
+@pytest_asyncio.fixture
+async def pg():
+    """Writer creates its own ordinary tables inside an empty UUID schema."""
+    from backend.shared.database_manager_v2 import DatabaseConfig
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    if os.getenv("QM_JP_TEST_PG") != "1":
+        pytest.skip("UUID PostgreSQL opt-in")
+    schema = "jp_prediction_test_" + uuid4().hex
+    admin = create_async_engine(DatabaseConfig().get_master_url())
+    engine = None
+    try:
+        async with admin.begin() as db:
+            await db.execute(text(f'CREATE SCHEMA "{schema}"'))
+        engine = create_async_engine(
+            DatabaseConfig().get_master_url(),
+            connect_args={"server_settings": {"search_path": schema}},
+        )
+        yield SimpleNamespace(
+            sessions=async_sessionmaker(engine, expire_on_commit=False)
+        )
+    finally:
+        if engine:
+            await engine.dispose()
+        async with admin.begin() as db:
+            await db.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin.dispose()
 
 
 def provenance(version, day, run="real-run"):
@@ -458,7 +485,7 @@ async def test_real_writer_jsonb_and_owned_snapshot_exact_date(
             text("INSERT INTO qm_model_inference_runs VALUES ('actual','model')")
         )
         schema = (await db.execute(text("SELECT current_schema()"))).scalar_one()
-        assert schema.startswith("dated_sim_test_")
+        assert schema.startswith("jp_prediction_test_")
         await db.commit()
         # Production inference uses psycopg2, not an asyncpg run_sync adapter.
         # Restrict that real synchronous writer to the same temporary UUID schema.

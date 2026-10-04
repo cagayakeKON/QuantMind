@@ -331,10 +331,9 @@ class Context:
         symbols: Sequence[str] | None = None,
         adjust: str | None = None,
     ) -> pd.Series | pd.DataFrame:
-        """History in the provider's default basis; JP defaults to raw cash prices.
+        """History uses the standard Qlib adjusted basis.
 
-        JP research can explicitly request adjust='qfq'; its adjusted series must
-        not be compared directly with raw inventory costs or event bars.
+        A provider may additionally expose an explicit research adjustment.
         """
         provider = self._require_provider()
         kwargs = {}

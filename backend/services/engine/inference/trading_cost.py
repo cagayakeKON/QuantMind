@@ -50,6 +50,12 @@ class CostModel:
         model = cls()
 
         ctx = (meta or {}).get("context")
+        if isinstance(ctx, dict) and str(ctx.get("market") or "").upper() == "JP":
+            # Match JP training context defaults and the ordinary JP fee rules.
+            model = cls(
+                commission_rate=0.0, min_commission=0.0, stamp_duty=0.0,
+                transfer_fee=0.0, slippage=0.0005,
+            )
         if isinstance(ctx, dict):
             model = model._apply(ctx)
 

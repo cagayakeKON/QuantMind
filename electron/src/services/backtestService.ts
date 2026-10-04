@@ -35,6 +35,7 @@ export interface BacktestConfig {
   end_date: string;
   initial_capital: number;
   commission: number;
+  min_commission?: number;
   user_id: string;
   engine?: 'qlib';
   qlib_provider_uri?: string;
@@ -807,6 +808,7 @@ class BacktestService {
     };
 
     if (config.market) payload.market = config.market;
+    if (config.market === 'JP') payload.min_commission = config.min_commission ?? 0;
     if (config.market === 'JP' && config.jp_data_version) payload.jp_data_version = config.jp_data_version;
 
     if (config.model_id?.trim()) {

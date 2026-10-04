@@ -1,6 +1,6 @@
 import {beforeEach, describe, expect, it, vi} from 'vitest';
-import {replayCreateParams, replayVisibleSessions, validatedReplayUnits} from '../replayMarketContext';
-import {createSession, getExecutionRules, listStrategyTemplates, type ReplaySession, type ProposalItem} from '../replayService';
+import {replayCreateParams, replayVisibleSessions, replayProposalUnits} from '../replayMarketContext';
+import {createSession, listSessions, listStrategyTemplates, type ReplaySession, type ProposalItem} from '../replayService';
 import type {AppMarket} from '../../store/slices/uiSlice';
 
 const calls = vi.hoisted(() => ({get: vi.fn(), post: vi.fn()}));
@@ -21,32 +21,31 @@ describe('shared replay market requests', () => {
     await listStrategyTemplates(market);
     expect(calls.get).toHaveBeenCalledWith('/api/v1/replay/strategy-templates', {headers: {Authorization: 'Bearer token'}});
   });
-  it('removes unsupported stop-loss values from JP user and template inputs', () => {
+  it('preserves JP stop-loss values through the common replay contract', () => {
     const request = {...params, stop_loss_pct: 0.03, strategy_params: {topk: 5, stop_loss_pct: 0.08}};
-    expect(replayCreateParams(request, 'JP')).toEqual({...request, stop_loss_pct: null, strategy_params: {topk: 5, market: 'JP'}});
+    expect(replayCreateParams(request, 'JP')).toEqual({...request, market: 'JP', strategy_params: {...request.strategy_params, market: 'JP'}});
     expect(replayCreateParams(request, 'CN')).toBe(request);
     expect(request.strategy_params.stop_loss_pct).toBe(0.08);
   });
   it('sends JP through the same session API and retains original strategy inputs', async () => {
     await createSession(replayCreateParams(params, 'JP'));
-    expect(calls.post).toHaveBeenCalledWith('/api/v1/replay/sessions', {...params, stop_loss_pct: null, strategy_params: {topk: 5, market: 'JP'}}, {headers: {Authorization: 'Bearer token'}});
+    expect(calls.post).toHaveBeenCalledWith('/api/v1/replay/sessions', {...params, market: 'JP', strategy_params: {topk: 5, market: 'JP'}}, {headers: {Authorization: 'Bearer token'}});
     expect(params.strategy_params).toEqual({topk: 5});
     await listStrategyTemplates('JP');
     expect(calls.get).toHaveBeenCalledWith('/api/v1/replay/strategy-templates', {headers: {Authorization: 'Bearer token'}, params: {market: 'JP'}});
-    await getExecutionRules('jp');
-    expect(calls.get).toHaveBeenLastCalledWith('/api/v1/replay/sessions/jp/execution-rules', {headers: {Authorization: 'Bearer token'}});
+    await listSessions('JP');
+    expect(calls.get).toHaveBeenLastCalledWith('/api/v1/replay/sessions', {headers: {Authorization: 'Bearer token'}, params: {market: 'JP'}});
   });
   it('keeps all prior legacy sessions together and selects registered market sessions separately', () => {
     expect(replayVisibleSessions([cn,hk,jp], 'JP')).toEqual([jp]);
     expect(replayVisibleSessions([cn,hk,jp], 'CN')).toEqual([cn,hk]);
     expect(replayVisibleSessions([cn,hk], 'HK')).toEqual([cn,hk]);
   });
-  it('requires every security unit from the exact saved publication and proposal date', () => {
-    const proposal = {trade_date: '2026-09-28', proposals: [{symbol: 'JP72030'},{symbol: 'JP216A0'}] as ProposalItem[]};
-    const rules = {available: true, market: 'JP', trade_date: proposal.trade_date, data_version: 'saved', trading_units: {JP72030: 200, JP216A0: 1000}};
-    expect(validatedReplayUnits(rules, proposal, jp)).toEqual(rules.trading_units);
-    for (const change of [{available: false}, {market: 'CN'}, {trade_date: '2026-09-29'}, {data_version: 'new'}, {trading_units: {JP72030: 100}}, {trading_units: {JP72030: 0, JP216A0: 100}}, {trading_units: {JP72030: 100.5, JP216A0: 100}}]) {
-      expect(() => validatedReplayUnits({...rules,...change}, proposal, jp)).toThrow();
+  it('reads security units from the ordinary proposal without a private execution endpoint', () => {
+    const proposals = [{symbol: 'JP72030', trading_unit: 200}, {symbol: 'JP216A0', trading_unit: 1000}] as ProposalItem[];
+    expect(replayProposalUnits(proposals)).toEqual({JP72030: 200, JP216A0: 1000});
+    for (const unit of [undefined, 0, -1, 100.5]) {
+      expect(() => replayProposalUnits([{...proposals[0], trading_unit: unit}])).toThrow();
     }
   });
 });

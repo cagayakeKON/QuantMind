@@ -341,6 +341,9 @@ class SimpleSignal(Signal):
 
             def to_qlib_code(code: str) -> str:
                 code_str = str(code or "").strip().upper()
+                from backend.shared.stock_utils import StockCodeUtil
+                if StockCodeUtil.is_jp_symbol(code_str):
+                    return StockCodeUtil.to_qlib(code_str, market="JP")
                 # 已经是 SH/SZ/BJ 前缀格式
                 if len(code_str) == 8 and code_str[:2] in {"SH", "SZ", "BJ"}:
                     return code_str

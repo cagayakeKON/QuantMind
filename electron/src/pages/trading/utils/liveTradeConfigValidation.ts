@@ -1,4 +1,4 @@
-import type { LiveTradeConfig, SimulationExecutionInputs, TradingSession } from '../../../types/liveTrading';
+import type { LiveTradeConfig, TradingSession } from '../../../types/liveTrading';
 
 export interface ValidationIssue {
   field: string;
@@ -10,23 +10,26 @@ export const SESSION_RANGES: Record<TradingSession, [string, string]> = {
   PM: ['13:00', '15:00'],
 };
 
+export const sessionRangesForMarket = (market?: string): Record<TradingSession, [string, string]> =>
+  market === 'JP' ? {AM: ['09:00', '11:30'], PM: ['12:30', '15:30']} : SESSION_RANGES;
+
 function toHhmm(value: string): string {
   return value.length >= 5 ? value.slice(0, 5) : value;
 }
 
-function isTimeInRange(value: string, start: string, end: string, exclusiveEnd = false) {
+function isTimeInRange(value: string, start: string, end: string) {
   const hhmm = toHhmm(value);
-  return hhmm >= start && (exclusiveEnd ? hhmm < end : hhmm <= end);
+  return hhmm >= start && hhmm <= end;
 }
 
 /** 根据时点推断所属交易时段（可能为空，例如 12:00 午休）。 */
-export function sessionsForTime(time: string, rules?: SimulationExecutionInputs): TradingSession[] {
-  const ranges = rules?.session_ranges ?? SESSION_RANGES;
+export function sessionsForTime(time: string, market?: string): TradingSession[] {
+  const ranges = sessionRangesForMarket(market);
   const hhmm = toHhmm(time);
   const matched: TradingSession[] = [];
   (Object.keys(ranges) as TradingSession[]).forEach((session) => {
     const [start, end] = ranges[session];
-    if (isTimeInRange(hhmm, start, end, rules?.session_end_exclusive)) matched.push(session);
+    if (isTimeInRange(hhmm, start, end)) matched.push(session);
   });
   return matched;
 }
@@ -39,27 +42,27 @@ export function syncSessionsToTimes(
   current: TradingSession[],
   sellTime: string,
   buyTime: string,
-  rules?: SimulationExecutionInputs,
+  market?: string,
 ): TradingSession[] {
-  const ranges = rules?.session_ranges ?? SESSION_RANGES;
+  const ranges = sessionRangesForMarket(market);
   const sellOk = current.some((s) => {
     const [start, end] = ranges[s];
-    return isTimeInRange(sellTime, start, end, rules?.session_end_exclusive);
+    return isTimeInRange(sellTime, start, end);
   });
   const buyOk = current.some((s) => {
     const [start, end] = ranges[s];
-    return isTimeInRange(buyTime, start, end, rules?.session_end_exclusive);
+    return isTimeInRange(buyTime, start, end);
   });
   if (sellOk && buyOk) return current;
 
   const needed = Array.from(
-    new Set([...sessionsForTime(sellTime, rules), ...sessionsForTime(buyTime, rules)]),
+    new Set([...sessionsForTime(sellTime, market), ...sessionsForTime(buyTime, market)]),
   ) as TradingSession[];
   return needed.length > 0 ? needed : current;
 }
 
-export function validateLiveTradeConfig(config: LiveTradeConfig, rules?: SimulationExecutionInputs): ValidationIssue[] {
-  const ranges = rules?.session_ranges ?? SESSION_RANGES;
+export function validateLiveTradeConfig(config: LiveTradeConfig, market?: string): ValidationIssue[] {
+  const ranges = sessionRangesForMarket(market);
   const issues: ValidationIssue[] = [];
 
   if (config.schedule_type === 'interval' && !config.rebalance_days) {
@@ -90,7 +93,7 @@ export function validateLiveTradeConfig(config: LiveTradeConfig, rules?: Simulat
   if (config.sell_time) {
     const sellValid = enabledSessions.some((session) => {
       const [start, end] = ranges[session];
-      return isTimeInRange(config.sell_time, start, end, rules?.session_end_exclusive);
+      return isTimeInRange(config.sell_time, start, end);
     });
     if (!sellValid) {
       const labels = enabledSessions
@@ -106,7 +109,7 @@ export function validateLiveTradeConfig(config: LiveTradeConfig, rules?: Simulat
   if (config.buy_time) {
     const buyValid = enabledSessions.some((session) => {
       const [start, end] = ranges[session];
-      return isTimeInRange(config.buy_time, start, end, rules?.session_end_exclusive);
+      return isTimeInRange(config.buy_time, start, end);
     });
     if (!buyValid) {
       const labels = enabledSessions
@@ -117,10 +120,6 @@ export function validateLiveTradeConfig(config: LiveTradeConfig, rules?: Simulat
         message: `买入时间 ${toHhmm(config.buy_time)} 不在已选执行时段（${labels || '未选'}）内，请勾选「下午」或改回上午时点`,
       });
     }
-  }
-
-  if (rules && !rules.allowed_order_types.includes(config.order_type)) {
-    issues.push({ field: 'order_type', message: '当前行情源不支持此委托方式' });
   }
 
   if (
@@ -147,14 +146,4 @@ export function validateLiveTradeConfig(config: LiveTradeConfig, rules?: Simulat
   }
 
   return issues;
-}
-
-/** Defaults derive from the returned continuous window, without country rules. */
-export function datedSessionDefaults(sessions: TradingSession[], rules: SimulationExecutionInputs) {
-  const session = [...sessions].sort()[0] || 'AM';
-  const [start, end] = rules.session_ranges[session];
-  const [hour, minute] = start.split(':').map(Number);
-  const [endHour, endMinute] = end.split(':').map(Number);
-  const next = Math.min(hour * 60 + minute + 5, endHour * 60 + endMinute - 1);
-  return { sell_time: start, buy_time: `${String(Math.floor(next / 60)).padStart(2, '0')}:${String(next % 60).padStart(2, '0')}` };
 }

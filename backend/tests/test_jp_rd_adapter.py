@@ -296,3 +296,19 @@ def calculate_score():
     assert "ic" in metrics
     assert sentinel.read_bytes() == b"preserve unrelated task data"
     pd.testing.assert_frame_equal(pd.read_hdf(work / "daily_pv.h5"), frame)
+
+
+@pytest.mark.parametrize("invalid", ["contract", "manifest", "missing_quote"])
+def test_prepared_jp_adapter_readiness_rejects_corrupt_provider(jp_adapter, invalid):
+    provider = Path(jp_adapter.get_qlib_provider_uri())
+    assert jp_adapter.is_data_ready()
+    if invalid == "missing_quote":
+        (provider / "features/jp_topix/close.day.bin").unlink()
+    else:
+        path = provider / "research_source.json"
+        identity = json.loads(path.read_text())
+        identity["contract_version" if invalid == "contract" else "manifest_sha256"] = (
+            "invalid"
+        )
+        path.write_text(json.dumps(identity))
+    assert not jp_adapter.is_data_ready()

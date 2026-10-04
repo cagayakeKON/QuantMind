@@ -37,19 +37,14 @@ from backend.services.simulation.replay.analytics import (
 )
 from backend.services.simulation.replay.day_runner import ReplayDayRunner
 from backend.services.simulation.replay.proposal import validate_confirmed
-from backend.services.simulation.replay.persistence import load_checkpoint_account
-from backend.services.simulation.replay.session_context import (
-    ReplaySessionBusy,
-    lock_registered_session,
-    open_registered_session_context,
-    prepare_registered_session_inputs,
-    registered_session_provider,
-    session_context_for_row,
-)
 from backend.services.simulation.replay.signal_generator import (
     _find_pred_parquet,
 )
 from backend.services.simulation.services.ashare_matcher import MatchConfig
+from backend.services.simulation.services.market_rules import (
+    normalize_market,
+    rules_for,
+)
 from backend.services.simulation.services.local_market_data import (
     get_local_market_data,
 )
@@ -67,6 +62,16 @@ def _match_config_from_params(strategy_params: dict[str, Any]) -> MatchConfig:
     费率/滑点未指定时沿用 MatchConfig 的 A 股默认值。
     """
     defaults = MatchConfig(price_mode="open")
+    if normalize_market(strategy_params.get("market")).value == "JP":
+        rules = rules_for("JP")
+        defaults = MatchConfig(
+            price_mode="open",
+            commission_rate=rules.commission_rate,
+            commission_min=rules.commission_min,
+            stamp_duty_rate=rules.stamp_duty_rate,
+            transfer_fee_rate=0.0,
+            lot_size=rules.lot_size,
+        )
     return MatchConfig(
         price_mode=str(strategy_params.get("price_mode", defaults.price_mode)),
         slippage_bps=float(strategy_params.get("slippage_bps", defaults.slippage_bps)),
@@ -97,6 +102,7 @@ class CreateSessionRequest(BaseModel):
     name: str = Field(default="", max_length=128, description="会话名称")
     model_id: str | None = Field(default=None, description="模型 ID，空则用主模型")
     strategy_params: dict[str, Any] = Field(default_factory=dict)
+    market: str | None = None
     initial_cash: float = Field(default=1_000_000.0, gt=0)
     start_date: date = Field(description="回放起始日（含）")
     end_date: date = Field(description="回放结束日（含）")
@@ -150,6 +156,7 @@ class ProposalItem(BaseModel):
     est_amount: float | None = None
     stop_price: float | None = None
     gap_down: bool | None = None
+    trading_unit: int | None = None
 
 
 class ProposalResponse(BaseModel):
@@ -179,6 +186,8 @@ class SessionResponse(BaseModel):
     # 最近一个交易日的收盘估值快照（无推演记录时为 null），
     # 前端资产卡用它展示随推演日期变化的总资产/盈亏。
     latest_snapshot: dict[str, Any] | None = None
+    read_only: bool | None = None
+    currency: str | None = None
 
 
 class StepResponse(BaseModel):
@@ -197,8 +206,89 @@ class StepResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _require_standard_replay(row):
+    params = row.strategy_params or {}
+    if normalize_market(params.get("market")).value == "JP" and params.get(
+        "data_version"
+    ):
+        raise HTTPException(
+            409,
+            "Existing native-JPY replay is retained read-only; create a standard replay session.",
+        )
+
+
+async def _native_replay_read_only(db, row):
+    if normalize_market((row.strategy_params or {}).get("market")).value != "JP":
+        return False
+    if (row.strategy_params or {}).get("data_version"):
+        return True
+    from backend.services.simulation.services.legacy_jp_state import (
+        LegacyJPNativeState,
+        require_standard_replay_snapshot,
+    )
+
+    try:
+        await require_standard_replay_snapshot(db, row.session_id)
+    except LegacyJPNativeState:
+        return True
+    return False
+
+
+async def _restore_jp_replay_account(db, row):
+    """Restore the ordinary replay cache from its own persisted closing snapshot."""
+    if normalize_market((row.strategy_params or {}).get("market")).value != "JP":
+        return
+    from backend.services.simulation.models.replay import ReplayEquitySnapshot
+    from backend.services.simulation.services.legacy_jp_state import is_legacy_jp_native
+
+    accounts = ReplayAccountManager(row.session_id, market="JP")
+    cached = await accounts.get()
+    from backend.services.simulation.services.legacy_jp_state import (
+        LegacyJPNativeState,
+        require_standard_replay_snapshot,
+    )
+
+    try:
+        await require_standard_replay_snapshot(db, row.session_id)
+    except LegacyJPNativeState as exc:
+        raise HTTPException(409, str(exc)) from exc
+    snapshot = (
+        await db.execute(
+            select(ReplayEquitySnapshot)
+            .where(ReplayEquitySnapshot.session_id == row.session_id)
+            .order_by(ReplayEquitySnapshot.trade_date.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if is_legacy_jp_native(cached):
+        raise HTTPException(409, "Existing native-JPY replay is retained read-only")
+    if cached:
+        return
+    if snapshot is None:
+        if row.cursor_date is not None:
+            raise HTTPException(
+                409, "Replay closing snapshot is missing; existing history was retained"
+            )
+        await accounts.init(float(row.initial_cash))
+        return
+    accounts.write(
+        {
+            "cash": float(snapshot.cash),
+            "available_cash": float(snapshot.cash),
+            "frozen_cash": 0.0,
+            "market_value": float(snapshot.market_value),
+            "total_asset": float(snapshot.total_asset),
+            "positions": snapshot.positions or {},
+            "market": "JP",
+        }
+    )
+
+
 def _session_to_response(
-    s: ReplaySession, latest_snapshot: dict[str, Any] | None = None
+    s: ReplaySession,
+    latest_snapshot: dict[str, Any] | None = None,
+    *,
+    native_read_only: bool = False,
 ) -> SessionResponse:
     return SessionResponse(
         session_id=str(s.session_id),
@@ -218,6 +308,8 @@ def _session_to_response(
         error_message=s.error_message,
         strategy_params=s.strategy_params or {},
         latest_snapshot=latest_snapshot,
+        read_only=True if native_read_only else None,
+        currency="JPY" if native_read_only else None,
     )
 
 
@@ -424,46 +516,35 @@ async def create_session(
     # 注意不能用 signal_generator._resolve_model_dir —— 它对无效 id 会静默
     # 回落到默认模型，用户以为在跑自选模型，实际跑的是默认模型。
     # code 模式模型可选（策略代码自带 universe，不依赖模型分数）。
-    try:
-        registered_inputs = await prepare_registered_session_inputs(req, auth)
-        registered_context = (
-            await asyncio.to_thread(
-                open_registered_session_context,
-                registered_inputs.params,
-                reader=registered_inputs.reader,
-            )
-            if registered_inputs
-            else None
+    selected_market = normalize_market(
+        req.market or req.strategy_params.get("market")
+    ).value
+    effective_model_id = req.model_id
+    if selected_market == "JP" and mode == "signals" and not effective_model_id:
+        from backend.shared.model_registry import model_registry_service
+
+        default_model = await model_registry_service.get_default_model(
+            tenant_id=auth.tenant_id, user_id=auth.user_id, market="JP"
         )
-        if registered_context:
-            # Creation stores initial_cash in the existing PG session. The first
-            # execution restores it there; no uncommitted financial cache is made.
-            await asyncio.to_thread(
-                registered_context.cash_rules.initialize, req.initial_cash
-            )
-    except NotImplementedError as exc:
-        raise HTTPException(422, str(exc)) from None
-    except (ValueError, LookupError, OSError) as exc:
-        raise HTTPException(400, str(exc)) from None
+        metadata = (default_model or {}).get("metadata_json") or {}
+        if (
+            not isinstance(metadata, dict)
+            or str(metadata.get("market", "CN")).upper() != "JP"
+            or not (default_model or {}).get("model_id")
+        ):
+            raise HTTPException(400, "请先选择日本市场模型或设置日本市场默认模型")
+        effective_model_id = default_model["model_id"]
     resolved_model_dir: Path | None = None
-    if registered_inputs:
-        resolved_model_dir = registered_inputs.model_dir
-    elif req.model_id:
+    if effective_model_id:
         resolved_model_dir = await _resolve_model_dir_for_user(
-            model_id=req.model_id,
+            model_id=effective_model_id,
             tenant_id=auth.tenant_id,
             user_id=auth.user_id,
         )
 
-    market_data = (
-        registered_inputs.reader if registered_inputs else get_local_market_data()
-    )
+    market_data = get_local_market_data(selected_market)
     # 目录枚举虽已降到毫秒级，仍是同步磁盘 IO，放线程里跑，不占用事件循环
-    sessions = (
-        registered_context.sessions
-        if registered_context
-        else await asyncio.to_thread(market_data._sessions)
-    )
+    sessions = await asyncio.to_thread(market_data._sessions)
     if not sessions:
         raise HTTPException(503, "本地行情数据不可用")
 
@@ -475,9 +556,11 @@ async def create_session(
 
     # 固化模型目录到 strategy_params（下划线前缀，与策略参数区分）：
     # 推演时信号直读器按它定位模型目录的 pred.parquet，无需再解析注册表。
-    strategy_params = dict(
-        registered_inputs.params if registered_inputs else req.strategy_params
-    )
+    strategy_params = dict(req.strategy_params)
+    if selected_market == "JP":
+        strategy_params["market"] = selected_market
+        for obsolete in ("data_version", "prediction_sha256", "_model_data_version"):
+            strategy_params.pop(obsolete, None)
     if resolved_model_dir is not None:
         strategy_params["_model_dir"] = str(resolved_model_dir)
 
@@ -521,7 +604,7 @@ async def create_session(
         tenant_id=auth.tenant_id,
         user_id=int(auth.user_id) if auth.user_id.isdigit() else 0,
         name=req.name,
-        model_id=registered_inputs.model_id if registered_inputs else req.model_id,
+        model_id=effective_model_id,
         strategy_params=strategy_params,
         initial_cash=req.initial_cash,
         start_date=req.start_date,
@@ -538,9 +621,8 @@ async def create_session(
     await db.flush()
 
     # 初始化回放账户
-    if registered_context is None:
-        accounts = ReplayAccountManager(session_id=row.session_id)
-        await accounts.init(initial_cash=req.initial_cash)
+    accounts = ReplayAccountManager(session_id=row.session_id, market=selected_market)
+    await accounts.init(initial_cash=req.initial_cash)
 
     await db.commit()
 
@@ -551,6 +633,7 @@ async def create_session(
 async def list_sessions(
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_db),
+    market: str | None = None,
 ):
     """列出当前用户的回放会话。"""
     uid = int(auth.user_id) if auth.user_id.isdigit() else 0
@@ -568,8 +651,22 @@ async def list_sessions(
         .scalars()
         .all()
     )
+    if market is not None:
+        selected = normalize_market(market)
+        rows = [
+            r
+            for r in rows
+            if normalize_market((r.strategy_params or {}).get("market")) == selected
+        ]
     snaps = await _latest_snapshots(db, [r.session_id for r in rows])
-    return [_session_to_response(r, snaps.get(r.session_id)) for r in rows]
+    return [
+        _session_to_response(
+            r,
+            snaps.get(r.session_id),
+            native_read_only=await _native_replay_read_only(db, r),
+        )
+        for r in rows
+    ]
 
 
 async def _load_owned_session(
@@ -610,7 +707,11 @@ async def get_session_detail(
     """查看会话详情（含最新估值快照）。"""
     row = await _load_owned_session(db, session_id, auth)
     snaps = await _latest_snapshots(db, [session_id])
-    return _session_to_response(row, snaps.get(session_id))
+    return _session_to_response(
+        row,
+        snaps.get(session_id),
+        native_read_only=await _native_replay_read_only(db, row),
+    )
 
 
 @router.post("/sessions/{session_id}/propose", response_model=ProposalResponse)
@@ -625,13 +726,8 @@ async def propose_day(
     刷新页面后提案变化（信号虽固定，但账户可能已被其他操作改动）。
     """
     row = await _load_owned_session(db, session_id, auth)
-    if registered_session_provider(row.strategy_params):
-        try:
-            row = await lock_registered_session(db, row)
-        except ReplaySessionBusy:
-            await db.rollback()
-            raise HTTPException(409, "正在执行中，请稍候") from None
-    context = await session_context_for_row(row)
+    _require_standard_replay(row)
+    await _restore_jp_replay_account(db, row)
 
     if row.auto_trade:
         raise HTTPException(400, "自动模式无需提案，请直接调用 /step")
@@ -654,22 +750,15 @@ async def propose_day(
         return ProposalResponse(
             trade_date=cached.get("trade_date", row.next_date.isoformat()),
             signal_count=int(cached.get("signal_count") or 0),
-            proposals=[
-                ProposalItem(**p)
-                for p in (
-                    context.public_orders(cached.get("proposals", []))
-                    if context
-                    else cached.get("proposals", [])
-                )
-            ],
+            proposals=[ProposalItem(**p) for p in cached.get("proposals", [])],
         )
 
-    accounts = (
-        context.accounts(session_id)
-        if context
-        else ReplayAccountManager(session_id=session_id)
+    market = normalize_market((row.strategy_params or {}).get("market")).value
+    accounts = ReplayAccountManager(session_id=session_id, market=market)
+    runner = ReplayDayRunner(
+        market_data=get_local_market_data(market),
+        match_config=_match_config_from_params(row.strategy_params or {}),
     )
-    runner = context.runner(row.next_date) if context else ReplayDayRunner()
     try:
         out = await runner.propose_day(
             db=db,
@@ -700,55 +789,8 @@ async def propose_day(
     return ProposalResponse(
         trade_date=out["trade_date"],
         signal_count=out["signal_count"],
-        proposals=[
-            ProposalItem(**p)
-            for p in (
-                context.public_orders(out["proposals"]) if context else out["proposals"]
-            )
-        ],
+        proposals=[ProposalItem(**p) for p in out["proposals"]],
     )
-
-
-@router.get("/sessions/{session_id}/execution-rules")
-async def get_execution_rules(
-    session_id: uuid.UUID,
-    auth: AuthContext = Depends(get_auth_context),
-    db: AsyncSession = Depends(get_db),
-):
-    """Dated input metadata for the common manual form; no account writes."""
-    row = await _load_owned_session(db, session_id, auth)
-    context = await session_context_for_row(row)
-    if context is None:
-        return {"available": False}
-    if row.next_date is None or not row.pending_orders:
-        raise HTTPException(400, "请先生成当日提案")
-    if row.pending_orders.get("trade_date") != row.next_date.isoformat():
-        raise HTTPException(409, "提案与交易日不一致，请刷新会话")
-
-    def read_units():
-        execution = context.execution(row.next_date)
-        symbols = [
-            execution.symbol(p["symbol"])
-            for p in row.pending_orders.get("proposals", [])
-        ]
-        bars = context.reader.load_date(row.next_date, symbols) if symbols else {}
-        from backend.shared.stock_utils import StockCodeUtil
-
-        return {
-            StockCodeUtil.to_prefix(
-                symbol, market=context.cash_rules.market
-            ): execution.trading_unit(symbol, bars)
-            for symbol in symbols
-        }
-
-    return {
-        "available": True,
-        "market": context.cash_rules.market,
-        "currency": registered_session_provider(row.strategy_params).currency,
-        "trade_date": row.next_date.isoformat(),
-        "data_version": context.reader.data_version,
-        "trading_units": await asyncio.to_thread(read_units),
-    }
 
 
 @router.post("/sessions/{session_id}/step", response_model=StepResponse)
@@ -766,13 +808,9 @@ async def step_session(
     - auto_trade=false + confirmed → 服务端复校验后按清单执行
     """
     row = await _load_owned_session(db, session_id, auth)
-    if registered_session_provider(row.strategy_params):
-        try:
-            row = await lock_registered_session(db, row)
-        except ReplaySessionBusy:
-            await db.rollback()
-            raise HTTPException(409, "正在执行中，请勿重复点击") from None
-    context = await session_context_for_row(row)
+    _require_standard_replay(row)
+    await _restore_jp_replay_account(db, row)
+    market = normalize_market((row.strategy_params or {}).get("market")).value
 
     if row.status == ReplayStatus.STEPPING:
         raise HTTPException(409, "正在执行中，请勿重复点击")
@@ -806,47 +844,32 @@ async def step_session(
             raise HTTPException(400, "手动模式请先调用 /propose 生成提案")
         if confirmed_in is None:
             raise HTTPException(400, "手动模式需提供 confirmed 确认清单")
+        if market == "JP":
+            from backend.shared.stock_utils import StockCodeUtil
+
+            confirmed_in = [
+                dict(c, symbol=StockCodeUtil.to_suffix(c.get("symbol", "")))
+                for c in confirmed_in
+            ]
         proposals = (row.pending_orders or {}).get("proposals") or []
-        if context:
-            account_data = await load_checkpoint_account(
-                db, row, context.accounts(session_id)
-            )
-            rules = await asyncio.to_thread(
-                context.confirmation, row.next_date, account_data
-            )
-            accepted, validation_rejected = await asyncio.to_thread(
-                validate_confirmed,
-                confirmed=confirmed_in,
-                proposals=proposals,
-                account_data=account_data,
-                rules=rules,
-            )
-        else:
-            account_data = await ReplayAccountManager(session_id=session_id).get() or {}
-            accepted, validation_rejected = validate_confirmed(
-                confirmed=confirmed_in,
-                proposals=proposals,
-                account_data=account_data,
-                lot_size=int((row.strategy_params or {}).get("lot_size", 100)),
-            )
+        account_data = (
+            await ReplayAccountManager(session_id=session_id, market=market).get() or {}
+        )
+        accepted, validation_rejected = validate_confirmed(
+            confirmed=confirmed_in,
+            proposals=proposals,
+            account_data=account_data,
+            lot_size=int((row.strategy_params or {}).get("lot_size", 100)),
+        )
 
     prev_status = row.status
     row.status = ReplayStatus.STEPPING
-    if context is None:
-        await db.commit()
+    await db.commit()
 
     try:
-        accounts = (
-            context.accounts(session_id)
-            if context
-            else ReplayAccountManager(session_id=session_id)
-        )
-        runner = context.runner(row.next_date) if context else ReplayDayRunner()
-        cfg = (
-            context.cash_rules.match_config
-            if context
-            else _match_config_from_params(row.strategy_params or {})
-        )
+        accounts = ReplayAccountManager(session_id=session_id, market=market)
+        runner = ReplayDayRunner(market_data=get_local_market_data(market))
+        cfg = _match_config_from_params(row.strategy_params or {})
         if manual:
             result = await runner.execute_day(
                 db=db,
@@ -892,11 +915,8 @@ async def step_session(
         result.rejected = validation_rejected + result.rejected
 
     # 更新游标
-    if context:
-        sessions = context.sessions
-    else:
-        market_data = get_local_market_data()
-        sessions = await asyncio.to_thread(market_data._sessions)
+    market_data = get_local_market_data(market)
+    sessions = await asyncio.to_thread(market_data._sessions)
     row.cursor_date = row.next_date
     row.sessions_done += 1
     row.next_date = _compute_next_date(
@@ -909,15 +929,11 @@ async def step_session(
     return StepResponse(
         trade_date=result.trade_date.isoformat(),
         signal_count=result.signal_count,
-        filled=context.public_orders(result.filled) if context else result.filled,
-        rejected=context.public_orders(result.rejected) if context else result.rejected,
-        stop_loss_fills=context.public_orders(result.stop_loss_fills)
-        if context
-        else result.stop_loss_fills,
-        account=context.public_account(result.account) if context else result.account,
-        snapshot=context.public_account(result.snapshot)
-        if context
-        else result.snapshot,
+        filled=result.filled,
+        rejected=result.rejected,
+        stop_loss_fills=result.stop_loss_fills,
+        account=result.account,
+        snapshot=result.snapshot,
         error=result.error,
     )
 
@@ -930,8 +946,11 @@ async def delete_session(
 ):
     """丢弃会话：CASCADE 删除所有关联数据 + 清除 Redis 账户。"""
     row = await _load_owned_session(db, session_id, auth)
+    _require_standard_replay(row)
 
     # 清除 Redis 账户
+    if await _native_replay_read_only(db, row):
+        raise HTTPException(409, "Existing native-JPY replay is retained read-only")
     accounts = ReplayAccountManager(session_id=session_id)
     accounts.drop()
 
@@ -1244,13 +1263,11 @@ async def list_strategy_templates(
         raise HTTPException(500, f"读取策略模板失败: {exc}") from None
 
     out: list[StrategyTemplateResponse] = []
-    selected_adapter = "a_share"
-    provider = registered_session_provider({"market": market})
-    if provider and provider.strategy_template_market:
-        selected_adapter = provider.strategy_template_market
     for tpl in templates:
-        # 未注册市场沿用原模板口径；空 markets 仍表示全市场适用。
-        if tpl.markets and selected_adapter not in tpl.markets:
+        template_market = (
+            "japan" if normalize_market(market).value == "JP" else "a_share"
+        )
+        if tpl.markets and template_market not in tpl.markets:
             continue
         out.append(
             StrategyTemplateResponse(

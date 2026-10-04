@@ -1,11 +1,8 @@
-"""Map recorded JP cash results to the existing analysis data contracts."""
-
-from functools import partial
-from types import SimpleNamespace
+"""Publication-bound data readers for the original Qlib analysis services."""
 
 import numpy as np
 import pandas as pd
-
+from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
 from backend.shared.stock_utils import StockCodeUtil
 
 
@@ -30,160 +27,53 @@ def recorded_version(result):
     return versions.pop()
 
 
-def read_benchmark_prices(result, benchmark_id, start_date, end_date):
-    """Expose saved TOPIX levels to the shared price-return calculation.
+def _recorded_hub(result):
+    return LOCAL_MARKET_PROVIDERS["JP"].open(recorded_version(result))
 
-    benchmark_value is initial capital times the TOPIX price-index ratio,
-    rather than a raw closing price. Its constant scale preserves pct_change.
-    """
-    recorded_version(result)
-    if str(benchmark_id).upper() != "TOPIX" or result.benchmark_symbol != "TOPIX":
+
+def read_benchmark_prices(result, benchmark_id, start_date, end_date):
+    """Read TOPIX closes from the original run's immutable publication."""
+    aliases = {"TOPIX", "JP_TOPIX", "TOPIX.JP", "JPTOPIX"}
+    if str(benchmark_id).upper() not in aliases:
         raise ValueError("Requested benchmark does not match the recorded JP result")
-    frame = pd.DataFrame(result.equity_curve or [])
-    if frame.empty or not {"date", "benchmark_value"}.issubset(frame.columns):
-        raise ValueError("Recorded JP benchmark prices are unavailable")
-    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
-    values = pd.to_numeric(frame["benchmark_value"], errors="coerce")
-    if frame["date"].isna().any() or frame["date"].duplicated().any():
-        raise ValueError("Recorded JP benchmark dates are invalid")
-    if not np.isfinite(values).all() or (values <= 0).any():
-        raise ValueError("Recorded JP benchmark prices are invalid")
-    frame["$close"] = values
-    frame = frame.sort_values("date")
-    frame = frame[frame.date.between(pd.Timestamp(start_date), pd.Timestamp(end_date))]
-    frame["instrument"] = "jp_topix"
-    return frame.set_index(["instrument", "date"])[["$close"]].rename_axis(
-        index={"date": "datetime"}
+    if str(result.benchmark_symbol).upper() not in aliases:
+        raise ValueError("Requested benchmark does not match the recorded JP result")
+    frame = _recorded_hub(result).fetch_index_kline(
+        "TOPIX", pd.Timestamp(start_date).date(), pd.Timestamp(end_date).date()
     )
+    if frame.empty:
+        raise ValueError("Recorded JP benchmark prices are unavailable")
+    frame["datetime"] = pd.to_datetime(frame["trade_date"])
+    frame["$close"] = pd.to_numeric(frame["close"], errors="raise")
+    if frame.datetime.duplicated().any() or not np.isfinite(frame["$close"]).all():
+        raise ValueError("Recorded JP benchmark prices are invalid")
+    frame["instrument"] = "jp_topix"
+    return frame.set_index(["instrument", "datetime"])[["$close"]].sort_index()
 
 
 def read_position_info(result, position):
-    """The standard holdings analysis reads names/sectors from the saved report."""
+    """Resolve ordinary Qlib positions against the run's dated securities master."""
     version = recorded_version(result)
-    saved = (result.advanced_stats or {}).get("position_info") or {}
-    if saved.get("data_version") != version:
-        raise ValueError("Recorded JP position information version is unavailable")
+    saved = (result.advanced_stats or {}).get("position_info")
     symbol = StockCodeUtil.to_prefix(position["symbol"], market="JP")
-    info = saved.get("by_date", {}).get(position.get("date"), {}).get(symbol)
-    if info is None:
+    if saved is not None:
+        if saved.get("data_version") != version:
+            raise ValueError("Recorded JP position information version is unavailable")
+        info = saved.get("by_date", {}).get(position.get("date"), {}).get(symbol)
+        if info is None:
+            raise ValueError("Recorded JP position information is unavailable")
+        return info
+    day = pd.Timestamp(position["date"]).date()
+    master = _recorded_hub(result).fetch_stock_list(day)
+    suffix = StockCodeUtil.to_suffix(symbol, market="JP")
+    rows = master[master.symbol.eq(suffix)] if not master.empty else master
+    if rows.empty:
         raise ValueError("Recorded JP position information is unavailable")
-    return info
-
-
-def cash_position_snapshot(state):
-    """A real Qlib Position uses actual raw shares, marks and cash from the ledger."""
-    from qlib.backtest.position import Position
-    from .strategy_snapshot import executed_account_snapshot
-
-    snapshot = executed_account_snapshot(state)
-    return Position(cash=snapshot["cash"], position_dict=snapshot["positions"])
-
-
-def public_positions(history):
-    """Use the public position extraction/weight algorithm; normalize at the boundary."""
-    from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
-
-    positions = RiskAnalyzer._build_positions_list({"1day": (None, history)})
-    return [
-        {**row, "symbol": StockCodeUtil.to_prefix(row["symbol"], market="JP")}
-        for row in positions
-    ]
-
-
-def public_trades(fills):
-    """Add public date/fee/PnL fields to copies without changing ledger fields."""
-    return [
-        {
-            **fill,
-            "symbol": StockCodeUtil.to_prefix(fill["symbol"], market="JP"),
-            "action": fill["side"].lower(),
-            "date": fill["trade_date"],
-            "commission": float(fill["fee"]),
-            **(
-                {"pnl": float(fill["realized_pnl"])}
-                if fill.get("realized_pnl") is not None
-                else {}
-            ),
-        }
-        for fill in fills
-    ]
-
-
-def public_legacy_result_view(payload):
-    """Project old cash reports without rewriting saved records or their metrics."""
-    config = payload.get("config") or {}
-    if config.get("strategy_type") != "jp_cash_topk":
-        return payload
-    updates = {}
-    trades = payload.get("trades") or []
-    if trades and not all("action" in row and "date" in row for row in trades):
-        updates["trades"] = public_trades(trades)
-    positions = payload.get("positions") or []
-    if positions and not all("date" in row and "amount" in row for row in positions):
-        saved = payload.get("advanced_stats") or {}
-        day = config.get("end_date")
-        if not day or "cash_funds" not in saved:
-            raise ValueError("Recorded JP final position valuation is unavailable")
-        original = {row["symbol"]: row for row in positions}
-        state = {"positions": original, "cash_funds": saved["cash_funds"]}
-        rows = public_positions({pd.Timestamp(day): cash_position_snapshot(state)})
-        updates["positions"] = [{**original[row["symbol"]], **row} for row in rows]
-        # Old reports did not record names/sectors. Let the existing parser use
-        # its original code/unknown-sector defaults; never query current master.
-        if "position_info" not in saved:
-            version = recorded_version(
-                SimpleNamespace(
-                    market=payload.get("market"),
-                    config=config,
-                    data_version=payload.get("data_version"),
-                )
-            )
-            updates["advanced_stats"] = {
-                **saved,
-                "position_info": {
-                    "data_version": version,
-                    "by_date": {day: {row["symbol"]: {} for row in rows}},
-                },
-            }
-    return {**payload, **updates} if updates else payload
-
-
-def public_factor_metrics(result, request, pred, strategy_context):
-    """Evaluate close-to-next-close labels on the pinned adjusted research data."""
-    from backend.services.engine.qlib_app.services.factor_analysis_service import (
-        FactorAnalysisService,
-    )
-    from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
-
-    if pred is None or pred.empty:
-        return {"factor_metrics": None, "stratified_returns": None}
-    if strategy_context is None:
-        return {"factor_metrics": None, "stratified_returns": None}
-    if strategy_context.spec.data_version != recorded_version(result):
-        raise ValueError("Factor analysis provider does not match the recorded version")
-    if strategy_context.execution_day != pd.Timestamp(request.end_date):
-        raise ValueError("Factor analysis requires the completed execution interval")
-    instruments = pred.index.get_level_values("instrument").unique().tolist()
-    # Execution quotes remain raw. Post-execution research uses the same
-    # immutable publication's split-adjusted prices, without re-registering D
-    # or relaxing the strategy's causal guard. Preserve the public label's
-    # close-to-next-session-close interval (not the training open-price label).
-    label = adjusted_close_labels(
-        recorded_version(result), instruments, request.start_date, request.end_date
-    )
-    if label is None or label.empty:
-        return {"factor_metrics": None, "stratified_returns": None}
-    label = label.reorder_levels(pred.index.names)
-    metrics = FactorAnalysisService.calculate_ic_metrics(pred, label)
-    groups = FactorAnalysisService.calculate_stratified_returns(pred, label)
+    row = rows.iloc[-1]
     return {
-        "factor_metrics": {
-            key: RiskAnalyzer._clean_nan(value) for key, value in metrics.items()
-        },
-        "stratified_returns": [
-            {key: RiskAnalyzer._clean_nan(value) for key, value in row.items()}
-            for row in groups
-        ],
+        name: row[field]
+        for name, field in (("name", "stock_name"), ("industry", "industry_name"))
+        if pd.notna(row.get(field))
     }
 
 
@@ -226,73 +116,48 @@ def adjusted_close_labels(version, instruments, start, end):
     return pd.concat(frames).set_index(["instrument", "datetime"])
 
 
-def save_style_features(result, request, context):
-    """Record inputs for the existing style algorithm, never fabricated exposures."""
-    from pathlib import Path
-    from backend.services.engine.qlib_app.services.style_attribution_service import (
-        StyleAttributionService,
-    )
-
-    saved = {"data_version": recorded_version(result), "available": False}
-    if not result.positions or context is None:
-        return {**saved, "reason": "No recorded holdings or market data context"}
-    if context.spec.data_version != saved["data_version"]:
-        raise ValueError("Style provider does not match the recorded version")
-    if context.execution_day != pd.Timestamp(request.end_date):
-        raise ValueError("Style inputs require the completed execution interval")
-    fields = list(StyleAttributionService.STYLE_FACTORS.values())
-    unavailable = []
-    try:
-        context.validate_fields(fields)
-    except ValueError as exc:
-        unavailable.append(str(exc))
-    # TOPIX supplies price levels, not a constituent/volume series. Do not feed
-    # missing benchmark fields to the public algorithm's zero-valued fallback.
-    volume = Path(context.spec.provider_uri) / "features/jp_topix/volume.day.bin"
-    if not volume.is_file():
-        unavailable.append("TOPIX volume is unavailable")
-    if unavailable:
-        return {**saved, "reason": "; ".join(unavailable)}
-    symbols = list(dict.fromkeys(row["symbol"] for row in result.positions))
-    if request.benchmark not in symbols:
-        symbols.append(request.benchmark)
-    day = max(row["date"] for row in result.positions)
-    frame = context._read_provider_features(
-        symbols, [context.mapper(code) for code in symbols], fields, day, day
-    )
-    if frame is None or frame.empty or not set(fields).issubset(frame.columns):
-        return {**saved, "reason": "Recorded style inputs are unavailable"}
-    if not np.isfinite(frame[fields].to_numpy(dtype=float)).all():
-        return {**saved, "reason": "Recorded style inputs are incomplete"}
-    if set(frame.index.get_level_values("instrument")) != set(symbols):
-        return {**saved, "reason": "Recorded style instruments are incomplete"}
-    dates = frame.index.get_level_values("datetime")
-    if (
-        not frame.index.is_unique
-        or len(frame) != len(symbols)
-        or not (dates == pd.Timestamp(day)).all()
-    ):
-        return {**saved, "reason": "Recorded style dates are incomplete"}
-    rows = frame.reset_index()
-    rows["datetime"] = rows["datetime"].map(
-        lambda value: str(pd.Timestamp(value).date())
-    )
-    return {
-        **saved,
-        "available": True,
-        "fields": fields,
-        "rows": rows[["instrument", "datetime", *fields]].to_dict("records"),
-    }
-
-
 def create_style_feature_loader(result):
     """The public style API consumes only the recorded, versioned inputs."""
     version = recorded_version(result)
     saved = (result.advanced_stats or {}).get("style_features")
     if saved is not None and saved.get("data_version") != version:
         raise ValueError("Recorded JP style input versions do not match")
-    if result.style_attribution and (not saved or not saved.get("available")):
-        raise ValueError("Recorded JP style attribution has no matching source")
+
+    if saved is None:
+        from backend.services.engine.rd_agent.data_pipeline.jp_provider import (
+            prepare_jp_rd_provider,
+        )
+        from backend.services.engine.rd_agent.data_pipeline.research_reader import (
+            read_research_features,
+        )
+        from backend.services.engine.rd_agent.market_adapters.base import DataConfig
+
+        hub = _recorded_hub(result)
+        provider = prepare_jp_rd_provider(
+            hub._publication_root, publication=hub.data_dir
+        )
+
+        def read_native(instruments, fields, start_time=None, end_time=None):
+            codes = {
+                (
+                    "jp_topix"
+                    if str(code).upper() in {"TOPIX", "JP_TOPIX", "TOPIX.JP", "JPTOPIX"}
+                    else StockCodeUtil.to_qlib(code, market="JP")
+                ): code
+                for code in instruments
+            }
+            frame = read_research_features(
+                DataConfig(provider_uri=str(provider), market=list(codes)),
+                "cn",
+                str(pd.Timestamp(start_time).date()),
+                str(pd.Timestamp(end_time).date()),
+                fields=list(fields),
+            )
+            frame = frame.reset_index()
+            frame["instrument"] = frame["instrument"].map(codes)
+            return frame.set_index(["instrument", "datetime"])
+
+        return read_native
 
     frame = pd.DataFrame()
     if saved and saved.get("available"):
@@ -333,86 +198,3 @@ def create_style_feature_loader(result):
         return selected.set_index(["instrument", "datetime"])[fields].copy()
 
     return read
-
-
-def public_report_metrics(result, request):
-    """Map cash valuations to the original public report metric algorithms."""
-    from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
-
-    equity = pd.DataFrame(result.equity_curve).set_index("date")
-    equity.index = pd.to_datetime(equity.index)
-    # The saved first row is the prior-session initial balance, not an executed
-    # session. Keep it in the curve, but supply actual session rows to the public
-    # report's existing period-counting and net-equity metrics.
-    report = pd.DataFrame(
-        {
-            "account": equity["value"].iloc[1:],
-            "return": equity["value"].pct_change().iloc[1:],
-        }
-    )
-    effective_request = request.model_copy(
-        update={"risk_free_rate": result.config["risk_free_rate"]}
-    )
-    performance = RiskAnalyzer._extract_performance_metrics(report, effective_request)
-    daily_returns = performance.pop("daily_returns")
-    # The shared kernel derives net returns from account.pct_change(); its
-    # report normally includes the initial account row. Our actual-session
-    # report excludes that row for period counting, so use the already correct
-    # net-return series with the same sample/annualization/Sharpe definitions.
-    volatility = (
-        float(daily_returns.std(ddof=1) * np.sqrt(252))
-        if len(daily_returns) > 1
-        else None
-    )
-    performance["volatility"] = RiskAnalyzer._clean_nan(volatility)
-    annual = performance["annual_return"]
-    performance["sharpe_ratio"] = (
-        RiskAnalyzer._clean_nan(
-            (annual - effective_request.risk_free_rate) / volatility
-        )
-        if annual is not None and volatility is not None and volatility > 0
-        else None
-    )
-    # The cash report keeps its initial balance; its signed drawdown already
-    # comes from the same public curve algorithm.
-    performance["max_drawdown"] = min(row["drawdown"] for row in result.drawdown_curve)
-    performance["annual_return"] = performance["annual_return"] or 0.0
-    performance["sharpe_ratio"] = performance["sharpe_ratio"] or 0.0
-    risk = RiskAnalyzer._compute_risk_metrics(
-        daily_returns=daily_returns,
-        benchmark=request.benchmark,
-        start_date=str(equity.index[0].date()),
-        end_date=request.end_date,
-        annual_return=performance["annual_return"],
-        risk_free_rate=effective_request.risk_free_rate,
-        price_loader=partial(read_benchmark_prices, result),
-    )
-    trade = RiskAnalyzer._calculate_trade_stats(result.trades, daily_returns)
-    # Preserve the common calculation, while exposing its non-finite values as
-    # JSON null in these new cash-report fields, as the public helper specifies.
-    trade = {key: RiskAnalyzer._clean_nan(value) for key, value in trade.items()}
-    advanced = RiskAnalyzer._calculate_advanced_trade_stats(
-        result.trades, daily_returns
-    )
-    from backend.services.engine.qlib_app.services.order_generation_service import (
-        OrderGenerationService,
-    )
-
-    last_date = max(
-        (row["date"] for row in result.positions or [] if "date" in row), default=None
-    )
-    targets = [row for row in result.positions or [] if row.get("date") == last_date]
-    rebalance = (
-        OrderGenerationService.generate_rebalance_instructions(
-            target_positions=targets, total_assets=float(equity["value"].iloc[-1])
-        )
-        if targets
-        else None
-    )
-    return {
-        **performance,
-        **risk,
-        **trade,
-        "rebalance_suggestions": rebalance,
-        "advanced_stats": {**result.advanced_stats, **advanced},
-    }

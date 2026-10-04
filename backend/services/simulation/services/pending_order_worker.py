@@ -18,7 +18,6 @@ from backend.services.simulation.services.execution_engine import (
     SimulationExecutionEngine,
 )
 from backend.services.simulation.services.order_service import SimOrderService
-from backend.services.simulation.services.dated_execution import ordinary_cash_order_rejection
 from backend.services.simulation.services.simulation_manager import (
     SimulationAccountManager,
 )
@@ -60,6 +59,19 @@ class SimulationPendingOrderWorker:
             engine = SimulationExecutionEngine(session, manager)
 
             for projection_order in rows:
+                from backend.services.simulation.services.market_rules import infer_market
+                from backend.services.simulation.services.legacy_jp_state import LegacyJPNativeState, read_existing_jp_account, require_standard_account
+
+                if infer_market(projection_order.symbol).value == "JP":
+                    try:
+                        await require_standard_account(
+                            session, projection_order.tenant_id, projection_order.user_id,
+                            cached=read_existing_jp_account(
+                                redis_client, projection_order.tenant_id, projection_order.user_id
+                            ),
+                        )
+                    except LegacyJPNativeState:
+                        continue
                 runtime_order = (
                     await session.execute(
                         select(SimOrder)
@@ -87,11 +99,6 @@ class SimulationPendingOrderWorker:
                 }:
                     projection_order.status = legacy_status
                     await session.commit()
-                    processed += 1
-                    continue
-                rejection = ordinary_cash_order_rejection(runtime_order.symbol)
-                if rejection:
-                    await engine.mark_rejected(runtime_order, rejection)
                     processed += 1
                     continue
                 expires_at = engine._normalize_runtime_datetime(

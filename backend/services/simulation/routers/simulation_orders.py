@@ -22,7 +22,6 @@ from backend.services.simulation.services.execution_engine import (
     SimulationExecutionEngine,
 )
 from backend.services.simulation.services.order_service import SimOrderService
-from backend.services.simulation.services.dated_execution import ordinary_cash_order_rejection
 from backend.services.simulation.services.simulation_manager import (
     SimulationAccountManager,
     require_sim_user_id,
@@ -52,15 +51,22 @@ async def create_order(
             detail="Simulation service only accepts trading_mode=simulation",
         )
 
-    rejection = ordinary_cash_order_rejection(data.symbol)
-    if rejection:
-        raise HTTPException(status_code=422, detail=rejection)
-
     order_service = SimOrderService(db)
     manager = SimulationAccountManager(redis)
     engine = SimulationExecutionEngine(db, manager)
 
     user_id = _require_user_id(auth.user_id, auth.tenant_id)
+    from backend.services.simulation.services.market_rules import infer_market
+    from backend.services.simulation.services.legacy_jp_state import LegacyJPNativeState, read_existing_jp_account, require_standard_account
+
+    if infer_market(data.symbol).value == "JP":
+        try:
+            await require_standard_account(
+                db, auth.tenant_id, user_id,
+                cached=read_existing_jp_account(redis, auth.tenant_id, user_id),
+            )
+        except LegacyJPNativeState as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     # P0-1：同用户撮合临界区串行化，防止并发下单双花/快照恢复覆盖。
     # 拿不到锁直接429由前端重试，不静默放行。
     try:

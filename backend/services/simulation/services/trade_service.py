@@ -34,11 +34,10 @@ class SimTradeService:
         )
         return result.scalar_one_or_none()
 
-    def _list_cache_key(self, tenant_id: str, user_id: int, portfolio_id: int | None, symbol: str | None, limit: int, offset: int, market: str | None = None) -> str:
+    def _list_cache_key(self, tenant_id: str, user_id: int, portfolio_id: int | None, symbol: str | None, limit: int, offset: int) -> str:
         sym = symbol.upper() if symbol else "all"
         port = str(portfolio_id) if portfolio_id is not None else "all"
-        scope = "JP" if str(market or "").upper() == "JP" else "legacy"
-        return f"sim_trade:list:{tenant_id}:{user_id}:{port}:{sym}:{limit}:{offset}:market-v1:{scope}"
+        return f"sim_trade:list:{tenant_id}:{user_id}:{port}:{sym}:{limit}:{offset}"
 
     async def list_trades(
         self,
@@ -49,7 +48,6 @@ class SimTradeService:
         symbol: str | None = None,
         limit: int = 50,
         offset: int = 0,
-        market: str | None = None,
     ) -> list[SimTrade]:
         # 确保联合索引存在（历史库无此索引会导致 ORDER BY 全表排序慢）
         try:
@@ -58,7 +56,7 @@ class SimTradeService:
         except Exception:
             pass
         # Redis 缓存：仅对常规分页生效，带 symbol 时仍缓存（key 已区分）
-        cache_key = self._list_cache_key(tenant_id, user_id, portfolio_id, symbol, limit, offset, market)
+        cache_key = self._list_cache_key(tenant_id, user_id, portfolio_id, symbol, limit, offset)
         if self.redis and getattr(self.redis, "client", None):
             try:
                 cached = self.redis.get(cache_key)
@@ -90,16 +88,6 @@ class SimTradeService:
             conditions.append(SimTrade.portfolio_id == portfolio_id)
         if symbol:
             conditions.append(SimTrade.symbol == symbol.upper())
-        from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
-
-        provider = LOCAL_MARKET_PROVIDERS.get(str(market or "").upper())
-        if provider and provider.native_api_symbol_pattern:
-            conditions.append(SimTrade.symbol.op("~")(provider.native_api_symbol_pattern))
-        else:
-            # Preserve the old aggregate, excluding only newly registered fills.
-            for native in LOCAL_MARKET_PROVIDERS.values():
-                if native.native_api_symbol_pattern:
-                    conditions.append(~SimTrade.symbol.op("~")(native.native_api_symbol_pattern))
 
         stmt = (
             select(SimTrade).where(and_(*conditions)).order_by(SimTrade.executed_at.desc()).limit(limit).offset(offset)
@@ -131,27 +119,14 @@ class SimTradeService:
         port = str(portfolio_id) if portfolio_id is not None else "all"
         return f"sim_trade:stats:{tenant_id}:{user_id}:{port}"
 
-    async def get_stats(self, tenant_id: str, user_id: int, portfolio_id: int | None = None, market: str | None = None) -> dict:
-        from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
-        from backend.services.simulation.services.account_context import read_registered_simulation_account
-        provider = LOCAL_MARKET_PROVIDERS.get(str(market or "").upper())
-        if provider and provider.simulation_account_input_adapter:
-            if portfolio_id is not None:
-                raise ValueError("Native cash statistics require their owner account scope")
-            _, account = await read_registered_simulation_account(market.upper(),
-                redis=self.redis, tenant_id=tenant_id, raw_user_id=str(user_id), user_id=user_id,
-                include_trade_stats=True)
-            if account is None:
-                return {"total_trades": 0, "total_value": 0, "total_commission": 0, "buy_trades": 0, "sell_trades": 0,
-                    "daily_counts": [], "realized_pnl": 0, "win_trades": 0, "loss_trades": 0, "win_rate": 0, "profit_loss_ratio": 0}
-            return account["trade_stats"]
+    async def get_stats(self, tenant_id: str, user_id: int, portfolio_id: int | None = None) -> dict:
         cache_key = self._stats_cache_key(tenant_id, user_id, portfolio_id)
         if self.redis and getattr(self.redis, "client", None):
             try:
                 cached = self.redis.get(cache_key)
                 if cached is not None:
                     # trade RedisClient.get already json.loads
-                    if isinstance(cached, dict) and cached.get("total_trades") is not None and cached.get("_native_currency_excluded") is True:
+                    if isinstance(cached, dict) and cached.get("total_trades") is not None:
                         return cached
             except Exception:
                 pass
@@ -159,10 +134,6 @@ class SimTradeService:
         if portfolio_id is not None:
             conditions.append(SimTrade.portfolio_id == portfolio_id)
 
-        # Do not add newly registered native currency fills to the old financial aggregate.
-        for native in LOCAL_MARKET_PROVIDERS.values():
-            if native.native_api_symbol_pattern:
-                conditions.append(~SimTrade.symbol.op("~")(native.native_api_symbol_pattern))
         summary_stmt = select(
             func.count(SimTrade.id).label("total_trades"),
             func.coalesce(func.sum(SimTrade.trade_value), 0.0).label("total_value"),
@@ -195,7 +166,6 @@ class SimTradeService:
             )
 
         result = {
-            "_native_currency_excluded": True,
             "daily_counts": daily_counts,
             "total_trades": int(summary_row.total_trades or 0),
             "total_value": float(summary_row.total_value or 0.0),

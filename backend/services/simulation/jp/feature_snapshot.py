@@ -5,9 +5,6 @@ import pyarrow.parquet as pq
 
 from backend.shared.fundamental_aligner import FundamentalAligner
 from backend.shared.stock_utils import StockCodeUtil
-from backend.services.simulation.services.market_execution_data import (
-    open_market_execution_data,
-)
 from .rules import RuleDataMissing
 
 
@@ -102,6 +99,8 @@ class JPFeatureSnapshotReader:
 
 
 def create_reader(spec):
+    from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
+
     return JPFeatureSnapshotReader(
-        open_market_execution_data("JP", data_version=spec.data_version).hub
+        LOCAL_MARKET_PROVIDERS["JP"].open(spec.data_version)
     )

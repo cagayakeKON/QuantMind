@@ -4,12 +4,16 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import os
+from types import SimpleNamespace
+from uuid import uuid4
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pandas as pd
 import pytest
+import pytest_asyncio
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.services.api.routers import data_dashboard as dashboard
 from backend.services.api.routers import stock_terminal as terminal
@@ -17,23 +21,63 @@ from backend.services.api.routers.admin import data_status_scanner as scanner
 from backend.services.api.user_app.middleware.auth import get_current_user
 from backend.services.engine.data_platform.jp_features import build_jp_features
 from backend.services.simulation.models.trade import SimTrade
+from backend.services.simulation.models import Base
+from backend.services.simulation.models.order import OrderSide, OrderType, SimOrder
 from backend.services.simulation.services.trade_service import SimTradeService
 from backend.tests.test_jp_stock_terminal import source as source_fixture
 from backend.tests.test_jp_data_platform import snapshot as snapshot_fixture
 from backend.tests.test_jp_features import fake_evaluator
-from backend.tests.test_market_simulation_checkpoint import (
-    pg as pg_fixture,
-    cash_setup as cash_setup_fixture,
-    published as published_fixture,
-    order,
-)
+from backend.shared.database_manager_v2 import DatabaseConfig
 from backend.shared.utc_datetime import utc_now
 
 source = source_fixture
 snapshot = snapshot_fixture
-pg = pg_fixture
-cash_setup = cash_setup_fixture
-published = published_fixture
+
+
+@pytest_asyncio.fixture
+async def pg():
+    """Read-path SQL uses ordinary tables in a disposable UUID schema."""
+    schema = "jp_read_" + uuid4().hex
+    url = DatabaseConfig().get_master_url()
+    admin = create_async_engine(url)
+    engine = None
+    try:
+        async with admin.begin() as conn:
+            await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+        engine = create_async_engine(
+            url, connect_args={"server_settings": {"search_path": schema}}
+        )
+        async with engine.begin() as conn:
+            await conn.run_sync(
+                lambda sync: Base.metadata.create_all(
+                    sync, tables=[SimOrder.__table__, SimTrade.__table__]
+                )
+            )
+        yield SimpleNamespace(
+            sessions=async_sessionmaker(engine, expire_on_commit=False)
+        )
+    finally:
+        if engine:
+            await engine.dispose()
+        async with admin.begin() as conn:
+            await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        await admin.dispose()
+
+
+async def order(db, *, symbol):
+    row = SimOrder(
+        order_id=uuid4(),
+        tenant_id="test",
+        user_id=7,
+        portfolio_id=0,
+        symbol=symbol,
+        side=OrderSide.BUY,
+        order_type=OrderType.MARKET,
+        quantity=100,
+    )
+    db.add(row)
+    await db.flush()
+    return row
 
 
 @pytest.fixture
@@ -243,7 +287,7 @@ PG_ONLY = pytest.mark.skipif(
 
 @PG_ONLY
 @pytest.mark.asyncio
-async def test_recent_trade_sql_paginates_after_market_and_has_disjoint_cache(pg):
+async def test_recent_trade_sql_retains_shared_history_and_symbol_cache(pg):
     async with pg.sessions() as db:
         now = utc_now()
         for i, symbol in enumerate(["SH600036", "US_AAPL", *(["JP72030"] * 9)]):
@@ -275,20 +319,25 @@ async def test_recent_trade_sql_paginates_after_market_and_has_disjoint_cache(pg
 
         cache = Cache()
         service = SimTradeService(db, cache)
-        japanese = await service.list_trades("test", 7, market="JP", limit=8)
+        japanese = await service.list_trades("test", 7, symbol="JP72030", limit=8)
         assert len(japanese) == 8 and {t.symbol for t in japanese} == {"JP72030"}
-        original = await service.list_trades("test", 7, market="CN", limit=8)
-        assert [t.symbol for t in original] == ["US_AAPL", "SH600036"]
+        original = await service.list_trades("test", 7, limit=20)
+        assert [t.symbol for t in original][-2:] == ["US_AAPL", "SH600036"]
+        assert len(original) == 11
         assert len(cache.values) == 2
         assert (
-            await service.list_trades("test", 7, market="JP", limit=8)
-            == cache.values[service._list_cache_key("test", 7, None, None, 8, 0, "JP")]
+            await service.list_trades("test", 7, symbol="JP72030", limit=8)
+            == cache.values[service._list_cache_key("test", 7, None, "JP72030", 8, 0)]
         )
         assert (
-            len(await service.list_trades("test", 7, market="JP", limit=8, offset=8))
+            len(
+                await service.list_trades(
+                    "test", 7, symbol="JP72030", limit=8, offset=8
+                )
+            )
             == 1
         )
-        assert await service.list_trades("test", 8, market="JP", limit=8) == []
+        assert await service.list_trades("test", 8, symbol="JP72030", limit=8) == []
         # Exercise the public auth/router path, including cached dict serialization.
         from backend.services.simulation.routers import simulation_history
         from backend.services.trade_shared.deps import (
@@ -309,11 +358,17 @@ async def test_recent_trade_sql_paginates_after_market_and_has_disjoint_cache(pg
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
         ) as client:
-            japanese = await client.get("/trades", params={"market": "JP", "limit": 8})
-            legacy = await client.get("/trades", params={"market": "CN", "limit": 8})
+            japanese = await client.get(
+                "/trades", params={"symbol": "JP72030", "limit": 8}
+            )
+            legacy = await client.get("/trades", params={"limit": 20})
         assert japanese.status_code == legacy.status_code == 200
         assert {row["symbol"] for row in japanese.json()} == {"JP72030"}
-        assert {row["symbol"] for row in legacy.json()} == {"SH600036", "US_AAPL"}
+        assert {row["symbol"] for row in legacy.json()} == {
+            "JP72030",
+            "SH600036",
+            "US_AAPL",
+        }
 
 
 @PG_ONLY

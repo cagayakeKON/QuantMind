@@ -1,9 +1,9 @@
 """Registered native market inputs behind the existing Strategy Lab provider API."""
 
-from datetime import timedelta
+from datetime import date, timedelta
 import pandas as pd
 from backend.shared.stock_utils import StockCodeUtil
-from .data_provider import InMemoryProvider
+from .data_provider import QlibProvider
 
 
 def seed_registered_params(ctx, params):
@@ -33,9 +33,9 @@ def bind_registered_context(ctx, provider):
         ctx.stock_pool = provider.run_stock_pool
 
 
-class LocalLabProvider(InMemoryProvider):
-    def __init__(self, reader, *, market, currency, benchmark):
-        super().__init__({})
+class LocalLabProvider(QlibProvider):
+    def __init__(self, reader, *, market, currency, benchmark, data_path):
+        super().__init__(data_path=data_path, region="cn")
         self.reader = reader
         self.market, self.currency, self.benchmark = market, currency, benchmark
         self.hub = reader.hub
@@ -44,6 +44,20 @@ class LocalLabProvider(InMemoryProvider):
         self.is_active_on = None
         self.named_universes = frozenset({"all"})
         self.history_adjustments = frozenset({"raw", "qfq"})
+        from backend.services.simulation.services.market_rules import rules_for
+
+        self.trading_rules = rules_for(market)
+        self.trading_units = {}
+
+    def trading_unit(self, symbol, today):
+        day = pd.Timestamp(today).date()
+        code = StockCodeUtil.to_prefix(symbol, market=self.market)
+        for unit in self.trading_units.get(code, []):
+            if unit["valid_from"] <= day <= unit["valid_to"]:
+                return unit["lot_size"]
+        if day >= date(2018, 10, 1):
+            return self.trading_rules.lot_size
+        raise ValueError(f"Historical JP trading unit is unavailable: {code}/{day}")
 
     def calendar(self, start, end):
         return [
@@ -85,8 +99,10 @@ class LocalLabProvider(InMemoryProvider):
         fields=None,
         symbols=None,
         today=None,
-        adjust="raw",
+        adjust=None,
     ):
+        if adjust is None or adjust == "qfq":
+            return super().history(symbol, n, field, fields, symbols, today)
         if adjust not in self.history_adjustments:
             raise ValueError(
                 "Native Lab history supports raw execution or qfq research prices"
@@ -114,8 +130,13 @@ class LocalLabProvider(InMemoryProvider):
         return pd.DataFrame(rows).T
 
     def current_bar(self, symbol, today):
-        """Exact raw event-day bar, matching cash inventory and cost units."""
-        frame = self._slice(symbol, today, 1)
+        """Exact standard Qlib adjusted event bar."""
+        frame = super().history(
+            symbol=symbol,
+            n=1,
+            fields=["open", "high", "low", "close", "volume"],
+            today=today,
+        )
         if frame.empty or frame.index[-1].date() != today.date():
             return pd.DataFrame()
         if self.is_active_on is not None and not self.is_active_on(symbol, today):
@@ -149,8 +170,3 @@ class LocalLabProvider(InMemoryProvider):
 
     def list_features(self):
         return sorted(self.allowed_features)
-
-    def make_broker(self, ctx, cash):
-        from .dated_broker import DatedLabBroker
-
-        return DatedLabBroker(ctx, self, cash)

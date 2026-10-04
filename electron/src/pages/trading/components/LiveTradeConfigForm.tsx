@@ -1,11 +1,9 @@
 import React from 'react';
-import type { ExecutionConfig, LiveTradeConfig, SimulationExecutionInputs, TradeWeekday, TradingSession } from '../../../types/liveTrading';
+import type { ExecutionConfig, LiveTradeConfig, TradeWeekday, TradingSession } from '../../../types/liveTrading';
 import type { ValidationIssue } from '../utils/liveTradeConfigValidation';
 import {
-  SESSION_RANGES,
+  sessionRangesForMarket,
   syncSessionsToTimes,
-  sessionsForTime,
-  datedSessionDefaults,
 } from '../utils/liveTradeConfigValidation';
 import {
   StockPoolSelectField,
@@ -13,12 +11,12 @@ import {
 } from '../../../components/backtest/StockPoolSelectField';
 
 type Props = {
+  market?: string;
   executionConfig: ExecutionConfig;
   liveTradeConfig: LiveTradeConfig;
   onExecutionConfigChange: (val: ExecutionConfig) => void;
   onLiveTradeConfigChange: (val: LiveTradeConfig) => void;
   validationIssues?: ValidationIssue[];
-  executionInputs?: SimulationExecutionInputs;
 };
 
 const WEEKDAYS: TradeWeekday[] = ['MON', 'TUE', 'WED', 'THU', 'FRI'];
@@ -30,11 +28,10 @@ const SESSION_DEFAULTS: Record<string, { sell_time: string; buy_time: string }> 
   'AM,PM': { sell_time: '09:30', buy_time: '09:35' },
 };
 
-function isTimeInSessions(time: string, sessions: TradingSession[], rules?: SimulationExecutionInputs): boolean {
-  if (rules) return sessionsForTime(time, rules).some((session) => sessions.includes(session));
+function isTimeInSessions(time: string, sessions: TradingSession[], market?: string): boolean {
   const hhmm = time.length >= 5 ? time.slice(0, 5) : time;
   return sessions.some((s) => {
-    const [start, end] = SESSION_RANGES[s];
+    const [start, end] = sessionRangesForMarket(market)[s];
     return hhmm >= start && hhmm <= end;
   });
 }
@@ -50,14 +47,13 @@ const SectionTitle: React.FC<{ children: React.ReactNode }> = ({ children }) => 
 );
 
 const LiveTradeConfigForm: React.FC<Props> = ({
+  market,
   executionConfig,
   liveTradeConfig,
   onExecutionConfigChange,
   onLiveTradeConfigChange,
   validationIssues,
-  executionInputs,
 }) => {
-  const ranges = executionInputs?.session_ranges ?? SESSION_RANGES;
   const updateLive = (patch: Partial<LiveTradeConfig>) => {
     onLiveTradeConfigChange({ ...liveTradeConfig, ...patch });
   };
@@ -70,7 +66,7 @@ const LiveTradeConfigForm: React.FC<Props> = ({
       liveTradeConfig.enabled_sessions || [],
       sell_time,
       buy_time,
-      executionInputs,
+      market,
     );
     updateLive({ ...patch, sell_time, buy_time, enabled_sessions });
   };
@@ -190,11 +186,11 @@ const LiveTradeConfigForm: React.FC<Props> = ({
                     const patch: Partial<LiveTradeConfig> = { enabled_sessions: next };
                     if (next.length > 0) {
                       const key = [...next].sort().join(',');
-                      const defaults = executionInputs ? datedSessionDefaults(next, executionInputs) : SESSION_DEFAULTS[key] || SESSION_DEFAULTS['PM'];
-                      if (!isTimeInSessions(liveTradeConfig.sell_time, next, executionInputs)) {
+                      const defaults = SESSION_DEFAULTS[key] || SESSION_DEFAULTS['PM'];
+                      if (!isTimeInSessions(liveTradeConfig.sell_time, next, market)) {
                         patch.sell_time = defaults.sell_time;
                       }
-                      if (!isTimeInSessions(liveTradeConfig.buy_time, next, executionInputs)) {
+                      if (!isTimeInSessions(liveTradeConfig.buy_time, next, market)) {
                         patch.buy_time = defaults.buy_time;
                       }
                       const newSell = patch.sell_time ?? liveTradeConfig.sell_time;
@@ -216,7 +212,7 @@ const LiveTradeConfigForm: React.FC<Props> = ({
                 {liveTradeConfig.enabled_sessions
                   .slice()
                   .sort()
-                  .map((s) => `${ranges[s][0]}–${ranges[s][1]}`)
+                  .map((s) => `${sessionRangesForMarket(market)[s][0]}–${sessionRangesForMarket(market)[s][1]}`)
                   .join(' / ')}
               </span>
             )}
@@ -233,10 +229,10 @@ const LiveTradeConfigForm: React.FC<Props> = ({
               <div className="mb-0.5 text-[11px] text-gray-500">卖出</div>
               <input
                 type="time"
-                className={`${controlClassName} h-8 ${!isTimeInSessions(liveTradeConfig.sell_time, liveTradeConfig.enabled_sessions, executionInputs) ? 'border-red-500 bg-red-50' : ''}`}
+                className={`${controlClassName} h-8 ${!isTimeInSessions(liveTradeConfig.sell_time, liveTradeConfig.enabled_sessions, market) ? 'border-red-500 bg-red-50' : ''}`}
                 value={liveTradeConfig.sell_time}
-                min={liveTradeConfig.enabled_sessions.includes('AM') ? ranges.AM[0] : ranges.PM[0]}
-                max={liveTradeConfig.enabled_sessions.includes('PM') ? ranges.PM[1] : ranges.AM[1]}
+                min={sessionRangesForMarket(market)[liveTradeConfig.enabled_sessions.includes('AM') ? 'AM' : 'PM'][0]}
+                max={sessionRangesForMarket(market)[liveTradeConfig.enabled_sessions.includes('PM') ? 'PM' : 'AM'][1]}
                 onChange={(e) => updateTradeTimes({ sell_time: e.target.value })}
               />
               {fieldError(validationIssues, 'sell_time') && (
@@ -248,10 +244,10 @@ const LiveTradeConfigForm: React.FC<Props> = ({
               <div className="mb-0.5 text-[11px] text-gray-500">买入</div>
               <input
                 type="time"
-                className={`${controlClassName} h-8 ${!isTimeInSessions(liveTradeConfig.buy_time, liveTradeConfig.enabled_sessions, executionInputs) ? 'border-red-500 bg-red-50' : ''}`}
+                className={`${controlClassName} h-8 ${!isTimeInSessions(liveTradeConfig.buy_time, liveTradeConfig.enabled_sessions, market) ? 'border-red-500 bg-red-50' : ''}`}
                 value={liveTradeConfig.buy_time}
-                min={liveTradeConfig.enabled_sessions.includes('AM') ? ranges.AM[0] : ranges.PM[0]}
-                max={liveTradeConfig.enabled_sessions.includes('PM') ? ranges.PM[1] : ranges.AM[1]}
+                min={sessionRangesForMarket(market)[liveTradeConfig.enabled_sessions.includes('AM') ? 'AM' : 'PM'][0]}
+                max={sessionRangesForMarket(market)[liveTradeConfig.enabled_sessions.includes('PM') ? 'PM' : 'AM'][1]}
                 onChange={(e) => updateTradeTimes({ buy_time: e.target.value })}
               />
               {fieldError(validationIssues, 'buy_time') && (
@@ -286,7 +282,7 @@ const LiveTradeConfigForm: React.FC<Props> = ({
                     value={liveTradeConfig.order_type}
                     onChange={(e) => updateLive({ order_type: e.target.value as LiveTradeConfig['order_type'] })}
                   >
-                    <option value="LIMIT" disabled={!!executionInputs && !executionInputs.allowed_order_types.includes('LIMIT')}>限价</option>
+                    <option value="LIMIT">限价</option>
                     <option value="MARKET">市价</option>
                   </select>
                 </label>
@@ -371,7 +367,7 @@ const LiveTradeConfigForm: React.FC<Props> = ({
           可选。留空则不过滤信号。
         </p>
         <StockPoolSelectField
-          market={executionInputs?.market}
+          market={market}
           value={poolSelection}
           onChange={(next) =>
             updateLive({ pool_id: next?.ref || null, pool_name: next?.name || null })

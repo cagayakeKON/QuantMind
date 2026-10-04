@@ -315,18 +315,13 @@ class RiskAnalyzer:
         end_date: str,
         annual_return: float | None,
         risk_free_rate: float = 0.02,
-        *,
-        price_loader=None,
     ) -> dict[str, float | None]:
         try:
             bm_df = None
-            if price_loader is not None:
-                bm_df = price_loader(benchmark, start_date, end_date)
-            else:
-                for candidate in benchmark_candidates(benchmark):
-                    bm_df = D.features([candidate], ["$close"], start_time=start_date, end_time=end_date)
-                    if bm_df is not None and not bm_df.empty:
-                        break
+            for candidate in benchmark_candidates(benchmark):
+                bm_df = D.features([candidate], ["$close"], start_time=start_date, end_time=end_date)
+                if bm_df is not None and not bm_df.empty:
+                    break
             if bm_df is None or bm_df.empty:
                 return {"alpha": None, "beta": None, "information_ratio": None}
 
@@ -377,8 +372,6 @@ class RiskAnalyzer:
                 "information_ratio": cls._clean_nan(ir),
             }
         except Exception as exc:
-            if price_loader is not None:
-                raise
             task_logger.warning("compute_risk_metrics_failed", "Risk metrics calculation failed", error=str(exc))
             return {"alpha": None, "beta": None, "information_ratio": None}
 
@@ -959,6 +952,12 @@ class RiskAnalyzer:
             "strategy_total_position": request.strategy_total_position,
         }
 
+        if request.market == "JP":
+            payload.update(
+                market="JP", currency="JPY", jp_data_version=request.jp_data_version,
+                qlib_provider_uri=request.qlib_provider_uri, execution_engine="qlib",
+            )
+
         # 补全模型标识：优先从 signal_meta 提取推理引擎实际解析出的模型，否则回退到请求中的 model_id
         if signal_meta:
             effective_model_id = signal_meta.get("effective_model_id")
@@ -977,10 +976,29 @@ class RiskAnalyzer:
         return payload
 
     @classmethod
-    def _extract_performance_metrics(
-        cls, report: pd.DataFrame | None, request: QlibBacktestRequest
-    ) -> dict[str, Any]:
-        """Compute the existing report metrics for registered execution adapters."""
+    async def analyze(
+        cls,
+        portfolio_dict: dict[str, Any],
+        request: QlibBacktestRequest,
+        backtest_id: str,
+        created_at: datetime,
+        execution_time: float,
+        signal_data: Any = None,
+        signal_meta: dict[str, Any] | None = None,
+        on_progress: Any | None = None,
+    ) -> QlibBacktestResult:
+        """Core analysis logic extracted from QlibBacktestService"""
+
+        async def report_progress(val: float, msg: str | None = None):
+            if on_progress:
+                try:
+                    await on_progress(val, msg)
+                except Exception:
+                    pass
+
+        await report_progress(0.85, "正在提取回测原始报告...")
+        report = cls._extract_report_from_portfolio(portfolio_dict)
+
         annual_return = None
         total_return = None
         sharpe_ratio = None
@@ -990,6 +1008,7 @@ class RiskAnalyzer:
 
         if report is not None and hasattr(report, "__len__") and len(report) > 0:
             try:
+                await report_progress(0.87, "正在计算核心绩效指标...")
                 if "return" in report.columns:
                     daily_returns = report["return"]
                     value_col = next(
@@ -1040,49 +1059,6 @@ class RiskAnalyzer:
                 task_logger.exception("metric_extraction_failed", "Metric extraction failed", error=str(e))
         else:
             task_logger.warning("empty_or_invalid_report", "Empty or invalid report")
-
-        return {
-            "annual_return": annual_return,
-            "total_return": total_return,
-            "sharpe_ratio": sharpe_ratio,
-            "max_drawdown": max_drawdown,
-            "volatility": volatility,
-            "daily_returns": daily_returns,
-        }
-
-    @classmethod
-    async def analyze(
-        cls,
-        portfolio_dict: dict[str, Any],
-        request: QlibBacktestRequest,
-        backtest_id: str,
-        created_at: datetime,
-        execution_time: float,
-        signal_data: Any = None,
-        signal_meta: dict[str, Any] | None = None,
-        on_progress: Any | None = None,
-    ) -> QlibBacktestResult:
-        """Core analysis logic extracted from QlibBacktestService"""
-
-        async def report_progress(val: float, msg: str | None = None):
-            if on_progress:
-                try:
-                    await on_progress(val, msg)
-                except Exception:
-                    pass
-
-        await report_progress(0.85, "正在提取回测原始报告...")
-        report = cls._extract_report_from_portfolio(portfolio_dict)
-
-        if report is not None and hasattr(report, "__len__") and len(report) > 0:
-            await report_progress(0.87, "正在计算核心绩效指标...")
-        performance = cls._extract_performance_metrics(report, request)
-        annual_return = performance["annual_return"]
-        total_return = performance["total_return"]
-        sharpe_ratio = performance["sharpe_ratio"]
-        max_drawdown = performance["max_drawdown"]
-        volatility = performance["volatility"]
-        daily_returns = performance["daily_returns"]
 
         await report_progress(0.89, "正在对比基准指数收益...")
         task_logger.info("compute_benchmark_start", "开始计算基准收益", benchmark=request.benchmark)
@@ -1243,4 +1219,6 @@ class RiskAnalyzer:
             rebalance_suggestions=rebalance_suggestions,
             advanced_stats=advanced_stats,
             execution_time=execution_time,
+            **({"market": "JP", "currency": "JPY", "user_id": request.user_id}
+               if request.market == "JP" else {}),
         )

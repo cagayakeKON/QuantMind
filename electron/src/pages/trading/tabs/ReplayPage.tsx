@@ -29,13 +29,12 @@ import {
     listSessions, createSession,
     stepSession, deleteSession, proposeSession,
     listStrategyTemplates,
-    getExecutionRules,
 } from '../../../services/replayService';
 import { modelTrainingService, type SystemModelRecord, type UserModelRecord } from '../../../services/modelTrainingService';
 import { modelDisplayName, getMeta, getMetrics, extractModelTypeShort } from '../../modelRegistryUtils';
 import { useAutoAdvance, type AutoAdvanceSpeed, type DailyRecord } from '../../../hooks/useAutoAdvance';
 import ReplayReportPage from './ReplayReportPage';
-import { replayContext, replayCreateParams, replayVisibleSessions, validatedReplayUnits } from '../../../services/replayMarketContext';
+import { replayContext, replayCreateParams, replayVisibleSessions, replayProposalUnits } from '../../../services/replayMarketContext';
 import {
   StockPoolSelectField,
   type StockPoolSelection,
@@ -452,6 +451,7 @@ function CreateSessionForm({ onCreate }: { onCreate: (s: ReplaySession) => void 
                 <div className="mb-3">
                     <label className="block text-xs font-semibold text-slate-600 mb-1.5">股票池（可选）</label>
                     <StockPoolSelectField
+                        market={replayContext(currentMarket)?.market ?? 'CN'}
                         value={stockPool}
                         onChange={setStockPool}
                         title="时光回放股票池"
@@ -1001,8 +1001,7 @@ function SessionCard({
         try {
             const resp = await proposeSession(session.session_id);
             if (replayContext(session.strategy_params.market)) {
-                const rules = await getExecutionRules(session.session_id);
-                setTradingUnits(validatedReplayUnits(rules, resp, session));
+                setTradingUnits(replayProposalUnits(resp.proposals));
             }
             setProposal(resp);
             onRefresh();
@@ -1053,8 +1052,8 @@ function SessionCard({
     };
 
     const isManual = !session.auto_trade;
-    const canStep = session.status === 'ready' && session.next_date !== null;
-    const canPropose = isManual && (session.status === 'ready' || session.status === 'awaiting_confirm') && session.next_date !== null;
+    const canStep = !session.read_only && session.status === 'ready' && session.next_date !== null;
+    const canPropose = !session.read_only && isManual && (session.status === 'ready' || session.status === 'awaiting_confirm') && session.next_date !== null;
     // 资产数据：自动推演逐日快照 → 手动单步结果 → 后端最新快照（完成后固定为终值）
     const snap = (liveSnap ?? lastResult?.snapshot ?? session.latest_snapshot ?? null) as {
         trade_date?: string;
@@ -1067,7 +1066,7 @@ function SessionCard({
     const pnl = snap?.cum_pnl ?? 0;
     const dayPnl = snap?.day_pnl ?? 0;
     const lotSize = Number((session.strategy_params as Record<string, unknown>)?.lot_size) || 100;
-    const currency = replayContext(session.strategy_params.market)?.currency ?? '¥';
+    const currency = session.currency ?? replayContext(session.strategy_params.market)?.currency ?? '¥';
     const priceUnit = replayContext(session.strategy_params.market)?.priceUnit ?? '元';
 
     return (
@@ -1078,6 +1077,7 @@ function SessionCard({
                     <Clock size={16} className="text-slate-400" />
                     <span className="text-sm font-bold text-slate-800">{session.name || '回放会话'}</span>
                     <StatusBadge status={session.status} />
+                    {session.read_only && <span className="text-xs text-amber-700">历史账户只读 · {currency}</span>}
                     {isManual && (
                         <span className="inline-flex items-center px-2 py-0.5 rounded-lg bg-purple-50 text-purple-700 text-[10px] font-bold border border-purple-200">
                             手动确认
@@ -1169,6 +1169,8 @@ function SessionCard({
                     )}
                     <button
                         onClick={() => onDelete(session.session_id)}
+                        disabled={session.read_only}
+                        aria-label="删除回放会话"
                         className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors"
                     >
                         <Trash2 size={14} />
@@ -1404,7 +1406,7 @@ const ReplayWorkspace: React.FC = () => {
 
     const loadSessions = useCallback(async () => {
         try {
-            const list = replayVisibleSessions(await listSessions(), currentMarket);
+            const list = replayVisibleSessions(await listSessions(currentMarket), currentMarket);
             setSessions(list);
             // If no selected session and sessions exist, select the first
             if (list.length > 0) {

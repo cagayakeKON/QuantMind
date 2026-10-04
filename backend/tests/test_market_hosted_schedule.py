@@ -4,6 +4,7 @@ import json
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -46,12 +47,12 @@ def config(clock="09:00", **overrides):
     [
         ("2026-10-02", "09:00", "matched"),
         ("2026-10-02", "08:59", "outside_session"),
-        ("2026-10-02", "11:30", "outside_session"),
+        ("2026-10-02", "11:30", "matched"),
         ("2026-10-02", "12:00", "outside_session"),
         ("2026-10-02", "12:30", "matched"),
         ("2026-10-02", "15:24", "matched"),
-        ("2026-10-02", "15:25", "outside_session"),
-        ("2026-10-02", "15:30", "outside_session"),
+        ("2026-10-02", "15:25", "matched"),
+        ("2026-10-02", "15:30", "matched"),
         ("2026-10-03", "09:00", "non_trading_day"),
         ("2026-10-12", "09:00", "non_trading_day"),
         ("2026-12-31", "09:00", "non_trading_day"),
@@ -125,15 +126,15 @@ def test_next_trigger_skips_japanese_holiday_and_retains_offset(context):
     assert nxt.window_end_at - nxt.target_at == timedelta(seconds=90)
 
 
-def test_new_market_window_cannot_extend_into_preclosing(context):
+def test_jp_window_clips_at_regular_session_close(context):
     nxt = scheduler._next_scheduled_trigger(
-        now=datetime(2026, 10, 2, 15, 23, tzinfo=JST),
-        live_trade_config=config("15:24"),
+        now=datetime(2026, 10, 2, 15, 28, tzinfo=JST),
+        live_trade_config=config("15:29"),
         started_day=None,
         context=context,
     )
-    assert nxt.target_at.isoformat() == "2026-10-02T15:24:00+09:00"
-    assert nxt.window_end_at.isoformat() == "2026-10-02T15:25:00+09:00"
+    assert nxt.target_at.isoformat() == "2026-10-02T15:29:00+09:00"
+    assert nxt.window_end_at.isoformat() == "2026-10-02T15:30:00+09:00"
 
 
 def test_unavailable_calendar_never_falls_back_to_weekdays(context, monkeypatch):
@@ -235,15 +236,22 @@ def active_payload():
 
 
 @pytest.mark.asyncio
-async def test_registered_cycle_cannot_resolve_cn_model_or_update_ordinary_cash(
+async def test_jp_cycle_uses_standard_signal_gate_and_engine(
     monkeypatch,
 ):
-    async def forbidden(*args, **kwargs):
-        raise AssertionError("The original default-model/cash path must not run")
-
-    monkeypatch.setattr(scheduler, "_resolve_hosted_signal_run_id", forbidden)
-    monkeypatch.setattr(engine_module.simulation_engine, "run_cycle", forbidden)
-    monkeypatch.setenv("SIM_HOSTED_STRICT_SIGNAL_BATCH", "0")
+    gate = AsyncMock(return_value=("jp-signal-batch", None))
+    engine = AsyncMock(
+        return_value=SimpleNamespace(
+            run_id="test-run",
+            error=None,
+            signal_count=2,
+            order_count=1,
+            filled_count=1,
+            account_snapshot={"cash": 90000},
+        )
+    )
+    monkeypatch.setattr(scheduler, "_resolve_hosted_signal_run_id", gate)
+    monkeypatch.setattr(engine_module.simulation_engine, "run_cycle", engine)
     result = await scheduler.run_simulation_cycle_for_active(
         tenant_id="test",
         user_id="0007",
@@ -251,14 +259,18 @@ async def test_registered_cycle_cannot_resolve_cn_model_or_update_ordinary_cash(
         live_trade_config=config(),
         run_id="test-run",
     )
-    assert result == {
-        "task_id": "test-run",
-        "status": "skipped",
-        "error": "registered_market_dated_execution_unavailable",
-        "signal_count": 0,
-        "order_count": 0,
-        "filled_count": 0,
-    }
+    assert result["status"] == "succeeded" and result["filled_count"] == 1
+    gate.assert_awaited_once_with("test", "0007")
+    engine.assert_awaited_once_with(
+        tenant_id="test",
+        user_id="0007",
+        strategy_id="strategy-7",
+        run_id="test-run",
+        params_override=None,
+        pool_id=None,
+        signal_run_id="jp-signal-batch",
+        max_orders=20,
+    )
 
 
 @pytest.mark.asyncio
@@ -289,6 +301,16 @@ async def test_original_scheduler_job_flow_uses_jst_and_releases_skipped_lock(
             events.append(("skipped", task, kwargs))
 
     monkeypatch.setattr(scheduler, "SimulationRebalanceJobService", Jobs)
+    monkeypatch.setattr(
+        scheduler,
+        "run_simulation_cycle_for_active",
+        AsyncMock(
+            return_value={
+                "status": "skipped",
+                "error": "signal_batch_unavailable:missing_run_id",
+            }
+        ),
+    )
     instance = scheduler.SimulationHostedScheduler(SimpleNamespace(client=client))
     result = await instance._process_key(
         "trade:active_strategy:test:0007",
@@ -302,9 +324,7 @@ async def test_original_scheduler_job_flow_uses_jst_and_releases_skipped_lock(
     assert ensure["user_id"] == "00000007"
     # Preserve the existing job table's Shanghai wall-clock contract.
     assert ensure["planned_run_at"] == datetime(2026, 10, 2, 8)
-    assert (
-        events[-1][2]["last_error"] == "registered_market_dated_execution_unavailable"
-    )
+    assert events[-1][2]["last_error"] == "signal_batch_unavailable:missing_run_id"
     assert [item[0] for item in client.writes] == ["set", "delete"]
     assert client.values == {"trade:active_strategy:test:0007": json.dumps(payload)}
 

@@ -933,9 +933,9 @@ export const parseSuggestedTimePeriods = (
   return { train, val, test };
 };
 
-export const buildLabelFormula = (target: TrainingTarget, market?: string) => {
+export const buildLabelFormula = (target: TrainingTarget, market?: string, dealPrice: DealPrice = 'open') => {
   if (market === 'JP') {
-    const raw = `adjusted_open(T+${1 + target.horizonDays}) / adjusted_open(T+1) - 1; JP cash sessions; price-only`;
+    const raw = `adjusted_${dealPrice}(T+${1 + target.horizonDays}) / adjusted_${dealPrice}(T+1) - 1; JP cash sessions; price-only`;
     return raw + (target.mode === 'classification' ? '; binary(return>0)' : '; daily cross-sectional rank(pct=True)-0.5');
   }
   if (target.mode === 'classification') {
@@ -1081,7 +1081,7 @@ export const buildTrainingRequest = (
   poolId?: string | null,
 ): TrainingRequestPayload => {
   const finalFeatures = Array.from(new Set(selectedFeatures));
-  const labelFormula = buildLabelFormula(target, market || context.market);
+  const labelFormula = buildLabelFormula(target, market || context.market, context.dealPrice);
   const effectiveTradeDate = buildEffectiveTradeDate(target, timePeriods.test[0], market || context.market);
   const trainingWindow = `${formatRange(timePeriods.train)} | ${formatRange(timePeriods.val)} | ${formatRange(timePeriods.test)}`;
   const resolvedContext = market ? { ...context, market: market as TrainingContext['market'] } : context;

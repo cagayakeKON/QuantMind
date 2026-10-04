@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import duckdb
 import httpx
+import pandas as pd
 import pytest
 
 from backend.scripts.quantjp_daily_sync import dataset_selection, run
@@ -232,6 +233,16 @@ def prepare_watch(provider, monkeypatch):
         lambda **k: SimpleNamespace(publish=lambda *a, **kw: None),
     )
     return redis, entry
+
+
+def test_lab_latest_trade_date_requires_observed_prices_not_future_calendar(provider):
+    assert max(provider.reader.calendar.sessions) == date(2026, 10, 2)
+    assert provider.reader.latest_trade_date() == date(2026, 9, 30)
+    assert provider.reader.latest_trade_date(date(2026, 10, 2)) == date(2026, 9, 30)
+    assert provider.reader.latest_trade_date(date(2026, 9, 29)) == date(2026, 9, 29)
+    assert provider.reader.latest_trade_date(date(2026, 9, 25)) is None
+    assert not provider.current_bar("JP72030", pd.Timestamp("2026-09-30")).empty
+    assert provider.current_bar("JP72030", pd.Timestamp("2026-10-02")).empty
 
 
 def test_watch_rolls_only_after_complete_publication_and_deduplicates_per_owner_config_source(

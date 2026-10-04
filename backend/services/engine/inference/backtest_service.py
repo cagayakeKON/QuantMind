@@ -24,10 +24,12 @@ from scipy.stats import spearmanr
 from .config import PRODUCTION_MODELS_DIR
 from .data_loader import (
     FORWARD_RETURN_COL,
+    _is_jp_model,
     get_available_dates,
     load_date_data,
     load_forward_labels,
     preprocess,
+    resolve_data_dir,
 )
 from .model_loader import ModelLoader
 from .trading_cost import CostModel
@@ -182,6 +184,10 @@ class BacktestService:
         signal_lag_days = max(0, int(signal_lag_days))
         resolved_dir = model_dir or self.resolve_model_dir(model_id)
         meta = self.load_metadata(resolved_dir)
+        is_jp = _is_jp_model(meta)
+        if is_jp:
+            # Resolve current.json exactly once, before labels and daily inputs.
+            data_dir = resolve_data_dir(data_dir, meta)
         feature_cols = meta.get("feature_columns") or meta.get("features", [])
         if not feature_cols:
             raise ValueError("Model metadata has no feature_columns")
@@ -208,6 +214,8 @@ class BacktestService:
 
         # signal_lag_days=0 前视偏差警告
         if signal_lag_days == 0:
+            if is_jp:
+                raise ValueError("JP evaluation requires a positive execution lag")
             warnings.append(
                 "signal_lag_days=0：信号与成交同日，存在前视偏差。"
                 "A 股建议使用 signal_lag_days=1（T 日信号 → T+1 执行）。"
@@ -403,6 +411,9 @@ class BacktestService:
         metrics["monthly_ic"] = _group_by_month(results)
 
         evaluated = [r["date"] for r in results]
+        label_price = (
+            str(meta["context"].get("deal_price") or "open") if is_jp else "close"
+        )
         output = {
             "status": "success",
             "run_id": uuid.uuid4().hex[:12],
@@ -413,7 +424,8 @@ class BacktestService:
             "date_range": [evaluated[0], evaluated[-1]] if evaluated else [],
             "sample_interval": sample_interval,
             "label_definition": (
-                f"fwd_return = close[T+{signal_lag_days}+{horizon}] / close[T+{signal_lag_days}] - 1 "
+                f"fwd_return = {label_price}[T+{signal_lag_days}+{horizon}] / "
+                f"{label_price}[T+{signal_lag_days}] - 1 "
                 f"(signal_lag={signal_lag_days}, forward-looking)"
             ),
             "warnings": warnings,
@@ -422,6 +434,11 @@ class BacktestService:
             "per_day": results,
             "errors": errors,
         }
+        if is_jp:
+            output["jp_data_version"] = Path(data_dir).name
+            output["label_definition"] += (
+                "; adjusted prices; JP cash sessions; price-only"
+            )
 
         # Auto-save to history
         try:

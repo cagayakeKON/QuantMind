@@ -4,7 +4,6 @@ import type { RealTradingStatus } from '../../../../../services/realTradingServi
 import type { LatestInferenceRunInfo } from '../../../../../services/modelTrainingService';
 import { RUN_STATE_META } from '../topologyTypes';
 import type { RunState } from '../topologyTypes';
-import type { DatedExecutionContext } from '../../../../../types/liveTrading';
 
 interface RuntimeLayerProps {
     runState: RunState;
@@ -12,8 +11,6 @@ interface RuntimeLayerProps {
     loading: boolean;
     latestRun: LatestInferenceRunInfo | null;
     defaultModelName: string;
-    datedDaily?: boolean;
-    accountExecutionContext?: DatedExecutionContext;
 }
 
 const ParamCell: React.FC<{ label: string; value: string; title?: string }> = ({ label, value, title }) => (
@@ -53,8 +50,6 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
     loading,
     latestRun,
     defaultModelName,
-    datedDaily,
-    accountExecutionContext,
 }) => {
     const meta = RUN_STATE_META[runState];
     const live = status?.live_trade_config;
@@ -79,8 +74,6 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
     const result = (task?.result_json || {}) as Record<string, unknown>;
     const request = (task?.request_json || {}) as Record<string, unknown>;
     const preview = (result?.preview_summary || {}) as Record<string, unknown>;
-    const cycle = accountExecutionContext?.last_cycle_inputs || status?.execution_context?.last_cycle_inputs;
-    const delayedCycle = datedDaily && cycle?.execution_date_mode === 'published_daily_delayed' ? cycle : undefined;
     const execWindow = (request?.execution_window || {}) as Record<string, string | undefined>;
     const success = Number(task?.success_count ?? (result?.success_count as number) ?? 0);
     const failed = Number(task?.failed_count ?? (result?.failed_count as number) ?? 0);
@@ -111,23 +104,11 @@ const RuntimeLayer: React.FC<RuntimeLayerProps> = ({
                 )}
                 {status?.mode && (
                     <span className="ml-auto text-[11px] font-bold opacity-70">
-                        {datedDaily ? '已发布日线延迟模拟' : (status.mode === 'SIMULATION' ? '模拟运行' : status.mode === 'SHADOW' ? '影子运行' : '实盘运行')}
+                        {status.mode === 'SIMULATION' ? '模拟运行' : status.mode === 'SHADOW' ? '影子运行' : '实盘运行'}
                         {status.orchestration_mode ? ` · ${status.orchestration_mode}` : ''}
                     </span>
                 )}
             </div>
-
-            {datedDaily && (
-                <div className="mb-3 rounded-xl border border-indigo-100 bg-indigo-50/50 p-3 text-xs text-indigo-700">
-                    <div>已发布日线延迟模拟 · 日线完整就绪后执行历史开盘价模拟</div>
-                    {delayedCycle ? (
-                        <div className="mt-1 flex flex-wrap gap-4">
-                            <span>最近周期计划日期：{delayedCycle.scheduled_trade_date || '-'}</span>
-                            <span>实际模拟执行日期：{delayedCycle.trade_date}</span>
-                        </div>
-                    ) : <div className="mt-1">尚无已完成日线托管周期</div>}
-                </div>
-            )}
 
             {/* 两行网格：同行两卡自动等高，第二行即 策略参数 vs 任务汇报 底部对齐 */}
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-3 items-stretch">

@@ -20,7 +20,7 @@ from backend.services.engine.qlib_app.schemas.backtest import (
 from backend.services.engine.qlib_app.services.genetic_optimization_service import GeneticOptimizationService
 from backend.services.engine.qlib_app.services.optimization_persistence import OptimizationPersistence
 from backend.services.engine.qlib_app.services.optimization_service import OptimizationService
-from backend.services.engine.qlib_app.services.backtest_execution import (
+from backend.services.engine.qlib_app.services.market_backtest_config import (
     prepare_market_batch_request,
     serialize_market_batch_request,
 )

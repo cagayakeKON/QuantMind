@@ -14,6 +14,17 @@ from backend.services.engine.qlib_app.services import style_attribution_service 
 from backend.services.simulation.jp import analysis_data
 
 
+def _saved_inputs(frame):
+    rows = frame.reset_index()
+    rows["datetime"] = rows["datetime"].map(lambda day: str(day.date()))
+    return {
+        "data_version": "v1",
+        "available": True,
+        "fields": list(frame.columns),
+        "rows": rows.to_dict("records"),
+    }
+
+
 @pytest.fixture
 def inputs(tmp_path):
     result = QlibBacktestResult(
@@ -60,17 +71,8 @@ async def test_shared_style_algorithm_receives_same_complete_recorded_inputs(
 ):
     result, request, context, frame, calls, _ = inputs
     before = result.model_dump(mode="json")
-    saved = analysis_data.save_style_features(result, request, context)
+    saved = _saved_inputs(frame)
     assert saved["available"] is True
-    assert calls == [
-        (
-            ["JP72030", "JP216A0", "TOPIX"],
-            ["JP72030", "JP216A0", "TOPIX"],
-            list(style.StyleAttributionService.STYLE_FACTORS.values()),
-            request.end_date,
-            request.end_date,
-        )
-    ]
     assert result.model_dump(mode="json") == before
     monkeypatch.setattr(
         style, "D", SimpleNamespace(features=lambda *a, **k: frame.copy())
@@ -109,50 +111,12 @@ async def test_shared_style_algorithm_receives_same_complete_recorded_inputs(
     )
 
 
-@pytest.mark.parametrize("invalid", ["fields", "volume", "nan", "date", "duplicate"])
-def test_missing_style_sources_are_unavailable_without_invented_exposures(
-    inputs, invalid
-):
-    result, request, context, frame, calls, volume = inputs
-    if invalid == "fields":
-
-        def reject(fields):
-            raise ValueError("$prop_net_asset_value is unavailable")
-
-        context.validate_fields = reject
-    elif invalid == "volume":
-        volume.unlink()
-    elif invalid == "nan":
-        frame.iloc[0, 0] = float("nan")
-    elif invalid == "date":
-        frame.index = frame.index.set_levels([pd.Timestamp("2026-10-01")], level=1)
-    else:
-        context._read_provider_features = lambda *args: pd.concat([frame, frame])
-    saved = analysis_data.save_style_features(result, request, context)
-    assert saved["available"] is False
-    assert "rows" not in saved
-    assert saved["reason"]
-    if invalid in {"fields", "volume"}:
-        assert not calls
-
-
-@pytest.mark.parametrize("invalid", ["version", "execution"])
-def test_style_capture_rejects_mismatched_context(inputs, invalid):
-    result, request, context, *_ = inputs
-    if invalid == "version":
-        context.spec.data_version = "other"
-    else:
-        context.execution_day = pd.Timestamp("2026-09-29")
-    with pytest.raises(ValueError, match="version|completed"):
-        analysis_data.save_style_features(result, request, context)
-
-
 @pytest.mark.parametrize("invalid", ["version", "nan", "duplicate", "fields", "rows"])
 def test_style_read_rejects_corrupt_saved_inputs_even_with_cached_exposures(
     inputs, invalid
 ):
-    result, request, context, *_ = inputs
-    saved = analysis_data.save_style_features(result, request, context)
+    result, request, context, frame, *_ = inputs
+    saved = _saved_inputs(frame)
     if invalid == "version":
         saved["data_version"] = "other"
     elif invalid == "nan":
@@ -176,8 +140,8 @@ async def test_common_style_endpoint_uses_recorded_fields_and_availability(
 ):
     from backend.services.engine.qlib_app.services import backtest_persistence
 
-    result, request, context, *_ = inputs
-    saved = analysis_data.save_style_features(result, request, context)
+    result, request, context, frame, *_ = inputs
+    saved = _saved_inputs(frame)
     if not available:
         saved = {"data_version": "v1", "available": False, "reason": "Missing NAV"}
     result.advanced_stats = {"style_features": saved}
@@ -221,3 +185,94 @@ async def test_common_style_endpoint_uses_recorded_fields_and_availability(
         calls[1][1]["include_fields"]
     )
     assert result.model_dump(mode="json") == before
+
+
+pytest_plugins = ["backend.tests.jp_standard_fixtures"]
+
+
+@pytest.mark.asyncio
+async def test_actual_standard_cached_style_uses_original_api_priority(
+    standard_report, monkeypatch
+):
+    from backend.services.engine.qlib_app.services.backtest_persistence import (
+        BacktestPersistence,
+    )
+
+    result, _, _ = standard_report
+    assert result.style_attribution and result.style_attribution["portfolio"]
+    assert "style_features" not in result.advanced_stats
+    before = result.model_dump(mode="json")
+
+    async def load(*args, **kwargs):
+        return result
+
+    monkeypatch.setattr(BacktestPersistence, "get_result", load)
+    monkeypatch.setattr(
+        analysis_data,
+        "create_style_feature_loader",
+        lambda *_: pytest.fail("Cached style must precede reader preparation"),
+    )
+    app = FastAPI()
+    app.include_router(analysis.router)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/api/v1/analysis/style-attribution",
+            json={
+                "backtest_id": result.backtest_id,
+                "user_id": "alice",
+                "benchmark": "TOPIX",
+            },
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["data_available"]
+    assert {
+        row["factor"]: row["portfolio"] for row in response.json()["factors"]
+    } == result.style_attribution["portfolio"]
+    assert result.model_dump(mode="json") == before
+
+
+@pytest.mark.asyncio
+async def test_standard_uncached_style_reader_uses_pinned_native_features(
+    standard_report, monkeypatch
+):
+    from qlib.config import C
+
+    result, request, _ = standard_report
+    result.style_attribution = None
+    assert "style_features" not in result.advanced_stats
+    before = deepcopy(C.provider_uri)
+    loader = analysis_data.create_style_feature_loader(result)
+    codes = [result.positions[0]["symbol"], "TOPIX"]
+    frame = loader(codes, ["$close"], request.end_date, request.end_date)
+    assert set(frame.index.get_level_values("instrument")) == set(codes)
+    assert (
+        frame.loc["TOPIX", "$close"].iloc[0]
+        == {"2026-09-28": 2500, "2026-09-29": 2510, "2026-09-30": 2520}[
+            request.end_date
+        ]
+    )
+    assert C.provider_uri == before
+
+
+def test_standard_request_serialization_has_only_shared_fee_fields():
+    from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestRequest
+    from backend.services.engine.qlib_app.services.market_backtest_config import (
+        serialize_market_batch_request,
+    )
+
+    payload = serialize_market_batch_request(
+        QlibBacktestRequest(
+            market="JP",
+            commission=0.01,
+            min_commission=75,
+            impact_cost_coefficient=0.003,
+        )
+    )
+    assert {key for key in payload if key.startswith("jp_")} == {"jp_data_version"}
+    assert (
+        payload["commission"] == 0.01
+        and payload["min_commission"] == 75
+        and payload["impact_cost_coefficient"] == 0.003
+    )

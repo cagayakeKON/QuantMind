@@ -2,7 +2,6 @@
 
 from datetime import date, datetime, timezone
 import json
-import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -10,7 +9,6 @@ from unittest.mock import AsyncMock
 import duckdb
 import pandas as pd
 import pytest
-from sqlalchemy import text
 
 from backend.services.engine.data_platform.jquants_import import import_jquants_snapshot
 from backend.services.engine.data_platform.jp_features import build_jp_features
@@ -19,22 +17,8 @@ from backend.services.engine.inference import gap_backfill, script_runner
 from backend.shared.model_registry import ResolvedModel
 from backend.tests.test_jp_data_platform import snapshot as source_fixture
 from backend.tests.test_jp_features import fake_evaluator
-from backend.tests.test_market_hosted_execution import (
-    boundary as boundary_fixture,
-    cash_setup as cash_setup_fixture,
-    hosted as hosted_fixture,
-    pg as pg_fixture,
-    pipeline as pipeline_fixture,
-    published as published_fixture,
-)
 
 snapshot = source_fixture
-boundary = boundary_fixture
-cash_setup = cash_setup_fixture
-hosted = hosted_fixture
-pg = pg_fixture
-pipeline = pipeline_fixture
-published = published_fixture
 
 
 @pytest.fixture
@@ -234,6 +218,19 @@ def test_execution_pins_publication_through_subprocess_and_reference_price(
         primary_model_dir=str(model), primary_model_id="jp"
     )
     writes = []
+    published = []
+    latest_runs = []
+    monkeypatch.setattr(
+        script_runner,
+        "EngineSignalStreamPublisher",
+        lambda: SimpleNamespace(
+            mark_latest_run=lambda **kw: latest_runs.append(kw),
+            publish_signals=lambda **kw: published.append(kw) or len(kw["signals"]),
+        ),
+    )
+    # JP uses the common signal stream, while the China-only TDX integration
+    # must remain excluded even when it is enabled for the other markets.
+    monkeypatch.setenv("ENABLE_TDX_PUSH", "true")
     db = SimpleNamespace(
         execute=lambda stmt, args: writes.append((str(stmt), args)),
         commit=lambda: None,
@@ -309,6 +306,13 @@ def test_execution_pins_publication_through_subprocess_and_reference_price(
     monkeypatch.setattr(runner, "_persist_and_publish", persist)
     result = runner.execute("2026-09-30", tenant_id="test", user_id="7")
     assert result.success and result.active_data_source == str(first)
+    assert latest_runs == [
+        {"tenant_id": "test", "user_id": "7", "run_id": result.run_id}
+    ]
+    assert len(published) == 1
+    assert published[0]["run_id"] == result.run_id
+    assert published[0]["signals"][0]["symbol"] == "JP72030"
+    assert published[0]["signals"][0]["score"] == 0.7
     assert pins == [str(first)]
     assert result.prediction_trade_date == "2026-10-01"
     score_rows = next(
@@ -356,31 +360,3 @@ def test_jp_writer_cannot_reopen_mutable_current_without_execution_pin(
             [{"symbol": "JP72030", "score": 0.7}],
             data_trade_date="2026-09-30",
         )
-
-
-@pytest.mark.skipif(os.getenv("QM_JP_TEST_PG") != "1", reason="UUID PG opt-in")
-@pytest.mark.asyncio
-async def test_hosted_exact_session_selects_ready_older_batch_and_not_latest(hosted):
-    pipe = hosted
-    async with pipe.pg.sessions() as db:
-        await db.execute(
-            text(
-                "INSERT INTO qm_model_inference_runs SELECT 'newer-run',tenant_id,user_id,model_id,status,data_trade_date + 1,prediction_trade_date + 1,signals_count,created_at + INTERVAL '1 minute',model_source,effective_model_id,fallback_used FROM qm_model_inference_runs WHERE run_id='native-run'"
-            )
-        )
-        await db.commit()
-    selected = await pipe.service.get_default_model_hosted_status(
-        tenant_id="test",
-        user_id="00000007",
-        market="JP",
-        trade_date=pipe.context.trade_date,
-    )
-    assert selected["available"] and selected["latest_run_id"] == "native-run"
-    latest = await pipe.service._load_latest_default_model_inference_run(
-        tenant_id="test", user_id="00000007", model_id="model-jp"
-    )
-    assert latest["run_id"] == "newer-run"
-    missing = await pipe.service.get_default_model_hosted_status(
-        tenant_id="test", user_id="00000007", market="JP", trade_date=date(2026, 10, 1)
-    )
-    assert not missing["available"] and missing["reason_code"] == "missing_latest_run"

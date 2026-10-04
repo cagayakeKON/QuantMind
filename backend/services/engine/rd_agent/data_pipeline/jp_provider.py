@@ -17,6 +17,11 @@ from backend.services.engine.qlib_data_builder import QlibDataBuilder
 from backend.shared.stock_utils import StockCodeUtil
 
 
+JP_PROVIDER_CONTRACT_VERSION = 3
+JP_PROVIDER_CACHE_DIR = "qlib_v3"
+JP_RAW_PROVIDER_CACHE_DIR = "qlib_raw_v3"
+
+
 def _validate_provider(path: Path, symbols: set[str]) -> None:
     calendar = path / "calendars/day.txt"
     instruments = path / "instruments/all.txt"
@@ -30,7 +35,17 @@ def _validate_provider(path: Path, symbols: set[str]) -> None:
     if not symbols or actual != symbols:
         raise ValueError("JP research provider instrument history is incomplete")
     for symbol in symbols:
-        for field in ("open", "high", "low", "close", "volume", "amount", "factor"):
+        for field in (
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "factor",
+            "jp_limit_buy",
+            "jp_limit_sell",
+        ):
             binary = path / "features" / symbol / f"{field}.day.bin"
             if not binary.is_file() or binary.stat().st_size < 8:
                 raise ValueError(f"JP research provider is missing {symbol}/{field}")
@@ -64,14 +79,18 @@ def prepare_jp_rd_provider(
         "market": "JP",
         "data_version": publication.name,
         "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
-        "contract_version": 1,
+        "contract_version": JP_PROVIDER_CONTRACT_VERSION,
     }
     if price_basis == "raw":
-        identity.update(price_basis="raw", contract_version=2)
+        identity.update(
+            price_basis="raw", contract_version=JP_PROVIDER_CONTRACT_VERSION
+        )
     cache = root / ".rd_cache" / publication.name
     if not cache.resolve().is_relative_to(root):
         raise ValueError("JP research cache escapes its source root")
-    output = cache / ("qlib_raw" if price_basis == "raw" else "qlib")
+    output = cache / (
+        JP_RAW_PROVIDER_CACHE_DIR if price_basis == "raw" else JP_PROVIDER_CACHE_DIR
+    )
     with exclusive_file_lock(cache / ".qlib.lock"):
         if not output.resolve().is_relative_to(cache.resolve()):
             raise ValueError("JP research provider escapes its cache directory")

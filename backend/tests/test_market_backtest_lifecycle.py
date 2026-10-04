@@ -1,11 +1,8 @@
-"""Market execution shares task status, progress, persistence and failures."""
+"""Original markets retain shared task completion and failure metadata."""
 
-from datetime import timezone
 from types import SimpleNamespace
-
 import pandas as pd
 import pytest
-
 from backend.services.engine.qlib_app.schemas.backtest import (
     QlibBacktestRequest,
     QlibBacktestResult,
@@ -13,12 +10,8 @@ from backend.services.engine.qlib_app.schemas.backtest import (
 from backend.services.engine.qlib_app.services import (
     backtest_service_runtime as runtime,
 )
-from backend.services.engine.qlib_app.services.backtest_execution import (
-    resolve_market_execution,
-)
-from backend.services.simulation.jp import backtest
 
-pytest_plugins = ["backend.tests.test_jp_model_backtest"]
+pytest_plugins = ["backend.tests.jp_standard_fixtures"]
 
 
 class Store:
@@ -27,100 +20,6 @@ class Store:
 
     async def save_run(self, **kwargs):
         self.saved.append(kwargs)
-
-
-@pytest.mark.parametrize("market", [None, "CN", "HK", "US", "CRYPTO", "FUTURES"])
-def test_existing_markets_keep_original_execution(market):
-    assert resolve_market_execution(QlibBacktestRequest(market=market)) is None
-
-
-def test_legacy_jp_provider_is_only_a_registered_compatibility_marker():
-    execution = resolve_market_execution(
-        QlibBacktestRequest(qlib_provider_uri="/data/quantjp/.qlib_cache/jp_data")
-    )
-    assert execution.market == "JP" and execution.currency == "JPY"
-    assert resolve_market_execution(SimpleNamespace()) is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["manual", "optimization"])
-async def test_jp_runs_inside_common_lifecycle_with_original_model_and_pool(
-    model_data, monkeypatch, runtime_factory, source
-):
-    request, directory, meta = model_data
-    request.history_source = source
-    request.backtest_id = "shared-jp"
-
-    async def resolve(*args):
-        return directory, meta
-
-    monkeypatch.setattr(backtest, "resolve_model", resolve)
-    store = Store()
-    service = runtime_factory(store)
-    original_progress = service._notify_progress
-    polled = []
-
-    async def progress(*args, **kwargs):
-        polled.append(await service.get_status("shared-jp"))
-        await original_progress(*args, **kwargs)
-
-    service._notify_progress = progress
-
-    def forbidden_init(**kwargs):
-        raise AssertionError("JP must not switch the engine's global Qlib provider")
-
-    service.initialize = forbidden_init
-    result = await service.run_backtest(request)
-    assert result.status == "completed" and result.market == "JP"
-    assert result.created_at.tzinfo == timezone.utc
-    assert result.completed_at.tzinfo == timezone.utc
-    assert result.total_trades == 1 and result.trades[0]["symbol"] == "JP72030"
-    assert service._runs["shared-jp"]["result"] is result
-    assert [event["status"] for event in service.events] == ["running", "completed"]
-    assert [event["progress"] for event in service.events] == [0.05, 1.0]
-    assert [status["status"] for status in polled] == ["running", "completed"]
-    assert 0 <= polled[0]["progress"] <= 0.95
-    assert (
-        service._runs["shared-jp"]["created_at"].timestamp()
-        == result.created_at.timestamp()
-    )
-    if source == "manual":
-        assert [entry["status"] for entry in store.saved] == ["running", "completed"]
-        assert all(entry["created_at"] == result.created_at for entry in store.saved)
-        assert store.saved[-1]["config"] == result.config
-        assert len(service.notifications) == 1
-    else:
-        assert store.saved == [] and service.notifications == []
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["manual", "optimization"])
-async def test_jp_failure_has_common_status_and_preserves_utc_and_owner(
-    runtime_factory, monkeypatch, source
-):
-    async def unavailable(*args):
-        raise LookupError("requested model is unavailable")
-
-    monkeypatch.setattr(backtest, "resolve_model", unavailable)
-    store = Store()
-    service = runtime_factory(store)
-    request = QlibBacktestRequest(
-        market="JP", user_id="alice", tenant_id="tenant-a", history_source=source
-    )
-    result = await service.run_backtest(request)
-    assert result.status == "failed" and result.currency == "JPY"
-    assert result.user_id == "alice" and result.tenant_id == "tenant-a"
-    assert result.created_at.tzinfo == timezone.utc
-    assert result.completed_at.tzinfo == timezone.utc
-    assert result.long_short_is_theoretical is False
-    assert service._runs[result.backtest_id]["status"] == "failed"
-    assert [event["status"] for event in service.events] == ["running", "failed"]
-    if source == "manual":
-        assert [entry["status"] for entry in store.saved] == ["running", "failed"]
-        assert store.saved[-1]["result"] is result
-        assert len(service.notifications) == 1
-    else:
-        assert store.saved == [] and service.notifications == []
 
 
 @pytest.mark.asyncio

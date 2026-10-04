@@ -19,14 +19,12 @@ import asyncio
 import logging
 import math
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
-from backend.shared.stock_utils import StockCodeUtil
 
 from backend.services.simulation.models.order import (
     OrderSide,
@@ -40,11 +38,6 @@ from backend.services.simulation.models.replay import (
     ReplayTrade,
 )
 from backend.services.simulation.replay.account import ReplayAccountManager
-from backend.services.simulation.replay.persistence import checkpointed_operation
-from backend.services.simulation.replay.execution_context import (
-    ReplayExecutionContext,
-    open_registered_replay_execution_context,
-)
 from backend.services.simulation.replay.proposal import (
     resolve_stop_fill_price,
     scan_stop_loss,
@@ -72,6 +65,7 @@ from backend.services.simulation.replay.signal_generator import (
     ReplaySignalLoader,
     replay_signal_loader,
 )
+from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
 
@@ -129,47 +123,13 @@ class ReplayDayRunner:
         market_data: LocalMarketData | None = None,
         loader: ReplaySignalLoader | None = None,
         match_config: MatchConfig | None = None,
-        *,
-        execution_context: ReplayExecutionContext | None = None,
     ):
         self._market_data = market_data or get_local_market_data()
         self._loader = loader or replay_signal_loader
         # 回放按开盘价撮合：信号是昨收后算出来的，次日开盘才可交易
         self._cfg = match_config or MatchConfig(price_mode="open")
         self._calculator = RebalanceCalculator()
-        self._execution_context = execution_context
-        self._provided_execution_context = execution_context
-        self._has_market_match_config = match_config is not None
 
-    async def _prepare_execution_context(
-        self, params, trade_date, accounts, match_config=None
-    ):
-        context = self._provided_execution_context
-        if context is None:
-            context = await asyncio.to_thread(
-                open_registered_replay_execution_context, params, trade_date
-            )
-        if context is not None:
-            selected = params.get("market")
-            if (
-                not isinstance(selected, str)
-                or selected.upper() != context.market
-                or params.get("data_version") != context.data_version
-            ):
-                raise ValueError("Replay parameters do not match execution context")
-            context.require_account(accounts, trade_date)
-            if not self._has_market_match_config and match_config is None:
-                raise ValueError("Registered replay requires explicit matching settings")
-        self._execution_context = context
-
-    def _require_market_features(self, *, code=False, stop_loss=False):
-        if self._execution_context is not None and (code or stop_loss):
-            raise NotImplementedError(
-                "Registered replay requires its code/intraday data adapter "
-                "before using these execution paths"
-            )
-
-    @checkpointed_operation()
     async def run_day(
         self,
         db: AsyncSession,
@@ -192,13 +152,6 @@ class ReplayDayRunner:
         cfg = match_config or self._cfg
 
         params = strategy_params or {}
-        await self._prepare_execution_context(
-            params, trade_date, accounts, match_config
-        )
-        self._require_market_features(
-            code=self._is_code_session(params),
-            stop_loss=bool(stop_loss_pct and stop_loss_pct > 0),
-        )
         account_data, signals, bars = await self._prepare_day(
             db, session_id, trade_date, accounts, params
         )
@@ -266,7 +219,6 @@ class ReplayDayRunner:
         )
         return result
 
-    @checkpointed_operation()
     async def execute_day(
         self,
         db: AsyncSession,
@@ -288,13 +240,6 @@ class ReplayDayRunner:
         result = DayResult(trade_date=trade_date)
         cfg = match_config or self._cfg
 
-        await self._prepare_execution_context(
-            strategy_params or {}, trade_date, accounts, match_config
-        )
-        self._require_market_features(
-            code=self._is_code_session(strategy_params),
-            stop_loss=any(item.get("origin") == "stop_loss" for item in accepted),
-        )
         account_data, signals, bars = await self._prepare_day(
             db, session_id, trade_date, accounts, strategy_params
         )
@@ -366,7 +311,6 @@ class ReplayDayRunner:
         cfg: MatchConfig,
     ) -> None:
         """执行单笔止损（手动模式下止损强制执行，复用 auto 路径的价格逻辑）。"""
-        self._require_market_features(stop_loss=True)
         symbol = item["symbol"]
         bar = bars.get(symbol)
         if bar is None or bar.suspended:
@@ -448,16 +392,11 @@ class ReplayDayRunner:
         code 模式不载模型分数（signals=[]），wanted 按持仓 ∪ 策略代码
         symbols 取行情，保证策略标的有 bar 可撮合。
         """
-        if self._execution_context is not None:
-            self._execution_context.require_account(accounts, trade_date)
         account_data = await accounts.get()
         if not account_data:
             return None, [], {}
 
-        if self._execution_context is not None:
-            await accounts.prepare_dated_day(trade_date)
-        else:
-            await accounts.unlock()
+        await accounts.unlock()
         account_data = await accounts.get() or {}
 
         held = list((account_data.get("positions") or {}).keys())
@@ -466,6 +405,8 @@ class ReplayDayRunner:
         if params.get("_mode") == "code":
             from backend.services.simulation.replay import code_runner
 
+            if accounts.market == "JP" and code_runner.get_session(session_id) is None:
+                await self._ensure_code_compiled(db, session_id, params, "default", "0")
             code_symbols = code_runner.session_symbols(session_id)
             signals: list = []
         else:
@@ -480,13 +421,7 @@ class ReplayDayRunner:
         # 行情直读是同步磁盘 IO，放线程里跑，避免阻塞事件循环
         bars = (
             await asyncio.to_thread(
-                (
-                    self._execution_context.reader
-                    if self._execution_context is not None
-                    else self._market_data
-                ).load_date,
-                trade_date,
-                wanted,
+                self._market_data.load_date, trade_date, wanted
             )
             if wanted
             else {}
@@ -505,7 +440,6 @@ class ReplayDayRunner:
         user_id: str,
     ) -> Any:
         """取 code 会话编译产物；进程重启导致缓存丢失时按固化代码自动重编。"""
-        self._require_market_features(code=True)
         from backend.services.simulation.models.replay import ReplaySession
         from backend.services.simulation.replay import code_runner
 
@@ -524,6 +458,8 @@ class ReplayDayRunner:
         start = window.get("start") or (row.start_date.isoformat() if row else date.today().isoformat())
         end = window.get("end") or (row.end_date.isoformat() if row else date.today().isoformat())
         cash = float(window.get("cash") or (row.initial_cash if row else 0.0))
+        if strategy_params.get("market") == "JP" and row:
+            tenant_id, user_id = row.tenant_id, str(row.user_id)
         return await asyncio.to_thread(
             code_runner.prepare_session,
             session_id,
@@ -550,7 +486,6 @@ class ReplayDayRunner:
         user_id: str,
     ) -> tuple[list[Order], dict[str, Any]]:
         """code 模式：跑用户 hooks → OrderIntent → Order（具体 qty+开盘价）。"""
-        self._require_market_features(code=True)
         from backend.services.simulation.replay import code_runner
 
         await self._ensure_code_compiled(
@@ -566,7 +501,6 @@ class ReplayDayRunner:
         )
         return orders, info
 
-    @checkpointed_operation(preview=True)
     async def propose_day(
         self,
         db: AsyncSession,
@@ -586,11 +520,6 @@ class ReplayDayRunner:
         卖出附 avg_cost/est_pnl，买入附 est_amount。
         """
         params = strategy_params or {}
-        await self._prepare_execution_context(params, trade_date, accounts)
-        self._require_market_features(
-            code=self._is_code_session(params),
-            stop_loss=bool(stop_loss_pct and stop_loss_pct > 0),
-        )
         account_data, signals, bars = await self._prepare_day(
             db, session_id, trade_date, accounts, params
         )
@@ -651,6 +580,10 @@ class ReplayDayRunner:
                 item["est_amount"] = round(float(o.price) * int(o.quantity), 2)
             proposals.append(item)
 
+        for item in proposals:
+            bar = bars.get(item["symbol"])
+            if bar and StockCodeUtil.is_jp_symbol(bar.symbol):
+                item["trading_unit"] = bar.lot_size
         return {
             "trade_date": trade_date.isoformat(),
             "signal_count": len(signals),
@@ -672,7 +605,6 @@ class ReplayDayRunner:
         result: DayResult,
         cfg: MatchConfig | None = None,
     ) -> None:
-        self._require_market_features(stop_loss=True)
         cfg = cfg or self._cfg
         account_data = await accounts.get() or {}
         for symbol, pos in list((account_data.get("positions") or {}).items()):
@@ -791,19 +723,14 @@ class ReplayDayRunner:
                 else False,
                 is_suspended=bar.suspended,
                 pre_close=bar.pre_close if bar.pre_close > 0 else None,
+                lot_size=bar.lot_size if StockCodeUtil.is_jp_symbol(sym) else None,
             )
             for sym, bar in bars.items()
         }
-        custom_weights = strategy_params.get("custom_weights", {}) or {}
-        if self._execution_context is not None:
-            custom_weights = {
-                self._execution_context.symbol(symbol): weight
-                for symbol, weight in custom_weights.items()
-            }
         config = StrategyConfig(
             topk=int(strategy_params.get("topk", 10)),
             weight_mode=WeightMode(strategy_params.get("weight_mode", "equal")),
-            custom_weights=custom_weights,
+            custom_weights=strategy_params.get("custom_weights", {}) or {},
             min_score=float(strategy_params.get("min_score", 0.0)),
             max_position_pct=float(strategy_params.get("max_position_pct", 0.15)),
             lot_size=int(strategy_params.get("lot_size", 100)),
@@ -828,14 +755,7 @@ class ReplayDayRunner:
             total_asset=float(account_data.get("total_asset", 0)),
             positions=account_data.get("positions", {}) or {},
         )
-        calculator = self._calculator
-        if self._execution_context is not None:
-            calculator = RebalanceCalculator(
-                trading_unit=lambda symbol: self._execution_context.trading_unit(
-                    symbol, bars
-                )
-            )
-        return calculator.calculate(
+        return self._calculator.calculate(
             signals=signals, strategy=config, quotes=quotes, account=account,
             day_index=day_index,
         )
@@ -852,11 +772,6 @@ class ReplayDayRunner:
         origin: OrderOrigin,
         cfg: MatchConfig | None = None,
     ) -> None:
-        context = self._execution_context
-        if context is not None:
-            context.require_account(accounts, trade_date)
-            if cfg is None and not self._has_market_match_config:
-                raise ValueError("Registered replay requires explicit matching settings")
         cfg = cfg or self._cfg
         bar = bars.get(order.symbol)
         if bar is None:
@@ -886,25 +801,13 @@ class ReplayDayRunner:
                 avg_cost_before = cost if cost > 0 else None
                 holding_days = _compute_holding_days(pos.get("first_buy_date"), trade_date)
 
-        if context is not None:
-            used_volume = await context.executed_volume(accounts, order.symbol)
-            mr = context.match(
-                symbol=order.symbol,
-                side=side,
-                quantity=order.quantity,
-                bar=bar,
-                cfg=cfg,
-                available_volume=available_volume,
-                used_volume=used_volume,
-            )
-        else:
-            mr = match_order(
-                side=side,
-                quantity=int(order.quantity),
-                bar=bar,
-                cfg=cfg,
-                available_volume=available_volume,
-            )
+        mr = match_order(
+            side=side,
+            quantity=int(order.quantity),
+            bar=bar,
+            cfg=cfg,
+            available_volume=available_volume,
+        )
         if not mr.success:
             result.rejected.append(
                 {
@@ -918,39 +821,18 @@ class ReplayDayRunner:
             )
             return
 
-        fill_order_id = None
-        if context is not None:
-            fill_order_id = uuid.uuid4()
-            update = await accounts.apply_dated_fill(
-                trade_date=trade_date, symbol=order.symbol, side=side, matched=mr,
-                order_id=fill_order_id,
-            )
-            # Exact amounts go to the dated cash rules. The common PG/response
-            # contract remains numeric. Accounting below uses the registered
-            # cash adapter's consumed lot cost when that capability is supplied.
-            mr = replace(
-                mr,
-                **{
-                    name: float(getattr(mr, name))
-                    for name in (
-                        "fill_price", "commission", "stamp_duty",
-                        "transfer_fee", "total_fee",
-                    )
-                },
-            )
+        gross = mr.fill_quantity * mr.fill_price
+        if side == "buy":
+            delta_cash, delta_volume = -(gross + mr.total_fee), mr.fill_quantity
         else:
-            gross = mr.fill_quantity * mr.fill_price
-            if side == "buy":
-                delta_cash, delta_volume = -(gross + mr.total_fee), mr.fill_quantity
-            else:
-                delta_cash, delta_volume = gross - mr.total_fee, -mr.fill_quantity
+            delta_cash, delta_volume = gross - mr.total_fee, -mr.fill_quantity
 
-            update = await accounts.apply_fill(
-                symbol=order.symbol,
-                delta_cash=delta_cash,
-                delta_volume=delta_volume,
-                price=mr.fill_price,
-            )
+        update = await accounts.apply_fill(
+            symbol=order.symbol,
+            delta_cash=delta_cash,
+            delta_volume=delta_volume,
+            price=mr.fill_price,
+        )
         if not update.get("success"):
             reason = update.get("reason", "BALANCE_UPDATE_FAILED")
             result.rejected.append(
@@ -965,9 +847,6 @@ class ReplayDayRunner:
             )
             return
 
-        fill_accounting = update.get("fill_accounting")
-        if fill_accounting is not None:
-            avg_cost_before = fill_accounting["avg_cost_before"]
         realized = await self._persist_fill(
             db,
             session_id,
@@ -984,11 +863,6 @@ class ReplayDayRunner:
             price_source=f"local_{cfg.price_mode}",
             avg_cost_before=avg_cost_before,
             holding_days=holding_days,
-            **({"order_id": fill_order_id} if fill_order_id is not None else {}),
-            **(
-                {"realized_pnl_override": fill_accounting["realized_pnl"]}
-                if fill_accounting is not None else {}
-            ),
         )
         result.realized_pnl_today += realized
         # 买入后记录首次买入日，供后续卖出算持有天数
@@ -1045,18 +919,13 @@ class ReplayDayRunner:
         price_source: str,
         avg_cost_before: float | None = None,
         holding_days: int | None = None,
-        order_id: uuid.UUID | None = None,
-        realized_pnl_override: float | None = None,
     ) -> float:
         """落库委托 + 成交，返回本笔已实现盈亏（买入返回 0.0）。
 
         avg_cost_before 必须由调用方在 apply_fill **之前**抓取 —— Lua 在
         volume<=0.0001 时会删掉整个持仓 dict，清仓后 cost 永久丢失。
         """
-        if self._execution_context is not None:
-            symbol = StockCodeUtil.to_prefix(symbol, market=self._execution_context.market)
         order_row = ReplayOrder(
-            **({"order_id": order_id} if order_id is not None else {}),
             session_id=session_id,
             trade_date=trade_date,
             symbol=symbol,
@@ -1075,14 +944,10 @@ class ReplayDayRunner:
         db.add(order_row)
         await db.flush()
 
-        # 原账户保留移动加权成本；注册现金规则提供实际消耗批次的已实现盈亏。
+        # 已实现盈亏仅在卖出时产生：(卖价 - 移动加权成本) × 数量 - 全部费用
         realized_pnl: float | None = None
         if side == OrderSide.SELL and avg_cost_before is not None and avg_cost_before > 0:
-            realized_pnl = (
-                realized_pnl_override
-                if realized_pnl_override is not None
-                else (price - avg_cost_before) * quantity - total_fee
-            )
+            realized_pnl = (price - avg_cost_before) * quantity - total_fee
 
         db.add(
             ReplayTrade(
@@ -1120,10 +985,7 @@ class ReplayDayRunner:
             ReplayOrder(
                 session_id=session_id,
                 trade_date=trade_date,
-                symbol=(
-                    StockCodeUtil.to_prefix(order.symbol, market=self._execution_context.market)
-                    if self._execution_context is not None else order.symbol
-                ),
+                symbol=order.symbol,
                 side=OrderSide.BUY if order.side.lower() == "buy" else OrderSide.SELL,
                 order_type=OrderType.MARKET,
                 status=OrderStatus.REJECTED,
@@ -1230,13 +1092,7 @@ class ReplayDayRunner:
         row.realized_pnl_cum = realized_pnl_cum
         row.unrealized_pnl = unrealized_pnl
         row.position_count = len(positions)
-        row.positions = (
-            {
-                StockCodeUtil.to_prefix(symbol, market=self._execution_context.market): position
-                for symbol, position in positions.items()
-            }
-            if self._execution_context is not None else positions
-        )
+        row.positions = positions
         if existing is None:
             db.add(row)
 

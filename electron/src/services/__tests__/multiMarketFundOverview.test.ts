@@ -43,14 +43,13 @@ describe('existing user aggregate fund calculation in all markets', () => {
       cacheRead.mockRestore();
     }
   });
-  it('shows native JPY capital and daily PnL without the CNY user baseline', async () => {
-    mocks.simulation.mockResolvedValue({...account, currency: 'JPY', total_asset: 30000, cash: 20000,
-      initial_equity: 30000, total_pnl: 0, today_pnl: 0});
+  it('keeps JP on the same user base-currency capital and PnL contract', async () => {
+    mocks.simulation.mockResolvedValue({...account, base_currency: 'CNY'});
     const result = await portfolioService.getFundOverview('owner', 'simulation', 'tenant', 'JP');
-    expect(result.data.totalAsset).toBe(30000);
-    expect(result.data.todayPnL).toBe(0);
-    expect(result.data.currency).toBe('JPY');
-    expect(mocks.simulation).toHaveBeenCalledWith('owner', 'tenant', 'JP', {timeoutMs: 8000});
+    expect(result.data.totalAsset).toBe(123456);
+    expect(result.data.todayPnL).toBe(10);
+    expect(result.data.currency).toBeUndefined();
+    expect(mocks.simulation).toHaveBeenCalledWith('owner', 'tenant', undefined, {timeoutMs: 8000});
   });
   it('does not invent capital or import replay money when the common account is unavailable', async () => {
     mocks.simulation.mockRejectedValue(new Error('Common account unavailable'));

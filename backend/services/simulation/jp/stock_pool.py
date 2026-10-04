@@ -17,18 +17,26 @@ FIELD_MAPPING = {
 
 
 def _price_conditions(hub, day, frame):
-    dates = hub._partition_dates("1_kline_data/daily_forward", end=day)
-    if not dates:
+    windows = (1, 3, 5, 10, 20, 60)
+    for window in windows:
+        frame[f"return_{window}d"] = float("nan")
+    frame["pct_change"] = float("nan")
+    calendar = hub.fetch_calendar(end=day)
+    if calendar.empty:
         return frame
-    oldest = dates[max(0, len(dates) - 61)]
-    start = date.fromisoformat(f"{oldest[:4]}-{oldest[4:6]}-{oldest[6:]}")
+    sessions = pd.DatetimeIndex(calendar.trade_date).normalize().unique().sort_values()
+    if pd.Timestamp(day) not in sessions:
+        return frame
+    sessions = sessions[-61:]
+    start = sessions[0].date()
     history = hub._normalize_kline(hub._read("1_kline_data/daily_forward", start, day))
     if history.empty:
         return frame
     prices = history.pivot(
         index="trade_date", columns="symbol", values="close"
-    ).sort_index()
-    for window in (1, 3, 5, 10, 20, 60):
+    ).reindex(sessions)
+    prices = prices.apply(pd.to_numeric, errors="coerce").where(lambda p: p > 0)
+    for window in windows:
         frame[f"return_{window}d"] = (
             prices.pct_change(periods=window, fill_method=None)
             .iloc[-1]

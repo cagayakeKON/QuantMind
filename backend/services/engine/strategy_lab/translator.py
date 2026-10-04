@@ -196,8 +196,8 @@ def translate_sdk_to_template(
             currency=provider.currency,
             data_version=provider.reader.data_version,
             benchmark=provider.benchmark,
-            event_price_basis="raw",
-            history_price_basis="raw",
+            event_price_basis="adjusted",
+            history_price_basis="adjusted",
             research_history_adjust="qfq",
         )
 

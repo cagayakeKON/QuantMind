@@ -33,7 +33,6 @@ from backend.services.trade_shared.models.order import Order
 
 from .manual_execution_log_stream import manual_execution_log_stream
 from .manual_execution_persistence import manual_execution_persistence
-from .manual_execution_context import registered_manual_preview, registered_manual_task
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +113,10 @@ def _get_realtime_price(symbol: str) -> float | None:
     探测全部候选键（规范前缀式大小写 + Legacy 后缀式），命中即返回，
     全部未命中时回退 QuantDB 本地日线（模拟撮合同源），保证能算出手数。
     """
+    from backend.shared.stock_utils import StockCodeUtil
+
+    if StockCodeUtil.is_jp_symbol(symbol):
+        return _get_quantdb_last_close(symbol)
     try:
         r = _get_quote_redis()
         if r:
@@ -148,7 +151,12 @@ def _get_quantdb_last_close(symbol: str) -> float | None:
         suffix = StockCodeUtil.to_suffix(symbol)
         if not suffix:
             return None
-        market_data = get_local_market_data()
+        # JP uses its local daily market feed through the same bar contract.
+        market_data = (
+            get_local_market_data("JP")
+            if StockCodeUtil.is_jp_symbol(symbol)
+            else get_local_market_data()
+        )
         latest_date = market_data.latest_trade_date()
         if latest_date is None:
             return None
@@ -187,7 +195,7 @@ class PreparedManualExecution:
     request_payload: dict[str, Any]
     run: dict[str, Any]
     strategy: dict[str, Any]
-    cycle_context: Any = None
+    market: str = "CN"
 
 
 def _parse_iso_date(value: Any) -> date:
@@ -333,7 +341,6 @@ def _rebuild_buy_orders_with_budget(
     *,
     buy_orders: list[dict[str, Any]],
     buy_budget: float,
-    plan_inputs=None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], float]:
     """
     根据“卖出成交后可用资金”重算买单数量。
@@ -362,10 +369,7 @@ def _rebuild_buy_orders_with_budget(
             0.0,
         )
         if reference_price <= 0:
-            reference_price = _to_float(
-                plan_inputs.price(symbol, "BUY") if plan_inputs is not None
-                else _get_realtime_price(symbol), 0.0,
-            )
+            reference_price = _to_float(_get_realtime_price(symbol), 0.0)
         if reference_price <= 0:
             skipped_items.append(
                 {
@@ -377,10 +381,7 @@ def _rebuild_buy_orders_with_budget(
             )
             continue
 
-        lot_size = (
-            plan_inputs.unit(symbol) if plan_inputs is not None
-            else _resolve_board_lot_size(symbol)
-        )
+        lot_size = _resolve_board_lot_size(symbol)
         quantity = _floor_board_lot(per_slot_budget / reference_price, lot_size)
         if quantity <= 0:
             skipped_items.append(
@@ -399,7 +400,7 @@ def _rebuild_buy_orders_with_budget(
         updated = dict(row)
         updated["quantity"] = quantity
         updated["reference_price"] = reference_price
-        updated["price"] = None if plan_inputs is not None else reference_price
+        updated["price"] = reference_price
         updated["estimated_notional"] = estimated_notional
         updated["reason"] = (
             f"{str(row.get('reason') or '').strip()}；账户快照资金重算"
@@ -421,6 +422,18 @@ def _floor_board_lot(quantity: float, lot_size: int = 100) -> int:
 
 def _resolve_board_lot_size(symbol: str) -> int:
     from backend.services.simulation.services.market_rules import lot_size_for_symbol
+    from backend.shared.stock_utils import StockCodeUtil
+
+    if StockCodeUtil.is_jp_symbol(symbol):
+        from backend.services.simulation.services.local_market_data import (
+            get_local_market_data,
+        )
+
+        data = get_local_market_data("JP")
+        day = data.latest_trade_date()
+        bar = data.get_bar(StockCodeUtil.to_suffix(symbol), day) if day else None
+        if bar is not None:
+            return max(1, int(bar.lot_size))
 
     return max(1, int(lot_size_for_symbol(symbol)))
 
@@ -455,7 +468,7 @@ def _apply_fundamental_constraints_to_signal_rows(
     *,
     strategy_params: dict[str, Any],
     trade_date: date | None,
-    filter_instruments=None,
+    market: str | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     if not rows or trade_date is None:
         return rows, 0
@@ -484,8 +497,21 @@ def _apply_fundamental_constraints_to_signal_rows(
         return explicit_sell_rows, 0
 
     input_symbols = [str(row["symbol"]) for row in candidates]
+    aligner = fundamental_aligner
+    if market == "JP":
+        from backend.services.engine.data_platform.market_provider import (
+            LOCAL_MARKET_PROVIDERS,
+        )
+        from backend.services.simulation.jp.feature_snapshot import (
+            JPFeatureSnapshotReader,
+        )
+        from backend.shared.fundamental_aligner import FundamentalAligner
+
+        aligner = FundamentalAligner(
+            snapshot_loader=JPFeatureSnapshotReader(LOCAL_MARKET_PROVIDERS["JP"].open())
+        )
     filtered_symbols = set(
-        (filter_instruments or fundamental_aligner.filter_instruments)(
+        aligner.filter_instruments(
             trade_date, input_symbols, constraints=constraints
         )
     )
@@ -656,13 +682,13 @@ def _build_execution_plan_from_signals(
     strategy_params: dict[str, Any],
     account_snapshot: dict[str, Any],
     trade_date: date | None = None,
-    plan_inputs=None,
+    market: str | None = None,
 ) -> dict[str, Any]:
     filtered_rows, fundamental_dropped = _apply_fundamental_constraints_to_signal_rows(
         signal_rows,
         strategy_params=strategy_params,
         trade_date=trade_date,
-        **({"filter_instruments": plan_inputs.fundamental_filter} if plan_inputs is not None else {}),
+        **({"market": "JP"} if market == "JP" else {}),
     )
     # 统一 symbol 为 suffix 格式（600036.SH），保证持仓匹配/价格查询/下单一致
     from backend.shared.stock_utils import StockCodeUtil
@@ -670,8 +696,16 @@ def _build_execution_plan_from_signals(
     for row in filtered_rows:
         sym = str(row.get("symbol") or "").strip()
         if sym:
-            row["symbol"] = StockCodeUtil.to_suffix(sym)
+            row["symbol"] = StockCodeUtil.to_suffix(
+                sym, **({"market": "JP"} if market == "JP" else {})
+            )
     positions = _normalize_positions((account_snapshot or {}).get("positions"))
+    if market == "JP":
+        positions = {
+            StockCodeUtil.to_suffix(symbol): position
+            for symbol, position in positions.items()
+            if StockCodeUtil.is_jp_symbol(symbol)
+        }
     cash = _to_float(
         account_snapshot.get("available_cash") or account_snapshot.get("cash"), 0.0
     )
@@ -696,8 +730,6 @@ def _build_execution_plan_from_signals(
         quantity = max(0, _to_int(position.get("available_volume"), 0))
         expected_price = _to_float(row.get("expected_price"), 0.0)
         reference_price = expected_price or _to_float(position.get("last_price"), 0.0)
-        if plan_inputs is not None:
-            reference_price = plan_inputs.price(symbol, "SELL")
         if reference_price <= 0:
             skipped_items.append(
                 {
@@ -718,8 +750,8 @@ def _build_execution_plan_from_signals(
                 "side": "SELL",
                 "trade_action": "SELL_TO_CLOSE",
                 "quantity": quantity,
-                "order_type": "MARKET" if plan_inputs is not None else "LIMIT",
-                "price": None if plan_inputs is not None else limit_price,
+                "order_type": "LIMIT",
+                "price": limit_price,
                 "reference_price": reference_price,
                 "estimated_notional": round(quantity * reference_price, 2),
                 "current_volume": _to_int(position.get("volume"), 0),
@@ -738,11 +770,15 @@ def _build_execution_plan_from_signals(
     _fee_min = float(settings.SIMULATION_COMMISSION_MIN)
     _stamp_rate = float(settings.SIMULATION_STAMP_DUTY_RATE)
 
-    def _est_fee(notional: float, is_sell: bool, *, symbol=None, quantity=None, price=None) -> float:
+    def _est_fee(notional: float, is_sell: bool, symbol: str = "") -> float:
         if notional <= 0:
             return 0.0
-        if plan_inputs is not None:
-            return plan_inputs.fee(symbol, quantity, price, "SELL" if is_sell else "BUY")
+        if StockCodeUtil.is_jp_symbol(symbol):
+            from backend.services.simulation.services.market_rules import JP_RULES
+
+            return round(
+                max(notional * JP_RULES.commission_rate, JP_RULES.commission_min), 2
+            )
         fee = max(notional * _fee_rate, _fee_min)
         if is_sell:
             fee += notional * _stamp_rate
@@ -751,8 +787,9 @@ def _build_execution_plan_from_signals(
     estimated_sell_proceeds = sum(
         max(
             _to_float(item.get("estimated_notional"), 0.0)
-            - _est_fee(_to_float(item.get("estimated_notional"), 0.0), True,
-                **({"symbol": item["symbol"], "quantity": item["quantity"], "price": item["reference_price"]} if plan_inputs is not None else {})),
+            - _est_fee(
+                _to_float(item.get("estimated_notional"), 0.0), True, item["symbol"]
+            ),
             0.0,
         )
         for item in sell_orders
@@ -777,12 +814,8 @@ def _build_execution_plan_from_signals(
             )
             continue
         reference_price = _to_float(row.get("expected_price"), 0.0)
-        if plan_inputs is not None:
-            reference_price = plan_inputs.price(symbol, "BUY")
         if reference_price <= 0:
-            reference_price = (
-                0.0 if plan_inputs is not None else _get_realtime_price(symbol) or 0.0
-            )
+            reference_price = _get_realtime_price(symbol) or 0.0
         valid_candidates.append(
             dict(row, symbol=symbol, reference_price=reference_price)
         )
@@ -802,17 +835,16 @@ def _build_execution_plan_from_signals(
                 }
             )
             continue
-        lot_size = (
-            plan_inputs.unit(str(row["symbol"])) if plan_inputs is not None
-            else _resolve_board_lot_size(str(row["symbol"]))
-        )
+        lot_size = _resolve_board_lot_size(str(row["symbol"]))
         quantity = _floor_board_lot(per_slot_budget / ref_price, lot_size)
         # 预留佣金：本金+费用不超过当前槽位预算，否则逐手递减，
         # 避免等额分仓打满现金后成交扣费导致现金不足。
         while quantity > 0:
             _notional = quantity * ref_price
-            if _notional + _est_fee(_notional, False,
-                **({"symbol": row["symbol"], "quantity": quantity, "price": ref_price} if plan_inputs is not None else {})) <= per_slot_budget + 0.01:
+            if (
+                _notional + _est_fee(_notional, False, row["symbol"])
+                <= per_slot_budget + 0.01
+            ):
                 break
             quantity -= lot_size
         if quantity <= 0:
@@ -836,8 +868,8 @@ def _build_execution_plan_from_signals(
                 "side": "BUY",
                 "trade_action": "BUY_TO_OPEN",
                 "quantity": quantity,
-                "order_type": "MARKET" if plan_inputs is not None else "LIMIT",
-                "price": None if plan_inputs is not None else ref_price,
+                "order_type": "LIMIT",
+                "price": ref_price,
                 "reference_price": ref_price,
                 "estimated_notional": estimated_notional,
                 "current_volume": 0,
@@ -1001,7 +1033,7 @@ class ManualExecutionService:
             )
 
     async def _load_simulation_account_snapshot(
-        self, *, tenant_id: str, user_id: str, cycle_context=None, db=None,
+        self, *, tenant_id: str, user_id: str, market: str | None = None
     ) -> dict[str, Any] | None:
         """读取模拟账户快照（simulation:account Redis 缓存），供手动任务模拟模式使用。
 
@@ -1009,12 +1041,6 @@ class ManualExecutionService:
         非数字 JWT sub 在模拟盘初始化时被映射为 0 建账，这里查键时同样回退 0，
         否则手动任务会因键不命中误报「未检测到模拟账户」。
         """
-        if cycle_context is not None:
-            from .manual_execution_context import read_manual_snapshot
-
-            return await read_manual_snapshot(
-                cycle_context, tenant_id=tenant_id, user_id=user_id, redis=get_redis(), db=db,
-            )
         from backend.services.trade_shared.simulation_manager import (
             SimulationAccountManager,
         )
@@ -1022,6 +1048,23 @@ class ManualExecutionService:
         uid_raw = str(user_id or "").strip()
         uid = uid_raw if uid_raw.isdigit() else "0"
         manager = SimulationAccountManager(get_redis())
+        if market == "JP":
+            from backend.services.simulation.services.legacy_jp_state import (
+                LegacyJPNativeState,
+                read_existing_jp_account,
+                require_standard_account,
+            )
+
+            async with get_session(read_only=True) as db:
+                try:
+                    await require_standard_account(
+                        db, tenant_id or "default", uid,
+                        cached=read_existing_jp_account(
+                            manager.redis, tenant_id or "default", uid
+                        ),
+                    )
+                except LegacyJPNativeState as error:
+                    raise HTTPException(status_code=409, detail=str(error)) from error
         account = await manager.get_account(int(uid), tenant_id=tenant_id or "default")
         if not account:
             return None
@@ -1105,39 +1148,21 @@ class ManualExecutionService:
         *,
         data_trade_date: date,
         target_horizon_days: int,
+        market: str = "CN",
     ) -> tuple[date, date]:
+        if market == "JP":
+            from backend.services.simulation.services.market_schedule import (
+                open_registered_schedule_context,
+            )
+
+            schedule = open_registered_schedule_context("JP")
+            return (
+                schedule.shift_sessions(data_trade_date, 1),
+                schedule.shift_sessions(data_trade_date, max(1, target_horizon_days)),
+            )
         start_date = _shift_trading_sessions(data_trade_date, 1)
         deadline = _shift_trading_sessions(data_trade_date, max(1, target_horizon_days))
         return start_date, deadline
-
-    async def _load_default_model_inference_run_for_session(
-        self, *, tenant_id: str, user_id: str, model_id: str, trade_date: date
-    ) -> dict[str, Any] | None:
-        """A dated next-open cycle consumes its exact prediction session."""
-        async with get_session(read_only=True) as session:
-            row = (
-                (
-                    await session.execute(
-                        text("""
-                        SELECT * FROM qm_model_inference_runs
-                        WHERE tenant_id = :tenant_id AND user_id = :user_id
-                          AND model_id = :model_id AND status = 'completed'
-                          AND prediction_trade_date = :trade_date
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                        """),
-                        {
-                            "tenant_id": tenant_id,
-                            "user_id": user_id,
-                            "model_id": model_id,
-                            "trade_date": trade_date,
-                        },
-                    )
-                )
-                .mappings()
-                .first()
-            )
-        return dict(row) if row else None
 
     async def _persist_task(
         self,
@@ -1277,30 +1302,13 @@ class ManualExecutionService:
         return dict(row) if row else None
 
     async def get_default_model_hosted_status(
-        self, *, tenant_id: str, user_id: str,
-        market: str | None = None, trade_date: date | None = None,
+        self, *, tenant_id: str, user_id: str
     ) -> dict[str, Any]:
         tenant = (tenant_id or "").strip() or "default"
         uid = str(user_id or "").strip()
-        schedule = None
-        if market is None:
-            if trade_date is not None:
-                raise ValueError("A hosted execution date requires a registered market")
-            default_model = await self._load_user_default_model_record(
-                tenant_id=tenant, user_id=uid
-            )
-        else:
-            from .hosted_execution_context import load_hosted_model_inputs
-
-            try:
-                default_model, schedule = await load_hosted_model_inputs(
-                    tenant_id=tenant, user_id=uid, market=market,
-                )
-            except (ValueError, NotImplementedError) as error:
-                return {
-                    "available": False, "source": "unavailable",
-                    "reason_code": "market_inputs_unavailable", "message": str(error),
-                }
+        default_model = await self._load_user_default_model_record(
+            tenant_id=tenant, user_id=uid
+        )
         if not default_model:
             return {
                 "available": False,
@@ -1328,19 +1336,11 @@ class ManualExecutionService:
         )
         if target_horizon_days <= 0:
             target_horizon_days = 5
+        model_market = str(model_meta.get("market") or "CN").upper()
 
-        if str(market or "").strip().upper() == "JP":
-            target_day = trade_date or datetime.now(schedule.timezone).date()
-            latest_run = await self._load_default_model_inference_run_for_session(
-                tenant_id=tenant,
-                user_id=uid,
-                model_id=default_model_id,
-                trade_date=target_day,
-            )
-        else:
-            latest_run = await self._load_latest_default_model_inference_run(
-                tenant_id=tenant, user_id=uid, model_id=default_model_id
-            )
+        latest_run = await self._load_latest_default_model_inference_run(
+            tenant_id=tenant, user_id=uid, model_id=default_model_id
+        )
         if not latest_run:
             return {
                 "available": False,
@@ -1401,27 +1401,14 @@ class ManualExecutionService:
 
         data_trade_date = _parse_iso_date(latest_run.get("data_trade_date"))
         prediction_trade_date = _parse_iso_date(latest_run.get("prediction_trade_date"))
-        if schedule is None:
-            generation_start, execution_deadline = self._resolve_hosted_execution_window(
-                data_trade_date=data_trade_date,
-                target_horizon_days=target_horizon_days,
-            )
-            current_trade_date = datetime.now(_SH_TZ).date()
-        else:
-            try:
-                generation_start = schedule.shift_sessions(data_trade_date, 1)
-                execution_deadline = schedule.shift_sessions(
-                    data_trade_date, max(1, target_horizon_days)
-                )
-                current_trade_date = trade_date or datetime.now(schedule.timezone).date()
-                schedule._require_day(current_trade_date)
-            except (ValueError, NotImplementedError) as error:
-                return {
-                    "available": False, "source": "unavailable",
-                    "reason_code": "market_inputs_unavailable", "message": str(error),
-                    "latest_default_model_id": default_model_id,
-                    "latest_run_id": str(latest_run.get("run_id") or ""),
-                }
+        generation_start, execution_deadline = self._resolve_hosted_execution_window(
+            data_trade_date=data_trade_date,
+            target_horizon_days=target_horizon_days,
+            **({"market": "JP"} if model_market == "JP" else {}),
+        )
+        current_trade_date = datetime.now(
+            ZoneInfo("Asia/Tokyo") if model_market == "JP" else _SH_TZ
+        ).date()
         if current_trade_date < generation_start:
             return {
                 "available": False,
@@ -1451,22 +1438,6 @@ class ManualExecutionService:
                 "latest_default_model_id": default_model_id,
                 "latest_run_id": str(latest_run.get("run_id") or "").strip() or None,
                 "target_horizon_days": target_horizon_days,
-                "data_trade_date": data_trade_date.isoformat(),
-                "prediction_trade_date": prediction_trade_date.isoformat(),
-                "execution_window_start": generation_start.isoformat(),
-                "execution_window_end": execution_deadline.isoformat(),
-            }
-
-        if schedule is not None and (
-            prediction_trade_date != generation_start
-            or current_trade_date != prediction_trade_date
-        ):
-            return {
-                "available": False, "source": "unavailable",
-                "reason_code": "dated_signal_session_mismatch",
-                "message": "Dated next-open execution requires the latest signal's exact session",
-                "latest_default_model_id": default_model_id,
-                "latest_run_id": str(latest_run.get("run_id") or ""),
                 "data_trade_date": data_trade_date.isoformat(),
                 "prediction_trade_date": prediction_trade_date.isoformat(),
                 "execution_window_start": generation_start.isoformat(),
@@ -1585,22 +1556,18 @@ class ManualExecutionService:
         model_id: str | None = None,
         data_trade_date: str | None = None,
         pool_id: str | None = None,
-        cycle_context=None,
     ) -> list[dict[str, Any]]:
         """取信号行，并按全局股票池裁剪（P3）。
 
         池解析为空或零命中 → 返回空列表并**由调用方判为空信号**（实盘不会下单），
         不会退化成「全市场信号」。
         """
-        if cycle_context is not None:
-            cycle_context.require_owner(tenant_id, user_id, cycle_context.strategy_id, None)
         rows = await self._load_signal_rows_raw(
             tenant_id=tenant_id,
             user_id=user_id,
             run_id=run_id,
             model_id=model_id,
             data_trade_date=data_trade_date,
-            **({"cycle_context": cycle_context} if cycle_context is not None else {}),
         )
         if not pool_id or not rows:
             return rows
@@ -1642,7 +1609,6 @@ class ManualExecutionService:
         run_id: str,
         model_id: str | None = None,
         data_trade_date: str | None = None,
-        cycle_context=None,
     ) -> list[dict[str, Any]]:
         async with get_session(read_only=True) as session:
             rows = (
@@ -1674,16 +1640,7 @@ class ManualExecutionService:
                 item["created_at"] = item["created_at"].isoformat()
             normalized.append(item)
         if normalized:
-            if cycle_context is not None:
-                from .manual_execution_context import validate_manual_rows
-
-                return validate_manual_rows(cycle_context, normalized)
             return normalized
-
-        if cycle_context is not None:
-            from .manual_execution_context import manual_signal_rows
-
-            return manual_signal_rows(cycle_context)
 
         # ── pred.parquet 回退：信号表被后续覆盖清空时，从模型目录读当日截面 ──
         # 历史单股补推曾整桶删除当日全市场信号（已修复），旧批次信号行可能为空；
@@ -1742,7 +1699,7 @@ class ManualExecutionService:
         model_id: str | None = None,
         trading_mode: Any,
         note: str | None = None,
-        execution_context=None,
+        market: str | None = None,
     ) -> PreparedManualExecution:
         tenant = (tenant_id or "").strip() or "default"
         uid = str(user_id or "").strip()
@@ -1769,17 +1726,15 @@ class ManualExecutionService:
         if not bool(strategy.get("is_verified")):
             raise HTTPException(status_code=400, detail="仅允许执行已验证策略")
 
-        cycle_context = None
-        if execution_context is not None:
-            from .manual_execution_context import prepare_manual_context
-
-            try:
-                cycle_context = await prepare_manual_context(
-                    execution_context, run=run, strategy_params=_normalize_strategy_params(strategy),
-                    tenant_id=tenant, user_id=uid, strategy_id=sid, mode=mode,
-                )
-            except (ValueError, NotImplementedError) as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        params = _normalize_strategy_params(strategy)
+        config = strategy.get("execution_config") or {}
+        config = config if isinstance(config, dict) else {}
+        selected_market = str(
+            market or run.get("market") or config.get("market")
+            or params.get("market") or "CN"
+        ).upper()
+        if selected_market == "JP" and mode != "SIMULATION":
+            raise HTTPException(status_code=400, detail="JP supports simulation only")
 
         strategy_name = (
             str(strategy.get("name") or f"strategy_{sid}").strip() or f"strategy_{sid}"
@@ -1792,12 +1747,8 @@ class ManualExecutionService:
             "strategy_name": strategy_name,
             "trading_mode": mode,
             "note": note,
+            **({"market": "JP"} if selected_market == "JP" else {}),
         }
-
-        if cycle_context is not None:
-            from .manual_execution_context import saved_manual_inputs
-
-            request_payload["execution_context"] = saved_manual_inputs(cycle_context)
 
         return PreparedManualExecution(
             task_id="",
@@ -1812,10 +1763,9 @@ class ManualExecutionService:
             request_payload=request_payload,
             run=run,
             strategy=strategy,
-            **({"cycle_context": cycle_context} if cycle_context is not None else {}),
+            market=selected_market,
         )
 
-    @registered_manual_preview
     async def build_execution_preview(
         self,
         *,
@@ -1826,7 +1776,7 @@ class ManualExecutionService:
         strategy_id: str,
         trading_mode: Any,
         note: str | None = None,
-        execution_context=None,
+        market: str | None = None,
     ) -> dict[str, Any]:
         mode = _normalize_trading_mode(trading_mode)
 
@@ -1838,9 +1788,8 @@ class ManualExecutionService:
             model_id=model_id,
             trading_mode=mode,
             note=note,
-            **({"execution_context": execution_context} if execution_context is not None else {}),
+            **({"market": market} if market is not None else {}),
         )
-        cycle_context = getattr(prepared, "cycle_context", None)
         if mode == "REAL":
             async with get_session(read_only=True) as session:
                 from backend.services.live_trading.routers.real_trading_utils import (
@@ -1861,7 +1810,7 @@ class ManualExecutionService:
             account_snapshot = await self._load_simulation_account_snapshot(
                 tenant_id=prepared.tenant_id,
                 user_id=prepared.user_id,
-                **({"cycle_context": cycle_context} if cycle_context is not None else {}),
+                **({"market": "JP"} if prepared.market == "JP" else {}),
             )
             if not account_snapshot:
                 raise HTTPException(
@@ -1876,25 +1825,17 @@ class ManualExecutionService:
             model_id=prepared.model_id,
             data_trade_date=prepared.run.get("data_trade_date"),
             pool_id=_resolve_pool_id_from_prepared(prepared),
-            **({"cycle_context": cycle_context} if cycle_context is not None else {}),
         )
         if not signal_rows:
             raise HTTPException(status_code=400, detail="当前推理批次无可用信号明细")
 
         strategy_params = _normalize_strategy_params(prepared.strategy)
-        plan_inputs = None
-        if cycle_context is not None:
-            from .manual_execution_context import prepare_manual_plan_inputs
-
-            plan_inputs = await prepare_manual_plan_inputs(
-                cycle_context, account_snapshot, signal_rows, strategy_params,
-            )
         plan = _build_execution_plan_from_signals(
             signal_rows=signal_rows,
             strategy_params=strategy_params,
             account_snapshot=account_snapshot,
             trade_date=prepared.prediction_trade_date,
-            **({"plan_inputs": plan_inputs} if plan_inputs is not None else {}),
+            **({"market": "JP"} if prepared.market == "JP" else {}),
         )
         if not plan["sell_orders"] and not plan["buy_orders"]:
             raise HTTPException(status_code=400, detail="策略计算后无可执行调仓动作")
@@ -1930,6 +1871,7 @@ class ManualExecutionService:
                 "strategy_name": prepared.strategy_name,
                 "trading_mode": prepared.trading_mode,
                 "strategy_params": strategy_params,
+                **({"market": "JP"} if prepared.market == "JP" else {}),
                 "note": note,
             },
             "sell_orders": plan["sell_orders"],
@@ -1938,9 +1880,6 @@ class ManualExecutionService:
             "summary": plan["summary"],
         }
         preview["preview_hash"] = _build_preview_hash(preview)
-        if cycle_context is not None:
-            preview["strategy_context"]["execution_context"] = prepared.request_payload["execution_context"]
-            preview["preview_hash"] = _build_preview_hash(preview)
         return preview
 
     async def create_manual_task(
@@ -1954,7 +1893,7 @@ class ManualExecutionService:
         trading_mode: Any,
         preview_hash: str | None = None,
         note: str | None = None,
-        execution_context=None,
+        market: str | None = None,
     ) -> dict[str, Any]:
         if preview_hash:
             return await self.submit_execution_plan(
@@ -1966,7 +1905,7 @@ class ManualExecutionService:
                 trading_mode=trading_mode,
                 preview_hash=preview_hash,
                 note=note,
-                **({"execution_context": execution_context} if execution_context is not None else {}),
+                **({"market": market} if market is not None else {}),
             )
 
         prepared = await self.prepare_manual_execution(
@@ -1977,25 +1916,14 @@ class ManualExecutionService:
             model_id=model_id,
             trading_mode=trading_mode,
             note=note,
-            **({"execution_context": execution_context} if execution_context is not None else {}),
+            **({"market": market} if market is not None else {}),
         )
         task_id = f"manual_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:8]}"
         created_at = datetime.now(timezone.utc)
-        request_payload = prepared.request_payload
-        if execution_context is not None:
-            preview = await self.build_execution_preview(
-                tenant_id=tenant_id, user_id=user_id, model_id=model_id, run_id=run_id,
-                strategy_id=strategy_id, trading_mode=trading_mode, note=note,
-                execution_context=prepared.request_payload["execution_context"],
-            )
-            request_payload = {
-                **request_payload,
-                "execution_plan": {key: preview[key] for key in ("sell_orders", "buy_orders", "skipped_items", "summary")},
-            }
         task = await self._persist_task(
             prepared=prepared,
             task_id=task_id,
-            request_payload=request_payload,
+            request_payload=prepared.request_payload,
             created_at=created_at,
             task_type="manual",
             task_source="manual_page",
@@ -2123,7 +2051,7 @@ class ManualExecutionService:
         trading_mode: Any,
         preview_hash: str,
         note: str | None = None,
-        execution_context=None,
+        market: str | None = None,
     ) -> dict[str, Any]:
         preview = await self.build_execution_preview(
             tenant_id=tenant_id,
@@ -2133,7 +2061,7 @@ class ManualExecutionService:
             strategy_id=strategy_id,
             trading_mode=trading_mode,
             note=note,
-            **({"execution_context": execution_context} if execution_context is not None else {}),
+            **({"market": market} if market is not None else {}),
         )
         if (
             str(preview.get("preview_hash") or "").strip()
@@ -2143,9 +2071,6 @@ class ManualExecutionService:
                 status_code=409, detail="预览结果已失效，请重新计算调仓预案后再提交"
             )
 
-        if execution_context is not None:
-            execution_context = preview["strategy_context"]["execution_context"]
-
         prepared = await self.prepare_manual_execution(
             tenant_id=tenant_id,
             user_id=user_id,
@@ -2154,7 +2079,7 @@ class ManualExecutionService:
             model_id=model_id,
             trading_mode=trading_mode,
             note=note,
-            **({"execution_context": execution_context} if execution_context is not None else {}),
+            **({"market": market} if market is not None else {}),
         )
         task_id = f"manual_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{uuid4().hex[:8]}"
         created_at = datetime.now(timezone.utc)
@@ -2266,7 +2191,6 @@ class ManualExecutionService:
             return fallback[0] if fallback else None
         return None
 
-    @registered_manual_preview
     async def create_hosted_task(
         self,
         *,
@@ -2281,33 +2205,17 @@ class ManualExecutionService:
         parent_runtime_id: str | None = None,
         note: str | None = None,
         task_id: str | None = None,
-        execution_context=None,
     ) -> dict[str, Any]:
         tenant = (tenant_id or "").strip() or "default"
         uid = str(user_id or "").strip()
         sid = str(strategy_id or "").strip()
         mode = _normalize_trading_mode(trading_mode)
-        dated_inputs = None
-        if execution_context is not None:
-            from .hosted_execution_context import validate_hosted_inputs
-
-            dated_inputs = validate_hosted_inputs(
-                execution_context, mode=mode, execution_config=execution_config,
-                live_trade_config=live_trade_config,
-            )
         provided_task_id = str(task_id or "").strip()
         if provided_task_id:
             existing_task = await manual_execution_persistence.get_task_any(
                 provided_task_id
             )
             if existing_task:
-                if dated_inputs is not None:
-                    from .hosted_execution_context import validate_hosted_duplicate
-
-                    validate_hosted_duplicate(
-                        existing_task, dated_inputs, tenant_id=tenant, user_id=uid,
-                        strategy_id=sid, mode=mode,
-                    )
                 return {
                     "task_id": provided_task_id,
                     "status": str(existing_task.get("status") or "completed"),
@@ -2317,9 +2225,7 @@ class ManualExecutionService:
                 }
 
         hosted_status = await self.get_default_model_hosted_status(
-            tenant_id=tenant, user_id=uid,
-            **({"market": dated_inputs.market, "trade_date": dated_inputs.trade_date}
-               if dated_inputs is not None else {}),
+            tenant_id=tenant, user_id=uid
         )
         if not bool(hosted_status.get("available")):
             raise HTTPException(
@@ -2350,17 +2256,21 @@ class ManualExecutionService:
             model_id=default_model_id,
             trading_mode=mode,
             note=note,
-            **({"execution_context": dated_inputs.model_dump(mode="json")}
-               if dated_inputs is not None else {}),
+            **(
+                {"market": "JP"}
+                if str(
+                    (live_trade_config or {}).get("market")
+                    or (execution_config or {}).get("market") or ""
+                ).upper() == "JP" else {}
+            ),
         )
-        cycle_context = getattr(prepared, "cycle_context", None)
         if prepared.trading_mode == "SIMULATION":
             # 模拟盘托管任务读模拟账户快照，与手动任务预览口径一致；
             # 实盘快照（QMT 上报）仅 REAL/SHADOW 模式需要。
             latest_snapshot = await self._load_simulation_account_snapshot(
                 tenant_id=prepared.tenant_id,
                 user_id=prepared.user_id,
-                **({"cycle_context": cycle_context} if cycle_context is not None else {}),
+                **({"market": "JP"} if prepared.market == "JP" else {}),
             )
             if not latest_snapshot:
                 raise HTTPException(
@@ -2384,22 +2294,14 @@ class ManualExecutionService:
             model_id=prepared.model_id,
             data_trade_date=prepared.run.get("data_trade_date"),
             pool_id=_resolve_pool_id_from_prepared(prepared),
-            **({"cycle_context": cycle_context} if cycle_context is not None else {}),
         )
         strategy_params = _normalize_strategy_params(prepared.strategy)
-        plan_inputs = None
-        if cycle_context is not None:
-            from .manual_execution_context import prepare_manual_plan_inputs
-
-            plan_inputs = await prepare_manual_plan_inputs(
-                cycle_context, latest_snapshot, normalized_signals, strategy_params,
-            )
         execution_plan = _build_execution_plan_from_signals(
             signal_rows=normalized_signals,
             strategy_params=strategy_params,
             account_snapshot=latest_snapshot,
             trade_date=prepared.prediction_trade_date,
-            **({"plan_inputs": plan_inputs} if plan_inputs is not None else {}),
+            **({"market": "JP"} if prepared.market == "JP" else {}),
         )
         created_at = datetime.now(timezone.utc)
         plan_summary = execution_plan.get("summary") or {}
@@ -2552,7 +2454,6 @@ class ManualExecutionService:
         data["task"] = task
         return data
 
-    @registered_manual_task
     async def process_task(self, task: dict[str, Any]) -> None:
         task_id = str(task.get("task_id") or "").strip()
         tenant_id = str(task.get("tenant_id") or "default").strip() or "default"
@@ -2606,8 +2507,7 @@ class ManualExecutionService:
                 strategy_id=strategy_id,
                 trading_mode=trading_mode,
                 note=request_json.get("note"),
-                **({"execution_context": request_json["execution_context"], "model_id": task.get("model_id")}
-                   if request_json.get("execution_context") is not None else {}),
+                **({"market": request_json["market"]} if request_json.get("market") else {}),
             )
         except HTTPException as exc:
             await manual_execution_persistence.update_task(
@@ -2645,7 +2545,6 @@ class ManualExecutionService:
             )
             return
 
-        cycle_context = getattr(prepared, "cycle_context", None)
         async with get_session() as db:
             if trading_mode == "REAL":
                 manual_execution_log_stream.append_log(
@@ -2694,7 +2593,7 @@ class ManualExecutionService:
                 sim_snapshot = await self._load_simulation_account_snapshot(
                     tenant_id=tenant_id,
                     user_id=user_id,
-                    **({"cycle_context": cycle_context, "db": db} if cycle_context is not None else {}),
+                    **({"market": "JP"} if prepared.market == "JP" else {}),
                 )
                 if not sim_snapshot:
                     error_msg = "未检测到模拟账户，请先启动模拟盘完成账户初始化"
@@ -2740,18 +2639,6 @@ class ManualExecutionService:
                 if isinstance(request_json.get("execution_plan"), dict)
                 else None
             )
-            plan_inputs = None
-            if cycle_context is not None:
-                from .manual_execution_context import prepare_manual_plan_inputs
-
-                native_rows = await self._load_signal_rows(
-                    tenant_id=tenant_id, user_id=user_id, run_id=run_id,
-                    model_id=prepared.model_id, data_trade_date=prepared.run.get("data_trade_date"),
-                    pool_id=_resolve_pool_id_from_prepared(prepared), cycle_context=cycle_context,
-                )
-                plan_inputs = await prepare_manual_plan_inputs(
-                    cycle_context, sim_snapshot, native_rows, _normalize_strategy_params(prepared.strategy),
-                )
             if not execution_plan:
                 if trading_mode == "REAL":
                     async with get_session(read_only=True) as account_session:
@@ -2768,7 +2655,7 @@ class ManualExecutionService:
                     latest_snapshot = await self._load_simulation_account_snapshot(
                         tenant_id=tenant_id,
                         user_id=user_id,
-                        **({"cycle_context": cycle_context, "db": db} if cycle_context is not None else {}),
+                        **({"market": "JP"} if prepared.market == "JP" else {}),
                     )
                 if not latest_snapshot:
                     error_msg = (
@@ -2799,7 +2686,6 @@ class ManualExecutionService:
                     model_id=prepared.model_id,
                     data_trade_date=prepared.run.get("data_trade_date"),
                     pool_id=_resolve_pool_id_from_prepared(prepared),
-                    **({"cycle_context": cycle_context} if cycle_context is not None else {}),
                 )
                 if not signal_rows:
                     error_msg = "推理结果无可执行信号"
@@ -2826,7 +2712,7 @@ class ManualExecutionService:
                     strategy_params=strategy_params,
                     account_snapshot=latest_snapshot,
                     trade_date=prepared.prediction_trade_date,
-                    **({"plan_inputs": plan_inputs} if plan_inputs is not None else {}),
+                    **({"market": "JP"} if prepared.market == "JP" else {}),
                 )
 
             sell_orders = list(execution_plan.get("sell_orders") or [])
@@ -3000,16 +2886,12 @@ class ManualExecutionService:
                     .strip()
                     .upper()
                 )
-                # 原路径由 Agent 查价；注册日期输入由原撮合器读取指定日开盘。
-                protect_price_ratio = (
-                    0.0 if cycle_context is not None
-                    else _manual_task_agent_protect_price_ratio()
-                )
-                agent_price_mode = "dated_next_open" if cycle_context is not None else "protect_limit"
+                # 手动任务统一改为 Agent 端临门查价，再转成保护限价单送入 QMT。
+                protect_price_ratio = _manual_task_agent_protect_price_ratio()
                 order_type = "MARKET"
                 quantity = _to_int(row.get("quantity"), 0)
-                # 日期路径不把预案参考价作为保护限价或实时成交价。
-                order_price = 0.0 if trading_mode == "REAL" or cycle_context is not None else preview_price
+                # 模拟模式无 QMT Agent 临门查价，直接使用预案参考价成交。
+                order_price = 0.0 if trading_mode == "REAL" else preview_price
 
                 order_payload = {
                     "symbol": symbol,
@@ -3019,12 +2901,12 @@ class ManualExecutionService:
                     "client_order_id": f"manual-{task_id[-8:]}-{index:04d}",
                     "order_type": order_type,
                     "trading_mode": trading_mode,
-                    "agent_price_mode": agent_price_mode,
+                    "agent_price_mode": "protect_limit",
                     "protect_price_ratio": protect_price_ratio,
                     "remarks": (
                         f"manual_task={task_id} run_id={run_id} "
                         f"fusion_score={fusion_score:.6f} "
-                        f"agent_price_mode={agent_price_mode} protect_ratio={protect_price_ratio:.6f} "
+                        f"agent_price_mode=protect_limit protect_ratio={protect_price_ratio:.6f} "
                         f"preview_price={preview_price:.4f} "
                         f"reason={str(row.get('reason') or '').strip()}"
                     ),
@@ -3045,7 +2927,7 @@ class ManualExecutionService:
                     line=(
                         f"[{index}/{total}] 正在提交委托: {side} {symbol} "
                         f"qty={quantity} preview={preview_price:.2f} "
-                        f"agent_price_mode={agent_price_mode} protect_ratio={protect_price_ratio:.4f}"
+                        f"agent_price_mode=protect_limit protect_ratio={protect_price_ratio:.4f}"
                     ),
                 )
 
@@ -3061,7 +2943,6 @@ class ManualExecutionService:
                         tenant_id=tenant_id,
                         redis=get_redis(),
                         db=db,
-                        **({"cycle_context": cycle_context} if cycle_context is not None else {}),
                     )
 
                     # 严格的状态判断：必须 result["status"] == "success" 且其内部 result["success"] 也是 True
@@ -3193,7 +3074,7 @@ class ManualExecutionService:
                     else await self._load_simulation_account_snapshot(
                         tenant_id=tenant_id,
                         user_id=user_id,
-                        **({"cycle_context": cycle_context, "db": db} if cycle_context is not None else {}),
+                        **({"market": "JP"} if prepared.market == "JP" else {}),
                     )
                 )
                 baseline_snapshot_at = _parse_iso_datetime(
@@ -3338,7 +3219,7 @@ class ManualExecutionService:
                         sim_after_sell = await self._load_simulation_account_snapshot(
                             tenant_id=tenant_id,
                             user_id=user_id,
-                            **({"cycle_context": cycle_context, "db": db} if cycle_context is not None else {}),
+                            **({"market": "JP"} if prepared.market == "JP" else {}),
                         )
                         if sim_after_sell:
                             next_snapshot = sim_after_sell
@@ -3401,7 +3282,6 @@ class ManualExecutionService:
                 recalculated_buy_orders, buy_skipped_items, buy_remaining_cash = _rebuild_buy_orders_with_budget(
                     buy_orders=buy_orders,
                     buy_budget=buy_budget_from_snapshot,
-                    **({"plan_inputs": plan_inputs} if plan_inputs is not None else {}),
                 )
                 if buy_skipped_items:
                     skipped_items.extend(buy_skipped_items)
@@ -3574,14 +3454,6 @@ class ManualExecutionService:
 
             plan_summary = runtime_plan_summary
 
-            if cycle_context is not None:
-                from backend.services.trade_shared.simulation_manager import SimulationAccountManager
-                from backend.services.simulation.services.simulation_manager import canonical_sim_uid
-
-                async with SimulationAccountManager.locked_execution(int(canonical_sim_uid(user_id)), tenant_id):
-                    await cycle_context.finish_day(cycle_context.accounts(db, get_redis()))
-                    await db.commit()
-
             result_payload = {
                 "success": failed_count == 0,
                 "task_id": task_id,
@@ -3600,8 +3472,6 @@ class ManualExecutionService:
                 "preview_summary": plan_summary,
                 "stage_label": _stage_label("completed"),
             }
-            if cycle_context is not None:
-                result_payload["execution_context"] = cycle_context.provenance()
             await manual_execution_persistence.update_task(
                 task_id=task_id,
                 status="completed",

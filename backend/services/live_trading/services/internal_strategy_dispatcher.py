@@ -61,7 +61,6 @@ async def dispatch_internal_strategy_order(
     tenant_id: str,
     redis: RedisClient,
     db: AsyncSession,
-    cycle_context=None,
 ) -> dict[str, Any]:
     """复用内部策略下单逻辑：实盘走真实风控/柜台，影子/模拟走虚拟成交。"""
     # user_id 口径与模拟盘接口（simulation.py _require_user_id）对齐：
@@ -99,6 +98,10 @@ async def dispatch_internal_strategy_order(
         raise HTTPException(status_code=400, detail=f"invalid side: {side_raw}")
     if quantity <= 0:
         raise HTTPException(status_code=400, detail="quantity must be > 0")
+    from backend.shared.stock_utils import StockCodeUtil
+
+    if StockCodeUtil.is_jp_symbol(symbol) and trading_mode is not TradingMode.SIMULATION:
+        raise HTTPException(status_code=400, detail="JP supports simulation only")
 
     logger.info(
         "[Order] 收到信号 | 租户=%s 模式=%s | %s %s @ %s | trade_action=%s position_side=%s margin=%s",
@@ -111,39 +114,6 @@ async def dispatch_internal_strategy_order(
         position_side_raw,
         is_margin_trade,
     )
-
-    if cycle_context is not None:
-        from backend.services.simulation.services.cycle_context import (
-            SimulationCycleContext,
-        )
-        from backend.services.simulation.services.account_context import (
-            registered_account_input_adapter,
-        )
-        from backend.services.trade_shared.simulation_manager import require_sim_user_id
-
-        if trading_mode != TradingMode.SIMULATION or not isinstance(
-            cycle_context, SimulationCycleContext
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="Dated context is only supported for registered simulation orders",
-            )
-        # Match the original account read/reset identity guard. Keep the
-        # unregistered dispatcher's historical canonical-only path unchanged.
-        uid = require_sim_user_id(_uid_raw, tenant)
-        try:
-            cycle_context.require_owner(
-                tenant,
-                _uid_raw,
-                str(order_data.get("strategy_id") or "").strip(),
-                None,
-            )
-            adapter = registered_account_input_adapter(cycle_context.market.value)
-            if adapter is None:
-                raise ValueError("Registered order account inputs are unavailable")
-            await adapter.require_migrated(db, tenant, _uid_raw, uid)
-        except (ValueError, NotImplementedError) as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     if trading_mode in {TradingMode.SHADOW, TradingMode.SIMULATION}:
         # 与自动托管同一条链：SimOrderService → execute_order → apply_filled（sim_trades + ledger）。
@@ -176,11 +146,6 @@ async def dispatch_internal_strategy_order(
                     },
                 }
 
-            if cycle_context is not None and str(
-                order_data.get("order_type") or "MARKET"
-            ).strip().upper() != "MARKET":
-                raise ValueError("Dated dispatch requires an explicit next-open market order")
-
             strategy_id_raw = str(order_data.get("strategy_id") or "").strip()
             strategy_id_val = int(strategy_id_raw) if strategy_id_raw.isdigit() else None
             if strategy_id_val is not None and strategy_id_val <= 0:
@@ -196,14 +161,8 @@ async def dispatch_internal_strategy_order(
             elif str(client_order_id or "").startswith("auto-"):
                 trigger_source = "hosted"
 
-            if cycle_context is None:
-                sim_manager = SimulationAccountManager(redis)
-                submission = SimulationOrderSubmissionService(db, sim_manager)
-            else:
-                sim_manager = cycle_context.accounts(db, redis)
-                submission = SimulationOrderSubmissionService(
-                    db, sim_manager, execution_context=cycle_context.execution,
-                )
+            sim_manager = SimulationAccountManager(redis)
+            submission = SimulationOrderSubmissionService(db, sim_manager)
             outcome = await submission.submit_and_fill(
                 tenant_id=tenant,
                 user_id=uid,
@@ -244,20 +203,19 @@ async def dispatch_internal_strategy_order(
                 outcome.commission,
                 outcome.order_id,
             )
-            if cycle_context is None:
-                await mirror_virtual_fill(
-                    db=db,
-                    redis=redis,
-                    tenant_id=tenant,
-                    user_id=str(uid),
-                    symbol=symbol,
-                    side=side_raw,
-                    quantity=outcome.filled_quantity or quantity,
-                    price=outcome.fill_price or price,
-                    client_order_id=client_order_id or "",
-                    strategy_id=strategy_id_raw,
-                    source=f"internal_dispatcher:{trading_mode.value}",
-                )
+            await mirror_virtual_fill(
+                db=db,
+                redis=redis,
+                tenant_id=tenant,
+                user_id=str(uid),
+                symbol=symbol,
+                side=side_raw,
+                quantity=outcome.filled_quantity or quantity,
+                price=outcome.fill_price or price,
+                client_order_id=client_order_id or "",
+                strategy_id=strategy_id_raw,
+                source=f"internal_dispatcher:{trading_mode.value}",
+            )
             return {
                 "status": "success",
                 "execution": "virtual",
@@ -271,11 +229,6 @@ async def dispatch_internal_strategy_order(
         except HTTPException:
             raise
         except Exception as exc:
-            if cycle_context is not None and isinstance(
-                exc, (ValueError, NotImplementedError)
-            ):
-                await db.rollback()
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
             logger.error("[Shadow/Sim] 虚拟成交失败: %s", exc, exc_info=True)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 

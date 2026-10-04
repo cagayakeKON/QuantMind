@@ -14,7 +14,7 @@ export interface MarketSyncSchedule {
 }
 
 interface SyncSchedulePanelProps {
-    /** 市场标识: A / US / HK / BC / FUTURES */
+    /** 市场标识: A / US / HK / BC / FUTURES / JP */
     market: string;
     /** 该市场当前勾选的数据集（用于默认填充） */
     selectedDatasets?: string[];
@@ -51,7 +51,7 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
             if (resp?.data) {
                 const s = resp.data;
                 setEnabled(!!s.enabled);
-                setWithQlib(!!s.with_qlib);
+                setWithQlib(market === 'JP' && !!s.with_qlib);
                 setTime(dayjs(s.time, 'HH:mm').isValid() ? dayjs(s.time, 'HH:mm') : dayjs('01:00', 'HH:mm'));
                 setDays(s.days ?? defaultDays);
                 setDatasets(s.datasets?.length ? s.datasets : [...selectedDatasets]);
@@ -72,7 +72,7 @@ export const SyncSchedulePanel: React.FC<SyncSchedulePanelProps> = ({
                 time: time.format('HH:mm'),
                 days,
                 datasets,
-                with_qlib: withQlib,
+                ...(market === 'JP' ? { with_qlib: withQlib } : {}),
             });
             message.success('定时同步配置已保存');
         } catch (err: unknown) {

@@ -1678,11 +1678,6 @@ class InferenceScriptRunner:
             except Exception:
                 pass
 
-        # JP execution belongs to its isolated cash ledger. Do not send JP
-        # signals to the shared broker stream or CN-only TDX hooks.
-        if model_market == "JP":
-            return
-
         # 发布信号到 Redis Stream（失败不影响主流程）
         try:
             signal_events = [
@@ -1715,7 +1710,10 @@ class InferenceScriptRunner:
             )
 
             # === 推送到通达信 (Top N 选股: 板块 + 预警 + 消息) ===
-            if os.getenv("ENABLE_TDX_PUSH", "").strip().lower() == "true":
+            if (
+                model_market != "JP"
+                and os.getenv("ENABLE_TDX_PUSH", "").strip().lower() == "true"
+            ):
                 try:
                     import asyncio
 

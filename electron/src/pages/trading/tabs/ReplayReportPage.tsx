@@ -414,6 +414,7 @@ const ReplayReportPage: React.FC<ReplayReportPageProps> = ({ sessionId, onBack }
 
     const pct = (v: number) => `${(v * 100).toFixed(2)}%`;
     const marketContext = replayContext(session?.strategy_params.market);
+    const moneyUnit = session?.currency ?? marketContext?.currency;
     // A 股口径：红涨绿跌（盈利红、亏损绿），与会话资产卡一致
     const pnlColor = (v: number) => v >= 0 ? 'text-red-600' : 'text-emerald-600';
 
@@ -434,7 +435,7 @@ const ReplayReportPage: React.FC<ReplayReportPageProps> = ({ sessionId, onBack }
                 <div className="flex items-center gap-2">
                     <span className="text-xs text-gray-400">{session?.start_date} ~ {session?.end_date}</span>
                     <span className="text-xs text-gray-400">{metrics.total_days} 天</span>
-                    {marketContext && <span className="text-xs text-gray-400">金额单位 {marketContext.currency}</span>}
+                    {moneyUnit && <span className="text-xs text-gray-400">金额单位 {moneyUnit}{session?.read_only ? ' · 历史账户只读' : ''}</span>}
                 </div>
             </div>
 
@@ -446,7 +447,7 @@ const ReplayReportPage: React.FC<ReplayReportPageProps> = ({ sessionId, onBack }
                     <div className="grid grid-cols-2 gap-2">
                         <MetricCard label="总收益" value={pct(metrics.total_return)} color={pnlColor(metrics.total_return)} />
                         <MetricCard label="年化" value={pct(metrics.annualized_return)} color={pnlColor(metrics.annualized_return)} />
-                        <MetricCard label="期望" value={metrics.expectancy.toFixed(0)} unit={marketContext?.priceUnit ?? '元'} />
+                        <MetricCard label="期望" value={metrics.expectancy.toFixed(0)} unit={moneyUnit ?? '元'} />
                         <MetricCard label="换手率" value={metrics.turnover.toFixed(2)} unit="x" />
                     </div>
                 </div>
@@ -470,7 +471,7 @@ const ReplayReportPage: React.FC<ReplayReportPageProps> = ({ sessionId, onBack }
                         <MetricCard label="盈亏比" value={metrics.pnl_ratio.toFixed(2)} />
                         <MetricCard label="均持有" value={metrics.avg_holding_days.toFixed(0)} unit="天" />
                         <MetricCard label="交易笔数" value={`${metrics.trade_count}`} />
-                        <MetricCard label="总费用" value={metrics.total_fee.toFixed(0)} unit={marketContext?.priceUnit ?? '元'} />
+                        <MetricCard label="总费用" value={metrics.total_fee.toFixed(0)} unit={moneyUnit ?? '元'} />
                         <MetricCard label="费用拖累" value={pct(metrics.fee_drag)} />
                     </div>
                 </div>

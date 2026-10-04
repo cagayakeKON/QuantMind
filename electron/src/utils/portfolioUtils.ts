@@ -1,4 +1,6 @@
 import { AccountInfo } from '../services/realTradingService';
+import type { AppMarket } from '../store/slices/uiSlice';
+import { getMarketConfig } from '../config/marketConfig';
 
 /**
  * 投资组合通用工具函数
@@ -84,6 +86,17 @@ export const toSuffixCode = (raw: string, market?: string): string => {
     if (/^JP\d[A-Z0-9]{3}\d$/.test(s)) return s.slice(2) + '.JP';
     const m = s.match(/^(SH|SZ|BJ)(\d{6})$/);
     return m ? `${m[2]}.${m[1]}` : s;
+};
+
+/** Identify a shared holding without imposing the selected page's market. */
+export const stockMarketFromCode = (raw: string): AppMarket => {
+    const code = normalizeStockCode(raw);
+    if (getMarketConfig('JP').stockCodePattern?.test(code)) return 'JP';
+    if (/^(SH|SZ|BJ)\d{6}$/.test(code)) return 'CN';
+    if (/\.HK$/.test(code) || /^\d{4,5}$/.test(code)) return 'HK';
+    if (/\.FUT$/.test(code)) return 'FUTURES';
+    if (/USDT$/.test(code)) return 'CRYPTO';
+    return 'US';
 };
 
 /**

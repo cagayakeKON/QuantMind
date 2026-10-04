@@ -64,8 +64,6 @@ class QlibBacktestRequest(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
     market: Literal["CN", "HK", "JP", "US", "CRYPTO", "FUTURES"] | None = None
-    jp_commission_rate: float | None = Field(None, ge=0, lt=1)
-    jp_slippage_bps: float = Field(5.0, ge=0, lt=10000)
     jp_data_version: str | None = Field(None, max_length=128)
 
     # 策略配置 (支持原生 ID 和前端模板 ID)
@@ -180,6 +178,7 @@ class QlibBacktestRequest(BaseModel):
                 "signal_lag_days=1 + deal_price=close (尾盘模式)。"
             )
         return self
+
     allow_feature_signal_fallback: bool = Field(
         False,
         description="是否允许预测信号缺失时回退到行情特征信号；默认禁止静默回退到 $close",
@@ -244,6 +243,7 @@ class QlibBacktestResult(BaseModel):
 
             return to_utc_iso(value)
         return value.isoformat() if value is not None else None
+
     user_id: str | None = None
     tenant_id: str = "default"
     status: str = "completed"

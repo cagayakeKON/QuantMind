@@ -138,7 +138,7 @@ class SandboxSignalConsumer:
             logger.info("[Sandbox Log %s] %s", strategy_id, sig.get("message"))
             return
 
-        if await self._is_observe_only(tenant_id, user_id, signal=sig):
+        if await self._is_observe_only(tenant_id, user_id):
             logger.info(
                 "[SandboxSignalConsumer] 观察态跳过下单信号: tenant=%s user=%s strategy=%s type=%s",
                 tenant_id,
@@ -148,23 +148,14 @@ class SandboxSignalConsumer:
             )
             return
 
-        dated_kwargs = {}
-        if sig.get("execution_context") is not None and sig_type in {"order", "order_target_percent"}:
-            from backend.services.trade.services.sandbox_execution_inputs import prepare_sandbox_order_inputs
-
-            raw = _read_active_strategy_raw(tenant_id, user_id)
-            active = json.loads(raw) if raw else None
-            context = await prepare_sandbox_order_inputs(sig, active, redis_client)
-            dated_kwargs["execution_context"] = context
-
         if sig_type == "order_target_percent":
-            await self._handle_order_target_percent(sig, tenant_id, user_id, strategy_id, **dated_kwargs)
+            await self._handle_order_target_percent(sig, tenant_id, user_id, strategy_id)
         elif sig_type == "order":
-            await self._handle_direct_order(sig, tenant_id, user_id, strategy_id, **dated_kwargs)
+            await self._handle_direct_order(sig, tenant_id, user_id, strategy_id)
         else:
             logger.debug("[SandboxSignalConsumer] 未知信号类型: %s", sig_type)
 
-    async def _is_observe_only(self, tenant_id: str, user_id: str, *, signal=None) -> bool:
+    async def _is_observe_only(self, tenant_id: str, user_id: str) -> bool:
         if not redis_client.client:
             return False
         try:
@@ -176,13 +167,6 @@ class SandboxSignalConsumer:
             data = json.loads(raw)
             if not isinstance(data, dict):
                 return False
-            if (
-                data.get("execution_context") is not None
-                and signal is not None
-                and signal.get("execution_context") is None
-            ):
-                logger.warning("Dated sandbox signal has no execution inputs; skipping")
-                return True
             permission = str(data.get("trading_permission") or "").strip().lower()
             if permission == "observe_only":
                 return True
@@ -196,8 +180,7 @@ class SandboxSignalConsumer:
             return False
 
     async def _handle_order_target_percent(
-        self, sig: dict[str, Any], tenant_id: str, user_id: str, strategy_id: int | None,
-        *, execution_context=None,
+        self, sig: dict[str, Any], tenant_id: str, user_id: str, strategy_id: int | None
     ):
         """
         处理 order_target_percent 信号：
@@ -214,6 +197,11 @@ class SandboxSignalConsumer:
         if not symbol:
             logger.warning("[SandboxSignalConsumer] 信号缺少 symbol")
             return
+        from backend.shared.stock_utils import StockCodeUtil
+
+        jp_symbol = StockCodeUtil.is_jp_symbol(symbol)
+        if jp_symbol:
+            symbol = StockCodeUtil.to_prefix(symbol)
 
         user_id_int = canonical_sim_uid(user_id)
         if user_id_int <= 0:
@@ -221,10 +209,15 @@ class SandboxSignalConsumer:
             return
 
         # 获取账户状态
-        account = (
-            await self._account_manager.get_account(user_id_int, tenant_id=tenant_id)
-            if execution_context is None else execution_context.account
-        )
+        if jp_symbol:
+            from backend.services.simulation.services.legacy_jp_state import read_existing_jp_account, require_standard_account
+
+            async with get_session(read_only=True) as db:
+                await require_standard_account(
+                    db, tenant_id, user_id_int,
+                    cached=read_existing_jp_account(redis_client, tenant_id, user_id_int),
+                )
+        account = await self._account_manager.get_account(user_id_int, tenant_id=tenant_id)
         if not account:
             logger.warning("[SandboxSignalConsumer] 账户不存在: tenant=%s user=%s", tenant_id, user_id)
             return
@@ -236,39 +229,32 @@ class SandboxSignalConsumer:
 
         # 获取当前持仓（先于价格查询，供回退使用）
         positions = account.get("positions", {})
-        if execution_context is not None:
-            symbol = execution_context.symbol
         current_pos = positions.get(symbol.upper())
         current_volume = int(float(current_pos.get("volume", 0))) if current_pos else 0
 
         # 获取当前价格（Redis 实时优先，HTTP 次之；取不到直接跳过，
         # 禁止用持仓成本价回退成交，避免虚假价格污染账户）
-        current_price = (
-            await self._get_current_price(symbol)
-            if execution_context is None else execution_context.price
-        )
+        current_price = await self._get_current_price(symbol)
         if current_price <= 0:
             logger.warning("[SandboxSignalConsumer] 无法获取 %s 的价格，跳过下单", symbol)
             return
 
-        # 保留原目标仓位公式，日期输入提供对应证券的交易单位。
+        # 计算目标持仓数量（A 股 100 股整数倍）
         target_value = total_asset * target_percent
-        trading_unit = 100 if execution_context is None else execution_context.trading_unit
-        target_volume = int(target_value / current_price / trading_unit) * trading_unit
+        lot_size = 100
+        if jp_symbol:
+            from backend.services.live_trading.services.manual_execution_service import _resolve_board_lot_size
+
+            lot_size = await asyncio.to_thread(_resolve_board_lot_size, symbol)
+        target_volume = int(target_value / current_price / lot_size) * lot_size
 
         # 计算需要交易的量
         delta = target_volume - current_volume
-        if abs(delta) < trading_unit:
-            if execution_context is None:
-                logger.debug(
-                    "[SandboxSignalConsumer] %s 调仓量不足 100 股 (delta=%d)，跳过",
-                    symbol, delta,
-                )
-            else:
-                logger.debug(
-                    "[SandboxSignalConsumer] %s 调仓量不足 %d 股 (delta=%d)，跳过",
-                    symbol, trading_unit, delta,
-                )
+        if abs(delta) < lot_size:
+            logger.debug(
+                "[SandboxSignalConsumer] %s 调仓量不足 100 股 (delta=%d)，跳过",
+                symbol, delta,
+            )
             return
 
         # 确定买卖方向
@@ -294,12 +280,10 @@ class SandboxSignalConsumer:
             quantity=quantity,
             price=current_price,
             run_id=run_id,
-            **({"execution_context": execution_context} if execution_context is not None else {}),
         )
 
     async def _handle_direct_order(
-        self, sig: dict[str, Any], tenant_id: str, user_id: str, strategy_id: int | None,
-        *, execution_context=None,
+        self, sig: dict[str, Any], tenant_id: str, user_id: str, strategy_id: int | None
     ):
         """处理直接下单信号"""
         data = sig.get("data", {})
@@ -318,11 +302,6 @@ class SandboxSignalConsumer:
             return
 
         side = OrderSide.BUY if side_str.upper() == "BUY" else OrderSide.SELL
-        if execution_context is not None:
-            if str(data.get("order_type") or "").lower() != "market":
-                raise NotImplementedError("Dated sandbox execution requires explicit market orders")
-            symbol = execution_context.symbol
-            price = execution_context.price
 
         await self._create_and_execute_order(
             tenant_id=tenant_id,
@@ -333,7 +312,6 @@ class SandboxSignalConsumer:
             quantity=quantity,
             price=price if price > 0 else await self._get_current_price(symbol),
             run_id=run_id,
-            **({"execution_context": execution_context} if execution_context is not None else {}),
         )
 
     async def _create_and_execute_order(
@@ -346,16 +324,11 @@ class SandboxSignalConsumer:
         quantity: int,
         price: float,
         run_id: str,
-        *, execution_context=None,
     ):
         """创建订单并执行"""
         async with get_session() as db:
             order_service = SimOrderService(db)
-            exec_engine = SimulationExecutionEngine(
-                db,
-                self._account_manager if execution_context is None else execution_context.accounts(db, redis_client),
-                **({"execution_context": execution_context.execution} if execution_context is not None else {}),
-            )
+            exec_engine = SimulationExecutionEngine(db, self._account_manager)
 
             # 创建订单
             order_create = SimOrderCreate(
@@ -373,21 +346,18 @@ class SandboxSignalConsumer:
             # 提交订单
             from backend.services.simulation.models.order import OrderStatus
             order.status = OrderStatus.SUBMITTED
-            if execution_context is None:
-                order.submitted_at = datetime.now()
-            else:
+            from backend.shared.stock_utils import StockCodeUtil
+
+            if StockCodeUtil.is_jp_symbol(symbol):
                 from backend.shared.utc_datetime import utc_now
 
                 order.submitted_at = utc_now()
+            else:
+                order.submitted_at = datetime.now()
             await db.commit()
 
             # 执行订单
-            result = (
-                await exec_engine.execute_order(order)
-                if execution_context is None else await exec_engine.execute_from_bar(
-                    order, execution_context.bar, execution_context.execution.market,
-                )
-            )
+            result = await exec_engine.execute_order(order)
             if result.success:
                 trade = await exec_engine.apply_filled(order, result)
                 logger.info(
@@ -402,6 +372,12 @@ class SandboxSignalConsumer:
 
     async def _get_current_price(self, symbol: str) -> float:
         """获取当前市场价格：Redis 实时序列优先，行情 HTTP 次之。"""
+        from backend.shared.stock_utils import StockCodeUtil
+
+        if StockCodeUtil.is_jp_symbol(symbol):
+            from backend.services.live_trading.services.manual_execution_service import _get_quantdb_last_close
+
+            return await asyncio.to_thread(_get_quantdb_last_close, symbol) or 0.0
         try:
             from backend.services.simulation.services.redis_series_quote import (
                 fetch_series_tick,

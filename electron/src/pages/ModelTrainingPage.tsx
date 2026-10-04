@@ -89,7 +89,7 @@ interface ImportPreview {
 }
 
 type FormAction =
-  | { type: 'HYDRATE'; payload: TrainingDraft | null }
+  | { type: 'HYDRATE'; payload: TrainingDraft | null; market?: AppMarket }
   | { type: 'SET_FEATURES'; payload: string[] }
   | { type: 'SET_TIME'; key: SplitKey; value: [Dayjs, Dayjs] }
   | { type: 'SET_TARGET'; payload: TrainingTarget }
@@ -122,6 +122,14 @@ function formReducer(state: FormState, action: FormAction): FormState {
         });
       }
       const restoredWfa = p.wfa ?? { enabled: false, strategy: 'rolling', nWindows: 4, trainYears: 3, valMonths: 12, stepMonths: 12 };
+      const restoredContext = { ...DEFAULT_CONTEXT, ...p.context };
+      const hydrateMarket = action.market || restoredContext.market;
+      const marketContext = hydrateMarket && (hydrateMarket === 'JP' || restoredContext.market === 'JP')
+        ? switchMarketTrainingContext(restoredContext, {
+          market: hydrateMarket,
+          benchmark: getMarketConfig(hydrateMarket).benchmark,
+        }, DEFAULT_CONTEXT, state.marketContexts)
+        : { context: restoredContext };
       return {
         ...state,
         selectedFeatures: p.selectedFeatures && p.selectedFeatures.length > 0
@@ -133,7 +141,7 @@ function formReducer(state: FormState, action: FormAction): FormState {
         },
         target: p.target || DEFAULT_TARGET,
         params: restoredParams,
-        context: { ...DEFAULT_CONTEXT, ...p.context },
+        ...marketContext,
         displayNameMode: p.displayNameMode || 'auto',
         displayName: p.displayName || state.displayName,
         wfaConfig: restoredWfa,
@@ -246,7 +254,7 @@ export const ModelTrainingPage: React.FC = () => {
   // Derive individual fields from formState for inline use
   const { selectedFeatures, timePeriods, wfaConfig, target, params, context, displayName, displayNameMode } = formState;
 
-  const labelFormula = useMemo(() => buildLabelFormula(target, currentMarket), [target, currentMarket]);
+  const labelFormula = useMemo(() => buildLabelFormula(target, currentMarket, context.dealPrice), [target, currentMarket, context.dealPrice]);
   const effectiveTradeDate = useMemo(() => buildEffectiveTradeDate(target, timePeriods.test[0], currentMarket), [target, timePeriods.test, currentMarket]);
 
   // 市场切换
@@ -491,7 +499,7 @@ export const ModelTrainingPage: React.FC = () => {
         parsed.poolName = null;
         parsed.poolId = null;
       }
-      dispatch({ type: 'HYDRATE', payload: parsed });
+      dispatch({ type: 'HYDRATE', payload: parsed, market: currentMarket });
       if (Array.isArray(parsed.selectedFeatures)) {
         restoredDraftFeaturesRef.current = parsed.selectedFeatures;
       }
@@ -562,7 +570,7 @@ export const ModelTrainingPage: React.FC = () => {
 
   const startTraining = async () => {
     if (!supportsTrainingNode(currentMarket, selectedNodeObj)) {
-      message.warning('日本市场当前仅支持本地训练，请选择本地节点');
+      message.warning('请选择当前市场可用的训练节点');
       return;
     }
     if (isTrainingInProgress) {
@@ -934,7 +942,6 @@ export const ModelTrainingPage: React.FC = () => {
                       label: `${node.type === 'remote' ? '☁️' : '💻'} ${node.name} · ${node.readiness_label || (node.online ? '就绪' : '离线')}`,
                     }))}
                   />
-                  {constrainedTrainingNodes && <div className="mt-2 text-[10px] text-slate-500">日本市场当前仅支持本地训练，远程训练尚未接入。</div>}
                   {selectedNodeObj && (
                     <div className="mt-2 text-[10px] text-slate-500 truncate">
                       {selectedNodeObj.status_desc || selectedNodeObj.gpu_summary || (selectedNodeObj.type === 'remote' ? '远程 GPU 节点' : '本地 Docker 节点')}
@@ -1103,7 +1110,7 @@ export const ModelTrainingPage: React.FC = () => {
                         <FeatureSelector categories={featureCategories} selectedFeatures={selectedFeatures} onChange={(f) => dispatch({ type: 'SET_FEATURES', payload: f })} loading={featureCatalogLoading} onGuide={() => navigate('/admin/training-datasets')} />
                       </>
                     )}
-                    {currentStep === 1 && <TrainingTargetConfig market={currentMarket} target={target} timePeriods={timePeriods} onTargetChange={(t) => dispatch({ type: 'SET_TARGET', payload: t })} onTimeChange={(k, v) => dispatch({ type: 'SET_TIME', key: k, value: v })} dataCoverage={dataCoverage} factorFilter={factorFilter} onFactorFilterChange={setFactorFilter} />}
+                    {currentStep === 1 && <TrainingTargetConfig market={currentMarket} dealPrice={context.dealPrice} target={target} timePeriods={timePeriods} onTargetChange={(t) => dispatch({ type: 'SET_TARGET', payload: t })} onTimeChange={(k, v) => dispatch({ type: 'SET_TIME', key: k, value: v })} dataCoverage={dataCoverage} factorFilter={factorFilter} onFactorFilterChange={setFactorFilter} />}
                     {currentStep === 2 && <ParameterConfig params={params} context={context} onParamsChange={(p) => dispatch({ type: 'SET_PARAMS', payload: p })} onContextChange={(c) => dispatch({ type: 'SET_CONTEXT', payload: c })} displayName={displayName} onDisplayNameChange={(n, m) => dispatch({ type: 'SET_DISPLAY_NAME', payload: { name: n, mode: m } })} autoDisplayName={autoDisplayName} market={currentMarket} target={target} onTargetChange={(t) => dispatch({ type: 'SET_TARGET', payload: t })} wfa={wfaConfig} onWfaChange={(w) => dispatch({ type: 'SET_WFA', payload: w })} />}
                     {currentStep === 3 && <TrainingConsole trainingStatus={trainingStatus} executionStage={executionStage} progress={progress} logs={logs} backendRunStatus={backendRunStatus} result={result} requestPreview={requestPreview} totalDays={totalDays} trainDays={trainDays} valDays={valDays} testDays={testDays} target={target} factorFilter={factorFilter} onGoToResult={() => setCurrentStep(4)} />}
                     {currentStep === 4 && <TrainingResultView result={result} resultError={resultError} settingDefaultModel={settingDefaultModel} onSetDefaultModel={handleSetDefaultModel} onExportConfig={handleExportConfig} trainingStatus={trainingStatus} />}

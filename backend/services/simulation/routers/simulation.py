@@ -13,12 +13,6 @@ from backend.services.simulation.services.simulation_manager import (
     SimulationAccountManager,
     require_sim_user_id,
 )
-from backend.services.simulation.services.account_context import (
-    DatedAccountInputs,
-    RegisteredAccountUnavailable,
-    prepare_registered_account_reset,
-    read_registered_simulation_account,
-)
 from backend.services.simulation.services.ocr_service import SimulationOCRService
 from backend.services.trade_shared.trade_config import settings
 from backend.shared.database_manager_v2 import get_db_manager
@@ -30,32 +24,6 @@ from sqlalchemy import text
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-@router.get("/execution-inputs")
-async def get_execution_inputs(
-    market: str = Query(...),
-    trade_date: date | None = None,
-    data_version: str | None = None,
-    auth: AuthContext = Depends(get_auth_context),
-):
-    import asyncio
-
-    from backend.services.simulation.services.execution_input_metadata import (
-        read_execution_input_metadata,
-    )
-
-    _require_user_id(auth.user_id, auth.tenant_id)
-    try:
-        data = await asyncio.to_thread(
-            read_execution_input_metadata,
-            market,
-            trade_date=trade_date,
-            data_version=data_version,
-        )
-    except (ValueError, NotImplementedError) as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    return {"success": True, "data": data}
 
 
 def _require_user_id(raw_user_id: str, tenant_id: str = "default") -> int:
@@ -185,7 +153,6 @@ COOLDOWN_DAYS = 30
 class AccountResetRequest(BaseModel):
     initial_cash: float | None = None
     market: str | None = None  # 模拟账户市场维度（CN/HK/US/FUTURES/CRYPTO），缺省 CN
-    execution_context: DatedAccountInputs | None = None
 
 
 class HoldingItem(BaseModel):
@@ -279,6 +246,17 @@ async def reset_simulation_account(
     """
     manager = SimulationAccountManager(redis)
     uid = _require_user_id(auth.user_id, auth.tenant_id)
+    from backend.services.simulation.services.legacy_jp_state import (
+        LegacyJPNativeState,
+        read_existing_jp_account,
+        require_standard_account,
+    )
+
+    cached = read_existing_jp_account(redis, auth.tenant_id, uid)
+    try:
+        await require_standard_account(db, auth.tenant_id, uid, cached=cached)
+    except LegacyJPNativeState as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if request.initial_cash is None:
         settings = await manager.get_settings(
             user_id=uid,
@@ -289,18 +267,6 @@ async def reset_simulation_account(
         initial_cash = float(settings.get("initial_cash", DEFAULT_INITIAL_CASH))
     else:
         initial_cash = float(request.initial_cash)
-    market = str(request.market or "CN").upper()
-    try:
-        account_context = await prepare_registered_account_reset(
-            market, request.execution_context, db=db, tenant_id=auth.tenant_id,
-            raw_user_id=auth.user_id, user_id=uid,
-        )
-        if account_context is not None:
-            account_context.validate_initial_cash(initial_cash)
-    except RegisteredAccountUnavailable as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except (ValueError, NotImplementedError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if initial_cash < SIM_AMOUNT_STEP or int(initial_cash) % SIM_AMOUNT_STEP != 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -308,9 +274,10 @@ async def reset_simulation_account(
         )
 
     # 当显式传入 initial_cash 时，同步更新 settings，保证后续 initial_equity 口径一致。
-    if request.initial_cash is not None and account_context is None:
+    if request.initial_cash is not None:
         await manager.set_initial_cash(uid, initial_cash, tenant_id=auth.tenant_id)
 
+    market = str(request.market or "CN").upper()
     # 清空数据库中的历史交易/订单/快照，避免重置后前端仍拉到旧数据。
     # user_id 有 int 与原始 sub 两种口径（历史 varchar 兼容），一并清理。
     # 新台账（accounts/lots/ledger/daily/fills/orders_v2）同步清空，否则 PG 新旧两套
@@ -464,18 +431,9 @@ async def reset_simulation_account(
     except Exception as _e:
         logger.warning(f"Reset portfolio stop failed for {_runtime_tenant}:{_runtime_user}: {_e}")
 
-    if account_context is None:
-        account = await manager.init_account(
-            uid, initial_cash, tenant_id=auth.tenant_id, market=market
-        )
-    else:
-        try:
-            account = await account_context.initialize_after_reset(
-                db, redis, tenant_id=auth.tenant_id, user_id=uid, initial_cash=initial_cash,
-            )
-        except (ValueError, NotImplementedError) as exc:
-            await db.rollback()
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    account = await manager.init_account(
+        uid, initial_cash, tenant_id=auth.tenant_id, market=market
+    )
     await _capture_simulation_snapshot(redis)
     return {
         "success": True,
@@ -490,6 +448,7 @@ async def get_simulation_account(
     market: str = Query("CN", description="模拟账户市场（CN/HK/US/FUTURES/CRYPTO）"),
     auth: AuthContext = Depends(get_auth_context),
     redis: RedisClient = Depends(get_redis),
+    db=Depends(get_db),
 ):
     """
     Get current simulation account state.
@@ -499,30 +458,20 @@ async def get_simulation_account(
     manager = SimulationAccountManager(redis)
     uid = _require_user_id(auth.user_id, auth.tenant_id)
     market = market.upper()
+    from backend.services.simulation.services.legacy_jp_state import (
+        LegacyJPNativeState,
+        read_existing_jp_account,
+        require_standard_account,
+    )
+
+    cached = read_existing_jp_account(redis, auth.tenant_id, uid)
     try:
-        registered, account = await read_registered_simulation_account(
-            market, redis=redis, tenant_id=auth.tenant_id,
-            raw_user_id=auth.user_id, user_id=uid,
-        )
-    except (ValueError, NotImplementedError) as exc:
+        await require_standard_account(db, auth.tenant_id, uid, cached=cached)
+    except LegacyJPNativeState as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if not registered:
-        account = await manager.get_account(uid, tenant_id=auth.tenant_id, market=market)
+    account = await manager.get_account(uid, tenant_id=auth.tenant_id, market=market)
     if not account:
         # 不自动初始化，返回空账户标记，由前端引导用户去个人中心重置
-        registered_scope = {}
-        if registered:
-            from backend.services.engine.data_platform.market_provider import (
-                LOCAL_MARKET_PROVIDERS,
-            )
-
-            registered_scope = {
-                "market": market,
-                "currency": LOCAL_MARKET_PROVIDERS[market].currency,
-                "user_id": str(uid),
-                "tenant_id": auth.tenant_id,
-                "trading_mode": "simulation",
-            }
         return {
             "success": True,
             "data": {
@@ -531,14 +480,9 @@ async def get_simulation_account(
                 "market_value": 0.0,
                 "positions": {},
                 "account_not_initialized": True,
-                **registered_scope,
             },
             "market": market,
         }
-
-    if registered:
-        # Native P&L comes from the same dated PG checkpoint as its cash/positions.
-        return {"success": True, "data": account}
 
     # 从 settings 中读取 initial_cash 作为 initial_equity
     settings = await manager.get_settings(
@@ -614,21 +558,9 @@ async def capture_simulation_fund_snapshot(
 @router.get("/snapshots/daily", response_model=list[SimulationFundSnapshotResponse])
 async def list_simulation_fund_snapshots(
     days: int = Query(default=30, ge=1, le=3650),
-    market: str = Query(default="CN"),
     auth: AuthContext = Depends(get_auth_context),
-    redis: RedisClient = Depends(get_redis),
 ):
     """查询当前用户的模拟盘日级资金快照历史。"""
-    try:
-        registered, account = await read_registered_simulation_account(
-            market.upper(), redis=redis, tenant_id=auth.tenant_id,
-            raw_user_id=auth.user_id, user_id=_require_user_id(auth.user_id, auth.tenant_id),
-            history_days=days,
-        )
-    except (ValueError, NotImplementedError) as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if registered:
-        return [SimulationFundSnapshotResponse(**row) for row in (account or {}).get("fund_snapshots", [])]
     snapshots = await SimulationFundSnapshotService.list_user_daily(
         tenant_id=auth.tenant_id,
         user_id=str(auth.user_id),
@@ -708,6 +640,7 @@ async def confirm_holding_sync(
     request: SyncHoldingsRequest,
     auth: AuthContext = Depends(get_auth_context),
     redis: RedisClient = Depends(get_redis),
+    db=Depends(get_db),
 ):
     """
     确认同步 OCR 识别的持仓。
@@ -715,6 +648,17 @@ async def confirm_holding_sync(
     """
     manager = SimulationAccountManager(redis)
     uid = _require_user_id(auth.user_id, auth.tenant_id)
+    from backend.services.simulation.services.legacy_jp_state import (
+        LegacyJPNativeState,
+        read_existing_jp_account,
+        require_standard_account,
+    )
+
+    cached = read_existing_jp_account(redis, auth.tenant_id, uid)
+    try:
+        await require_standard_account(db, auth.tenant_id, uid, cached=cached)
+    except LegacyJPNativeState as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     # OCR 同步即“重新对齐起点”：先清旧成交/快照/新台账，避免旧基线导致
     # today_pnl 脉冲、历史曲线串基线（与 reset 同口径）。

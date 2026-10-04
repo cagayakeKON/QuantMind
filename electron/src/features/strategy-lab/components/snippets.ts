@@ -31,16 +31,16 @@ export interface SnippetSpec {
   code: string;
 }
 
-/** Registered published-cash examples use raw event/history prices. */
+/** Japan examples use the existing Qlib/SimpleBroker daily price contract. */
 export function getStrategyLabSnippets(market?: string): SnippetSpec[] {
   if (market !== 'JP') return STRATEGY_LAB_SNIPPETS;
-  const unsupported = /ctx\.(?:set_stop_loss|set_take_profit|set_account_stop_loss|set_max_holding_days|industry|feature)\(/;
+  const unsupported = /ctx\.(?:industry|feature)\(/;
   return STRATEGY_LAB_SNIPPETS.filter(s => !unsupported.test(s.code) && s.id !== 'long-short-pairs').map(s => ({
     ...s,
     title: s.title.replaceAll('csi300', '日本股票'),
     description: s.description.replaceAll('csi300', '日本股票'),
-    code: '# 日本日线现金模拟：on_bar 与默认 history 均为原始价格。\n'
-      + '# 研究复权历史请显式用 ctx.history(..., adjust="qfq")；日期默认取固定发布覆盖区间。\n'
+    code: '# 日本日频回测：on_bar 与默认 history 均使用共用 Qlib 的复权价格。\n'
+      + '# 原始行情请显式用 ctx.history(..., adjust="raw")；日期默认取固定发布覆盖区间。\n'
       + s.code.replaceAll('sh600036', 'JP72030').replaceAll('sh000001', 'JP67580')
         .replaceAll('sh600519', 'JP67580').replaceAll('sh601318', 'JP216A0')
         .replaceAll('csi300', 'all').replaceAll('SH000300', 'TOPIX')

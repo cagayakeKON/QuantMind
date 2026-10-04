@@ -19,44 +19,50 @@ from backend.services.engine.qlib_app.api import export, history
 from backend.services.engine.qlib_app.services import backtest_persistence as storage
 from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestResult
 
-pytest_plugins = ["backend.tests.test_jp_model_backtest"]
+pytest_plugins = ["backend.tests.jp_standard_fixtures"]
 
 
 @pytest.fixture
-def legacy_result():
-    # Captured from the retired runner using the controlled model_data fixture,
-    # before deleting its execution branch. Only generated identifiers, dates,
-    # elapsed time and publication digests were made stable; no real dataset.
-    return QlibBacktestResult.model_validate_json(
-        (Path(__file__).parent / "fixtures/jp_legacy_report.json").read_text(
-            encoding="utf-8"
-        )
+def standard_result():
+    result = QlibBacktestResult(
+        backtest_id="standard-jp",
+        user_id="alice",
+        tenant_id="tenant-a",
+        market="JP",
+        currency="JPY",
+        status="completed",
+        config={
+            "market": "JP",
+            "strategy_type": "TopkDropout",
+            "start_date": "2026-09-29",
+            "end_date": "2026-09-29",
+            "initial_capital": 100000,
+        },
+        trades=[
+            {
+                "symbol": "jp_72030",
+                "action": "buy",
+                "date": "2026-09-29",
+                "quantity": 100,
+                "price": 50,
+                "commission": 5,
+            }
+        ],
+        positions=[
+            {
+                "symbol": "jp_72030",
+                "amount": 100,
+                "date": "2026-09-29",
+                "weight": 0.05,
+                "side": "long",
+            }
+        ],
+        equity_curve=[{"date": "2026-09-29", "value": 100000}],
     )
+    from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
 
-
-def test_old_cash_view_preserves_report_metrics_and_ledger_values(legacy_result):
-    original = legacy_result.model_dump(mode="json")
-    before = deepcopy(original)
-    public = adapt_backtest_result_payload(original)
-    assert original == before
-    for key in before.keys() - {"trades", "positions", "advanced_stats"}:
-        assert public[key] == before[key]
-    fill = public["trades"][0]
-    assert {key: fill[key] for key in before["trades"][0]} == before["trades"][0]
-    assert fill["action"] == "buy"
-    assert fill["date"] == before["trades"][0]["trade_date"]
-    assert fill["commission"] == float(before["trades"][0]["fee"]) == 5
-    position = public["positions"][0]
-    assert position["amount"] == 100
-    assert position["date"] == before["config"]["end_date"]
-    assert position["weight"] == pytest.approx(
-        5000 / before["equity_curve"][-1]["value"]
-    )
-    assert position["lots"] == before["positions"][0]["lots"]
-    assert (
-        public["advanced_stats"]["cash_funds"] == before["advanced_stats"]["cash_funds"]
-    )
-    assert adapt_backtest_result_payload(public) is public
+    result.trades = RiskAnalyzer.normalize_trades_for_display(result.trades)
+    return result
 
 
 @pytest.mark.parametrize("market", [None, "CN", "HK", "US", "CRYPTO", "FUTURES"])
@@ -83,20 +89,20 @@ def test_new_public_and_pending_jp_reports_need_no_projection():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source", ["cache", "memory", "persistence"])
-async def test_public_query_reads_old_history_from_each_existing_source(
-    legacy_result, runtime_factory, source
+async def test_public_query_reads_standard_history_from_each_existing_source(
+    standard_result, runtime_factory, source
 ):
-    before = legacy_result.model_dump(mode="json")
+    before = standard_result.model_dump(mode="json")
     calls = []
 
     async def load(*args, **kwargs):
         calls.append((args, kwargs))
-        return legacy_result
+        return standard_result
 
     service = runtime_factory(SimpleNamespace(get_result=load))
     if source == "memory":
-        service._runs[legacy_result.backtest_id] = {
-            "result": legacy_result,
+        service._runs[standard_result.backtest_id] = {
+            "result": standard_result,
             "user_id": "alice",
             "tenant_id": "tenant-a",
         }
@@ -104,11 +110,11 @@ async def test_public_query_reads_old_history_from_each_existing_source(
         service._cache = SimpleNamespace(
             get_backtest_result=lambda key: deepcopy(before)
         )
-    result = await service.get_result(legacy_result.backtest_id, "tenant-a", "alice")
-    assert result.trades[0]["date"] == result.trades[0]["trade_date"]
+    result = await service.get_result(standard_result.backtest_id, "tenant-a", "alice")
+    assert result.trades[0]["date"] == "2026-09-29"
     assert result.trades[0]["action"] == "buy"
     assert result.positions[0]["amount"] == 100
-    assert legacy_result.model_dump(mode="json") == before
+    assert standard_result.model_dump(mode="json") == before
     assert len(calls) == (1 if source == "persistence" else 0)
     if calls:
         assert calls[0][1]["user_id"] == "alice"
@@ -119,9 +125,9 @@ async def test_public_query_reads_old_history_from_each_existing_source(
 @pytest.mark.parametrize("multiple", [False, True])
 @pytest.mark.parametrize("fields", [None, ["trades", "backtest_id"]])
 async def test_public_persistence_single_batch_and_partial_field_reads(
-    legacy_result, monkeypatch, multiple, fields
+    standard_result, monkeypatch, multiple, fields
 ):
-    payload = legacy_result.model_dump(mode="json")
+    payload = standard_result.model_dump(mode="json")
     before = deepcopy(payload)
     rows = SimpleNamespace(
         mappings=lambda: SimpleNamespace(
@@ -152,12 +158,12 @@ async def test_public_persistence_single_batch_and_partial_field_reads(
 
 @pytest.mark.asyncio
 async def test_shared_result_lazy_trades_and_csv_show_existing_jp_history(
-    legacy_result, runtime_factory
+    standard_result, runtime_factory
 ):
-    before = legacy_result.model_dump(mode="json")
+    before = standard_result.model_dump(mode="json")
 
     async def load(*args, **kwargs):
-        return legacy_result
+        return standard_result
 
     service = runtime_factory(SimpleNamespace(get_result=load))
     app = FastAPI()
@@ -170,21 +176,21 @@ async def test_shared_result_lazy_trades_and_csv_show_existing_jp_history(
         request.state.user = {"user_id": "alice", "tenant_id": "tenant-a"}
         return await call_next(request)
 
-    base = f"/api/v1/qlib/results/{legacy_result.backtest_id}"
+    base = f"/api/v1/qlib/results/{standard_result.backtest_id}"
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as client:
         full = await client.get(base)
         lazy = await client.get(base + "/trades")
         exported = await client.get(
-            f"/api/v1/qlib/export/{legacy_result.backtest_id}/csv"
+            f"/api/v1/qlib/export/{standard_result.backtest_id}/csv"
         )
     assert full.status_code == lazy.status_code == exported.status_code == 200
     assert full.json()["trades"][0] == lazy.json()["trades"][0]
     assert full.json()["positions"] == lazy.json()["positions"]
     rows = list(csv.reader(io.StringIO(exported.text.lstrip("\ufeff"))))
-    assert rows[1][:3] == [legacy_result.config["end_date"], "JP72030", "买入"]
+    assert rows[1][:3] == [standard_result.config["end_date"], "jp_72030", "买入"]
     assert float(rows[1][3]) == 50
     assert float(rows[1][4]) == 100
     assert float(rows[1][6]) == 5
-    assert legacy_result.model_dump(mode="json") == before
+    assert standard_result.model_dump(mode="json") == before

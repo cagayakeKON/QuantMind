@@ -35,7 +35,7 @@ def _build_calendar(
             cal = provider.calendar(start, end)
             return [pd.Timestamp(d) for d in cal]
         except Exception:
-            if hasattr(provider, "make_broker"):
+            if getattr(provider, "market", None):
                 raise
     # In-memory provider path: scrape dates from any known DataFrame
     if hasattr(provider, "_data"):
@@ -75,12 +75,7 @@ def run_backtest(
     setup_config = ctx.to_config_dict()
 
     cash = float(ctx.cash) if ctx.cash is not None else 1_000_000.0
-    factory = getattr(provider, "make_broker", None)
-    broker = (
-        factory(ctx, cash)
-        if factory
-        else SimpleBroker(ctx=ctx, provider=provider, cash=cash)
-    )
+    broker = SimpleBroker(ctx=ctx, provider=provider, cash=cash)
     ctx._attach(data_provider=provider, broker=broker, cash=cash)
 
     on_bar = user_globals.get("on_bar")
@@ -153,8 +148,6 @@ def run_backtest(
     last_emit_pct = 15.0
     for i, today in enumerate(calendar):
         ctx._set_today(today)
-        if hasattr(broker, "prepare_day"):
-            broker.prepare_day(today)
 
         if on_universe is not None:
             try:
@@ -253,9 +246,9 @@ def run_backtest(
             market=provider.market,
             currency=provider.currency,
             data_version=provider.reader.data_version,
-            execution_model="dated_cash",
-            event_price_basis="raw",
-            history_price_basis="raw",
+            execution_model="simple",
+            event_price_basis="adjusted",
+            history_price_basis="adjusted",
             research_history_adjust="qfq",
         )
     return result

@@ -872,8 +872,6 @@ async def import_remote_model(
     if not str(context.get("market") or "").strip():
         context["market"] = market_str
         metadata["context"] = context
-    if market_str == "JP":
-        metadata.pop("market_default", None)
 
     async with get_session() as session:
         # 是否需要设为默认（无业务默认时自动设为默认）
@@ -891,7 +889,7 @@ async def import_remote_model(
                 {"tenant_id": tenant_id, "user_id": user_id},
             )
         ).first()
-        should_default = not bool(has_business_default) and status_to_write == "ready" and market_str != "JP"
+        should_default = not bool(has_business_default) and status_to_write == "ready"
         if should_default:
             await session.execute(
                 text(
@@ -942,11 +940,6 @@ async def import_remote_model(
         raise HTTPException(
             status_code=500,
             detail="模型包解压后未找到可识别的模型文件，请联系广场作者检查打包内容",
-        )
-
-    if market_str == "JP":
-        await model_registry_service._set_jp_default_model(
-            tenant_id=tenant_id, user_id=user_id, model_id=local_model_id, only_if_missing=True
         )
 
     return {

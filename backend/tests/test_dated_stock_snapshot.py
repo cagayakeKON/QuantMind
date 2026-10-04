@@ -1,9 +1,8 @@
 """Common stock details bind names and prices to the requested publication/date."""
 
 from datetime import date
-from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import duckdb
 import pytest
@@ -146,29 +145,37 @@ def test_unregistered_markets_keep_original_query_service(monkeypatch, market, s
     service.get_stock_info.assert_awaited_once_with(symbol)
 
 
-def test_provider_pinning_uses_registered_factory_and_checks_identity(monkeypatch):
-    factory = Mock(
-        return_value=SimpleNamespace(hub=SimpleNamespace(data_dir=Path("v1")))
-    )
-    monkeypatch.setattr(
-        "backend.services.engine.data_platform.market_provider.importlib.import_module",
-        lambda _: SimpleNamespace(open_data=factory),
-    )
+def test_provider_pinning_opens_requested_immutable_hub(publications):
     provider = LocalMarketProvider(
-        "unused",
-        "Unused",
-        "XYZ",
-        "fixture",
-        "index",
-        execution_data_factory="fixture.open_data",
+        "backend.services.engine.data_platform.quantjp_hub",
+        "QuantJPDataHub",
+        "JPY",
+        "quantjp_parquet",
+        "TOPIX",
     )
-    assert provider.open("v1").data_dir.name == "v1"
-    factory.assert_called_once_with("v1")
-    with pytest.raises(ValueError, match="does not match"):
-        provider.open("v2")
+    original = provider.open(publications.version)
+    revised = provider.open(publications.current)
+    assert original.data_dir.name == publications.version
+    assert revised.data_dir.name == publications.current
+    original_names = original.fetch_stock_list(as_of=date(2026, 9, 29))
+    revised_names = revised.fetch_stock_list(as_of=date(2026, 9, 29))
+    assert (
+        original_names.loc[original_names.symbol.eq("72030.JP"), "stock_name"].iloc[0]
+        == "Historical"
+    )
+    assert (
+        revised_names.loc[revised_names.symbol.eq("72030.JP"), "stock_name"].iloc[0]
+        == "Revised publication"
+    )
 
 
-def test_unconfigured_provider_cannot_silently_open_current_for_a_version():
-    provider = LocalMarketProvider("unused", "Unused", "XYZ", "fixture", "index")
-    with pytest.raises(ValueError, match="version is required"):
-        provider.open("v1")
+def test_provider_cannot_silently_open_current_for_missing_publication(publications):
+    provider = LocalMarketProvider(
+        "backend.services.engine.data_platform.quantjp_hub",
+        "QuantJPDataHub",
+        "JPY",
+        "quantjp_parquet",
+        "TOPIX",
+    )
+    with pytest.raises(ValueError, match="version is unavailable"):
+        provider.open("unpublished")

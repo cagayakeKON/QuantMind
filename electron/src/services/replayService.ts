@@ -25,6 +25,8 @@ function getHeaders() {
 // ---------------------------------------------------------------------------
 
 export interface ReplaySession {
+    read_only?: boolean;
+    currency?: string;
     session_id: string;
     name: string;
     status: 'creating' | 'generating' | 'ready' | 'stepping' | 'awaiting_confirm' | 'finished' | 'failed' | 'discarded';
@@ -107,6 +109,9 @@ export interface StepResult {
 }
 
 export interface CreateSessionParams {
+    market?: AppMarket;
+    mode?: 'signals' | 'code';
+    strategy_code?: string;
     name?: string;
     model_id?: string;
     strategy_params?: Record<string, unknown>;
@@ -119,6 +124,7 @@ export interface CreateSessionParams {
 
 /** 提案单笔 */
 export interface ProposalItem {
+    trading_unit?: number;
     symbol: string;
     side: string;
     quantity: number;
@@ -158,8 +164,9 @@ export interface StepParams {
 // API
 // ---------------------------------------------------------------------------
 
-export async function listSessions(): Promise<ReplaySession[]> {
-    const { data } = await axios.get(BASE + '/sessions', { headers: getHeaders() });
+export async function listSessions(market?: AppMarket): Promise<ReplaySession[]> {
+    const context = market ? getMarketConfig(market).replay : undefined;
+    const { data } = await axios.get(BASE + '/sessions', { headers: getHeaders(), ...(context ? {params: {market: context.market}} : {}) });
     return data;
 }
 
@@ -176,20 +183,6 @@ export async function createSession(params: CreateSessionParams): Promise<Replay
 /** 手动模式：生成当日提案 */
 export async function proposeSession(sessionId: string): Promise<ProposalResponse> {
     const { data } = await axios.post(`${BASE}/sessions/${sessionId}/propose`, {}, { headers: getHeaders() });
-    return data;
-}
-
-export interface ReplayExecutionRules {
-    available: boolean;
-    market?: string;
-    currency?: string;
-    trade_date?: string;
-    data_version?: string;
-    trading_units?: Record<string, number>;
-}
-
-export async function getExecutionRules(sessionId: string): Promise<ReplayExecutionRules> {
-    const { data } = await axios.get(`${BASE}/sessions/${sessionId}/execution-rules`, {headers: getHeaders()});
     return data;
 }
 

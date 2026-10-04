@@ -351,6 +351,10 @@ class SimulationProjectionService:
         qty = max(0.0, float(lot.quantity_remaining or 0.0))
         if qty <= 0:
             return 0.0
+        from backend.services.simulation.services.market_rules import infer_market
+
+        if infer_market(str(lot.symbol or "")).value == "JP":
+            return qty
         side = str(lot.position_side or "long").strip().lower()
         if side != "long":
             return qty

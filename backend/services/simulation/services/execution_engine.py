@@ -12,6 +12,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.simulation.models.order import (
+    OrderSide,
     OrderStatus,
     OrderType,
     SimOrder,
@@ -26,12 +27,6 @@ from backend.shared.utc_datetime import utc_now
 from backend.shared.trade_account_cache import (
     write_json_cache,
     write_trade_account_cache,
-)
-from backend.services.simulation.services.dated_account import checkpointed_simulation_fill
-from backend.services.simulation.services.dated_execution import (
-    execute_registered_bar,
-    ordinary_cash_order_rejection,
-    registered_cash_market,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,13 +80,9 @@ class MarketSnapshot:
 
 
 class SimulationExecutionEngine:
-    def __init__(
-        self, db: AsyncSession, manager: SimulationAccountManager,
-        *, execution_context=None,
-    ):
+    def __init__(self, db: AsyncSession, manager: SimulationAccountManager):
         self.db = db
         self.manager = manager
-        self.execution_context = execution_context
         self._http: httpx.AsyncClient | None = None
 
     async def _http_client(self) -> httpx.AsyncClient:
@@ -246,9 +237,7 @@ class SimulationExecutionEngine:
     ) -> MarketSnapshot:
         """Build the shared execution snapshot used by manual and hosted orders."""
         price = float(tick.get("price") or 0.0)
-        lu, ld, suspended, lu_price, ld_price = self._enrich_cn_limits(
-            symbol, price
-        )
+        lu, ld, suspended, lu_price, ld_price = self._enrich_cn_limits(symbol, price)
         return MarketSnapshot(
             price=price,
             price_source=str(tick.get("price_source") or "redis_series"),
@@ -354,8 +343,7 @@ return tostring(granted)
                 age_seconds = self._quote_age_seconds(data)
                 try:
                     max_age_seconds = int(
-                        __import__("os").getenv("SIM_REDIS_QUOTE_MAX_AGE_SEC")
-                        or "300"
+                        __import__("os").getenv("SIM_REDIS_QUOTE_MAX_AGE_SEC") or "300"
                     )
                 except ValueError:
                     max_age_seconds = 300
@@ -590,13 +578,11 @@ return tostring(granted)
         order: SimOrder,
         bar: Any,
         market: str | None = None,
+        *,
+        slippage_bps: float | None = None,
+        requested_quantity: float | None = None,
     ) -> ExecutionResult:
         """按当日不复权日 K 走 ashare_matcher（托管/周期调仓与回放同口径）。"""
-        if self.execution_context is not None:
-            return await execute_registered_bar(self, order, bar, market)
-        rejection = ordinary_cash_order_rejection(order.symbol, market)
-        if rejection:
-            return ExecutionResult(success=False, message=rejection)
         from backend.services.simulation.services.ashare_matcher import (
             MatchConfig,
             match_order,
@@ -620,15 +606,13 @@ return tostring(granted)
             if pos is None:
                 from backend.shared.stock_utils import StockCodeUtil
 
-                pos = positions.get(StockCodeUtil.to_suffix(order.symbol)) or positions.get(
-                    StockCodeUtil.to_prefix(order.symbol)
-                )
+                pos = positions.get(
+                    StockCodeUtil.to_suffix(order.symbol)
+                ) or positions.get(StockCodeUtil.to_prefix(order.symbol))
             if isinstance(pos, dict):
                 avail = pos.get("available_volume")
                 available_volume = (
-                    float(pos.get("volume", 0) or 0)
-                    if avail is None
-                    else float(avail)
+                    float(pos.get("volume", 0) or 0) if avail is None else float(avail)
                 )
 
         cfg = MatchConfig(
@@ -639,9 +623,32 @@ return tostring(granted)
             stamp_duty_rate=float(settings.SIMULATION_STAMP_DUTY_RATE),
             lot_size=lot_size_for_symbol(order.symbol, rules.market),
         )
+        if market_str == "JP":
+            from backend.services.simulation.services.legacy_jp_state import (
+                require_standard_account,
+            )
+
+            await require_standard_account(
+                self.db, order.tenant_id, order.user_id, cached=account_snapshot
+            )
+            cfg = MatchConfig(
+                price_mode="close",
+                slippage_bps=float(settings.SIMULATION_SLIPPAGE_BPS)
+                if slippage_bps is None
+                else slippage_bps,
+                commission_rate=rules.commission_rate,
+                commission_min=rules.commission_min,
+                stamp_duty_rate=rules.stamp_duty_rate,
+                transfer_fee_rate=0.0,
+                lot_size=bar.lot_size,
+            )
         mr = match_order(
             side=side,
-            quantity=int(order.quantity or 0),
+            quantity=int(
+                requested_quantity
+                if requested_quantity is not None
+                else (order.quantity or 0)
+            ),
             bar=bar,
             cfg=cfg,
             available_volume=available_volume,
@@ -683,6 +690,7 @@ return tostring(granted)
             market=market_str,
             account_snapshot=account_snapshot,
             price_source=f"local_{cfg.price_mode}",
+            requested_quantity=requested_quantity,
         )
 
     async def execute_order(
@@ -693,13 +701,10 @@ return tostring(granted)
         requested_quantity: float | None = None,
         allow_stale_market_fill: bool = False,
     ) -> ExecutionResult:
-        rejection = ordinary_cash_order_rejection(order.symbol, market)
-        if rejection:
-            return ExecutionResult(success=False, message=rejection)
-        if self.execution_context is not None:
-            raise NotImplementedError(
-                "Registered cash execution needs a dated quote adapter"
-            )
+        from backend.services.simulation.services.market_rules import infer_market
+
+        if infer_market(order.symbol).value == "JP":
+            return await self._execute_japan_order(order, market, requested_quantity)
         snapshot = snapshot or await self._latest_price(
             order.symbol, user_id=order.user_id, tenant_id=order.tenant_id
         )
@@ -753,9 +758,7 @@ return tostring(granted)
         rules = rules_for(market or infer_market(order.symbol))
         market_str = rules.market.value
         requested_qty = float(
-            requested_quantity
-            if requested_quantity is not None
-            else order.quantity
+            requested_quantity if requested_quantity is not None else order.quantity
         )
         if requested_qty <= 0:
             return ExecutionResult(success=False, message="quantity must be > 0")
@@ -951,21 +954,59 @@ return tostring(granted)
             quote_timestamp=snapshot.quote_timestamp,
             quote_age_seconds=snapshot.quote_age_seconds,
             message=(
-                "partially_filled"
-                if fill_quantity + 1e-6 < requested_qty
-                else "filled"
+                "partially_filled" if fill_quantity + 1e-6 < requested_qty else "filled"
             ),
         )
 
-    @checkpointed_simulation_fill
+    async def _execute_japan_order(self, order, market=None, requested_quantity=None):
+        """Use local daily bars with the public matcher and ordinary account."""
+        from backend.services.simulation.services.local_market_data import (
+            get_local_market_data,
+        )
+
+        reader = get_local_market_data("JP")
+        from zoneinfo import ZoneInfo
+
+        today = datetime.now(ZoneInfo("Asia/Tokyo")).date()
+        trade_date = await asyncio.to_thread(reader.latest_trade_date, today)
+        bar = (
+            await asyncio.to_thread(reader.get_bar, order.symbol, trade_date)
+            if trade_date is not None
+            else None
+        )
+        if bar is None:
+            return ExecutionResult(success=False, message="NO_MARKET_DATA")
+        if order.order_type == OrderType.LIMIT:
+            price = float(order.price or 0)
+            if price <= 0:
+                return ExecutionResult(success=False, message="Limit price required")
+            if (order.side == OrderSide.BUY and price < bar.close) or (
+                order.side == OrderSide.SELL and price > bar.close
+            ):
+                return ExecutionResult(
+                    success=False, message="Limit order has not crossed market price"
+                )
+        elif order.order_type != OrderType.MARKET:
+            return ExecutionResult(
+                success=False, message=f"Unsupported order type: {order.order_type}"
+            )
+        return await self.execute_from_bar(
+            order,
+            bar,
+            "JP",
+            requested_quantity=requested_quantity,
+            **({"slippage_bps": 0.0} if order.order_type == OrderType.LIMIT else {}),
+        )
+
     async def apply_filled(self, order: SimOrder, result: ExecutionResult) -> SimTrade:
-        cash_market = registered_cash_market(order.symbol, result.market)
-        if cash_market and (
-            self.execution_context is None
-            or self.execution_context.market != cash_market
-            or not getattr(self.manager, "uses_market_cash_checkpoint", False)
-        ):
-            raise ValueError(ordinary_cash_order_rejection(order.symbol, cash_market))
+        if result.market == "JP":
+            from backend.services.simulation.services.legacy_jp_state import (
+                require_standard_account,
+            )
+
+            await require_standard_account(
+                self.db, order.tenant_id, order.user_id, cached=result.account_snapshot
+            )
         trade_value = result.quantity * result.price
         transfer_fee = float(getattr(result, "transfer_fee", 0.0) or 0.0)
         total_fee = result.commission + result.stamp_duty + transfer_fee
@@ -985,9 +1026,7 @@ return tostring(granted)
             total_fee=total_fee,
             # sim_trades.executed_at 是 TIMESTAMPTZ，必须写 aware UTC。
             # naive UTC 会在旧库 timestamptz 上被 asyncpg 拒绝，整笔成交回滚。
-            executed_at=(result.executed_at
-                         if getattr(self.manager, "uses_market_cash_checkpoint", False)
-                         else utc_now()),
+            executed_at=utc_now(),
             price_source=result.price_source,
         )
         self.db.add(trade)
@@ -1006,8 +1045,6 @@ return tostring(granted)
         order.status = OrderStatus.PENDING if partial else OrderStatus.FILLED
         order.submitted_at = order.submitted_at or datetime.now(timezone.utc)
         order.filled_at = None if partial else datetime.now(timezone.utc)
-        if not partial and getattr(self.manager, "uses_market_cash_checkpoint", False):
-            order.filled_at = trade.executed_at
         old_filled_quantity = float(order.filled_quantity or 0.0)
         old_filled_value = float(order.filled_value or 0.0)
         new_filled_quantity = old_filled_quantity + result.quantity
@@ -1049,9 +1086,6 @@ return tostring(granted)
                 order=order,
                 trade=trade,
                 account_snapshot=before_snapshot,
-                **({"market_scope": self.manager.ledger_scope()}
-                   if getattr(self.manager, "uses_market_cash_checkpoint", False)
-                   else {}),
             )
             from sqlalchemy import select
 
@@ -1068,8 +1102,6 @@ return tostring(granted)
                 )
             ).scalar_one_or_none()
             if projection_order is not None:
-                if getattr(self.manager, "uses_market_cash_checkpoint", False):
-                    projection_order.account_id = self.manager.ledger_account_id
                 if partial:
                     projection_order.quantity = max(
                         0.0, requested_quantity - result.quantity
@@ -1104,12 +1136,7 @@ return tostring(granted)
                         commission=result.commission,
                         stamp_duty=result.stamp_duty,
                         transfer_fee=transfer_fee,
-                        executed_at=(
-                            trade.executed_at.replace(tzinfo=None)
-                            if getattr(
-                                self.manager, "uses_market_cash_checkpoint", False
-                            ) else utc_now().replace(tzinfo=None)
-                        ),
+                        executed_at=utc_now().replace(tzinfo=None),
                         price_source=result.price_source,
                     )
                 )
@@ -1237,15 +1264,6 @@ return tostring(granted)
 
         from backend.services.simulation.services.market_rules import infer_market
 
-        rejection = ordinary_cash_order_rejection(getattr(order, "symbol", None))
-        if rejection:
-            return SimpleNamespace(
-                can_execute=False,
-                target_trade_date=None,
-                final_state="rejected",
-                retryable=False,
-                message=rejection,
-            )
         market = infer_market(str(getattr(order, "symbol", "") or ""))
         if market.value == "CRYPTO":
             return SimpleNamespace(
@@ -1260,6 +1278,7 @@ return tostring(granted)
             "CN": "Asia/Shanghai",
             "HK": "Asia/Hong_Kong",
             "US": "America/New_York",
+            "JP": "Asia/Tokyo",
             "FUTURES": "Asia/Shanghai",
         }.get(market.value, "Asia/Shanghai")
         local_now = now or datetime.now(ZoneInfo(tz_name))
@@ -1279,21 +1298,27 @@ return tostring(granted)
                 "CN": "XSHG",
                 "HK": "XHKG",
                 "US": "XNYS",
+                "JP": "XTKS",
             }.get(market.value)
             if calendar_name:
                 calendar = get_calendar(calendar_name)
                 is_session = bool(calendar.is_session(pd.Timestamp(today)))
         except Exception:
             calendar = None
-        if market.value in {"CN", "HK"}:
+        if market.value == "JP":
+            from backend.services.simulation.jp.rules import session_close
+
+            can_execute = is_session and (
+                (9, 0) <= (local_now.hour, local_now.minute) < (11, 30)
+                or (12, 30)
+                <= (local_now.hour, local_now.minute)
+                < (session_close(today).hour, session_close(today).minute)
+            )
+        elif market.value in {"CN", "HK"}:
             morning_close = (12, 0) if market.value == "HK" else (11, 30)
             afternoon_close = (16, 0) if market.value == "HK" else (15, 0)
-            morning = (
-                (9, 30) <= (local_now.hour, local_now.minute) < morning_close
-            )
-            afternoon = (
-                (13, 0) <= (local_now.hour, local_now.minute) < afternoon_close
-            )
+            morning = (9, 30) <= (local_now.hour, local_now.minute) < morning_close
+            afternoon = (13, 0) <= (local_now.hour, local_now.minute) < afternoon_close
             can_execute = is_session and (morning or afternoon)
         elif market.value == "US":
             can_execute = is_session and (
@@ -1304,11 +1329,16 @@ return tostring(granted)
 
         target_date = today
         market_close = (16, 0) if market.value == "HK" else (15, 0)
-        if not is_session or (
-            market.value in {"CN", "HK"}
-            and (local_now.hour, local_now.minute) >= market_close
-        ) or (
-            market.value == "US" and (local_now.hour, local_now.minute) >= (16, 0)
+        if market.value == "JP":
+            close = session_close(today)
+            market_close = (close.hour, close.minute)
+        if (
+            not is_session
+            or (
+                market.value in {"CN", "HK", "JP"}
+                and (local_now.hour, local_now.minute) >= market_close
+            )
+            or (market.value == "US" and (local_now.hour, local_now.minute) >= (16, 0))
         ):
             target_date = today
             while True:

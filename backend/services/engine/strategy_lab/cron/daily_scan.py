@@ -238,7 +238,7 @@ def run_daily_scan(*, lookback_days: int = 7) -> dict[str, Any]:
                         {
                             "market": provider.market,
                             "data_version": provider.reader.data_version,
-                            "execution_date_mode": "published_daily_delayed",
+                            "execution_date_mode": "published_daily_close",
                             "watch_scope": watch_scope,
                         }
                         if provider

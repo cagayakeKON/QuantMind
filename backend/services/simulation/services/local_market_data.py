@@ -40,6 +40,18 @@ from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
 
+
+def symbol_conversion_market(symbol: str, market: str | None = None) -> str | None:
+    """Apply JP alias context without reinterpreting foreign account positions."""
+    if market != "JP" or StockCodeUtil.is_jp_symbol(symbol):
+        return market
+    try:
+        StockCodeUtil.to_jp_code(symbol)
+    except ValueError:
+        return None
+    return market
+
+
 # CN 不复权日线视图；其余市场用各自 daily_forward（同步落盘的原始价）
 _MARKET_KLINE_VIEWS: dict[Market, str] = {
     Market.CN: "qdb_daily_unadjusted",
@@ -64,7 +76,15 @@ _MARKET_KLINE_DIRS: dict[Market, str] = {
 }
 
 # 单日直读所需的视图列口径；分区文件缺任一则整份数据回退 DuckDB 视图
-_BAR_COLUMNS: tuple[str, ...] = ("symbol", "open", "high", "low", "close", "volume", "amount")
+_BAR_COLUMNS: tuple[str, ...] = (
+    "symbol",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
+)
 # 部分市场 volume 落盘为别名列（与 hub._VOLUME_ALIASES 对齐）
 _VOLUME_ALIASES: tuple[str, ...] = ("vol_in_stock", "volinstock")
 
@@ -122,7 +142,9 @@ class DailyBar:
     limit_down: float
     is_st: bool
     suspended: bool
-    lot_size: int = 100
+    lot_size: int | None = None
+    price_tick: float = 0.0
+    tick_category: str = ""
 
 
 def _round_cent(value: Decimal, rounding: str) -> float:
@@ -136,7 +158,7 @@ def _is_bse(symbol: str) -> bool:
     # 兼容 SH/SZ/BJ 前缀式（BJ430047 / BJ830000）与后缀式（430047.BJ / 830000.BJ）
     for pfx in ("SH", "SZ", "BJ"):
         if s.startswith(pfx):
-            s = s[len(pfx):]
+            s = s[len(pfx) :]
             break
     s = s.split(".")[0]
     if s.startswith("BJ"):
@@ -151,7 +173,7 @@ def _board_pct(symbol: str) -> Decimal:
     # 兼容 SH600036 / 600036.SH / 600036 均取纯数字
     for pfx in ("SH", "SZ", "BJ"):
         if s.startswith(pfx):
-            s = s[len(pfx):]
+            s = s[len(pfx) :]
             break
     s = s.split(".")[0]
     if s[:3] in _GROWTH_PREFIXES:
@@ -166,7 +188,7 @@ def limit_pct(symbol: str, *, is_st: bool, trade_date: date) -> Decimal:
     s = str(symbol).upper().strip()
     for pfx in ("SH", "SZ", "BJ"):
         if s.startswith(pfx):
-            s = s[len(pfx):]
+            s = s[len(pfx) :]
             break
     s = s.split(".")[0]
     if s[:3] in ("300", "301", "302") and trade_date < _CHINEXT_20PCT_FROM:
@@ -234,6 +256,8 @@ def _to_bar_frame(raw: pd.DataFrame, dt_int: int) -> pd.DataFrame | None:
         if source is None:
             return None
         out[col] = raw[source]
+    if "adj_factor" in lower:
+        out["adj_factor"] = raw[lower["adj_factor"]]
     return pd.DataFrame(out)
 
 
@@ -261,12 +285,7 @@ class LocalMarketData:
         market: Market | str | None = None,
     ) -> None:
         self.market = normalize_market(market)
-        if self.market is Market.JP:
-            # JP data is available through QuantJPDataHub. Do not enable the
-            # legacy simulator until the JP cash/settlement engine is integrated.
-            raise NotImplementedError(
-                "JP simulation requires the dated cash-account execution engine"
-            )
+        self._follow_raw = hub is None and self.market is Market.JP
         self._hub = hub or self._resolve_hub(self.market)
         self._kline_view = _MARKET_KLINE_VIEWS[self.market]
         self._lock = threading.RLock()
@@ -278,6 +297,8 @@ class LocalMarketData:
         self._kline_root: Path | None = None
         self._kline_root_probed = False
         self._direct_read_ok = True
+        self._data_root = getattr(self._hub, "data_dir", None)
+        self._jp_units: dict | None = None
 
     @staticmethod
     def _resolve_hub(market: Market) -> QuantDBDataHub:
@@ -292,9 +313,11 @@ class LocalMarketData:
 
             return QuantUSDataHub.get_instance()
         if market is Market.JP:
-            from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+            from backend.services.engine.data_platform.market_provider import (
+                LOCAL_MARKET_PROVIDERS,
+            )
 
-            return QuantJPDataHub.get_instance()
+            return LOCAL_MARKET_PROVIDERS["JP"].open_raw()
         if market is Market.FUTURES:
             from backend.services.engine.data_platform.quantfutures_hub import (
                 QuantFuturesDataHub,
@@ -315,13 +338,40 @@ class LocalMarketData:
     ) -> dict[str, DailyBar]:
         """加载指定交易日的全市场（或指定标的）日线。"""
         bars = self._load_date_cached(trade_date)
-        if symbols is None:
-            return bars
-        wanted = {StockCodeUtil.to_suffix(s) for s in symbols}
-        return {sym: bar for sym, bar in bars.items() if sym in wanted}
+        if symbols is not None:
+            wanted = {
+                StockCodeUtil.to_suffix(
+                    s,
+                    market=symbol_conversion_market(
+                        s, "JP" if self.market is Market.JP else None
+                    ),
+                )
+                for s in symbols
+            }
+            bars = {sym: bar for sym, bar in bars.items() if sym in wanted}
+        if self.market is Market.JP:
+            for bar in bars.values():
+                self._require_jp_unit(bar)
+        return bars
 
     def get_bar(self, symbol: str, trade_date: date) -> DailyBar | None:
-        return self._load_date_cached(trade_date).get(StockCodeUtil.to_suffix(symbol))
+        bar = self._load_date_cached(trade_date).get(
+            StockCodeUtil.to_suffix(
+                symbol,
+                market=symbol_conversion_market(
+                    symbol, "JP" if self.market is Market.JP else None
+                ),
+            )
+        )
+        if self.market is Market.JP and bar is not None:
+            self._require_jp_unit(bar)
+        return bar
+
+    @staticmethod
+    def _require_jp_unit(bar):
+        from backend.services.simulation.services.market_rules import japan_trading_unit
+
+        japan_trading_unit(bar.trade_date, {"lot_size": bar.lot_size})
 
     def latest_trade_date(self, on_or_before: date | None = None) -> date | None:
         """最近一个有行情数据的交易日。"""
@@ -335,7 +385,26 @@ class LocalMarketData:
     # ------------------------------------------------------------------
     # 内部实现
     # ------------------------------------------------------------------
+    def _refresh_data_root(self) -> None:
+        if self.market is Market.JP:
+            if self._follow_raw:
+                fresh = self._resolve_hub(self.market)
+                if fresh.data_dir != self._data_root:
+                    self._hub = fresh
+            current_root = getattr(self._hub, "data_dir", None)
+            with self._lock:
+                if current_root != self._data_root:
+                    self._date_cache.clear()
+                    self._session_dates = None
+                    self._sessions_at = None
+                    self._kline_root = None
+                    self._kline_root_probed = False
+                    self._direct_read_ok = True
+                    self._jp_units = None
+                    self._data_root = current_root
+
     def _load_date_cached(self, trade_date: date) -> dict[str, DailyBar]:
+        self._refresh_data_root()
         with self._lock:
             cached = self._date_cache.get(trade_date)
             if cached is not None:
@@ -383,9 +452,24 @@ class LocalMarketData:
             pre_close_map: dict[str, float] = {}
         else:
             prev = df[df["dt"] == prev_dt_int]
-            pre_close_map = dict(zip(prev["symbol"], prev["close"].astype(float), strict=True))
+            pre_close_map = dict(
+                zip(prev["symbol"], prev["close"].astype(float), strict=True)
+            )
 
         st_symbols = self._st_symbol_set() if self.market is Market.CN else frozenset()
+        jp_metadata = {}
+        if self.market is Market.JP:
+            from backend.services.engine.data_platform.jp_trading_units import (
+                read_published_trading_units,
+            )
+
+            if self._jp_units is None:
+                self._jp_units = read_published_trading_units(self._hub.data_dir)
+            master = self._hub.fetch_stock_list(trade_date)
+            if not master.empty and "symbol" in master.columns:
+                jp_metadata = {
+                    str(item["symbol"]): item for item in master.to_dict("records")
+                }
 
         bars: dict[str, DailyBar] = {}
         for row in today.itertuples(index=False):
@@ -399,10 +483,38 @@ class LocalMarketData:
 
             pre_close = pre_close_map.get(symbol, 0.0)
             is_st = symbol in st_symbols
+            price_tick = 0.0
+            trading_unit = lot_size_for_symbol(symbol)
             if self.market is Market.CN and pre_close > 0:
                 limit_up, limit_down = compute_limits(
                     symbol, pre_close, is_st=is_st, trade_date=trade_date
                 )
+            elif self.market is Market.JP:
+                from backend.services.simulation.services.market_rules import (
+                    japan_price_rules,
+                    japan_trading_unit,
+                )
+                from backend.services.simulation.jp.rules import RuleDataMissing
+
+                pre_close *= _as_float(getattr(row, "adj_factor", 1.0)) or 1.0
+                metadata = dict(jp_metadata.get(symbol, {}))
+                if trade_date < date(2018, 10, 1):
+                    # J-Quants master does not source historical board lots.
+                    metadata.pop("lot_size", None)
+                canonical = StockCodeUtil.to_prefix(symbol, market="JP")
+                for interval in self._jp_units.get(canonical, []):
+                    if interval["valid_from"] <= trade_date <= interval["valid_to"]:
+                        metadata["lot_size"] = interval["lot_size"]
+                        break
+                limit_up, limit_down, price_tick = japan_price_rules(
+                    trade_date, pre_close, close, metadata
+                )
+                try:
+                    trading_unit = japan_trading_unit(trade_date, metadata)
+                except RuleDataMissing:
+                    # Unknown units stay unknown; requested execution bars reject
+                    # them without blocking other securities' sourced units.
+                    trading_unit = None
             else:
                 # 无昨收（新股首日）或非 CN 市场：无涨跌幅限制
                 limit_up, limit_down = math.inf, 0.0
@@ -421,7 +533,11 @@ class LocalMarketData:
                 limit_down=limit_down,
                 is_st=is_st,
                 suspended=volume <= 0,
-                lot_size=lot_size_for_symbol(symbol),
+                lot_size=trading_unit,
+                price_tick=price_tick,
+                tick_category=str(
+                    jp_metadata.get(symbol, {}).get("scale_category") or ""
+                ),
             )
         return bars
 
@@ -444,9 +560,10 @@ class LocalMarketData:
         """DuckDB 视图兜底扫描（全分区元数据枚举，仅在直读不可用时使用）。"""
         dt_list = ", ".join(str(d) for d in dt_ints)
         sql = (
-            "SELECT symbol, dt, open, high, low, close, volume, amount "
-            f"FROM {self._kline_view} WHERE dt IN ({dt_list})"
-        )
+            "SELECT * "
+            if self.market is Market.JP
+            else "SELECT symbol, dt, open, high, low, close, volume, amount "
+        ) + f"FROM {self._kline_view} WHERE dt IN ({dt_list})"
         try:
             return self._hub.query(sql)
         except Exception as exc:
@@ -494,7 +611,9 @@ class LocalMarketData:
             return pd.DataFrame()
         try:
             files = sorted(
-                p for p in dt_dir.glob("*.parquet") if p.is_file() and p.stat().st_size > 0
+                p
+                for p in dt_dir.glob("*.parquet")
+                if p.is_file() and p.stat().st_size > 0
             )
         except OSError as exc:
             logger.warning("本地行情分区不可读 %s: %s", dt_dir, exc)
@@ -533,6 +652,7 @@ class LocalMarketData:
         拿到全部交易日。旧实现是 ``SELECT DISTINCT dt FROM 视图``，DuckDB 要为
         它枚举并读取 2500+ 个 parquet 的 footer，服务器上实测 16-20 秒同步阻塞。
         """
+        self._refresh_data_root()
         now = time.monotonic()
         with self._lock:
             if self._session_dates is not None and (

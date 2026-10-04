@@ -57,7 +57,7 @@ class MarketScheduleContext:
         clock = local_now.time().replace(tzinfo=None)
         windows = self.continuous_windows(day)
         return any(
-            name in set(config.get("enabled_sessions") or []) and start <= clock < end
+            name in set(config.get("enabled_sessions") or []) and start <= clock <= end
             for name, (start, end) in windows.items()
         )
 
@@ -67,7 +67,7 @@ class MarketScheduleContext:
         for name, (start, end) in self.continuous_windows(local_now.date()).items():
             if (
                 name in set(config.get("enabled_sessions") or [])
-                and start <= clock < end
+                and start <= clock <= end
             ):
                 return datetime.combine(local_now.date(), end, tzinfo=self.timezone)
         raise ScheduleDataUnavailable("No enabled continuous session for this window")

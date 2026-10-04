@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import date
+from decimal import Decimal
 from dataclasses import dataclass
 from enum import Enum
 
@@ -143,12 +145,53 @@ JP_RULES = MarketTradingRules(
     market=Market.JP,
     currency="JPY",
     t_plus_1=False,
-    lot_size=100,  # Current default; historical lots require dated metadata.
+    lot_size=100,
     commission_rate=0.0,
     commission_min=0.0,
     stamp_duty_rate=0.0,
     has_price_limit=True,
 )
+
+
+def japan_trading_unit(day: date, metadata: dict) -> int:
+    """Resolve an explicit dated unit, allowing the unified 100-share era default."""
+    try:
+        raw = metadata.get("lot_size")
+        unit = int(raw)
+        if not isinstance(raw, bool) and unit > 0 and float(raw) == unit:
+            return unit
+    except (TypeError, ValueError, OverflowError):
+        pass
+    if day >= date(2018, 10, 1):
+        return JP_RULES.lot_size
+    from backend.services.simulation.jp.rules import RuleDataMissing
+
+    raise RuleDataMissing(f"Historical JP trading unit is unavailable on {day}")
+
+
+def japan_bar_rules(day: date, previous_close: float, close: float, metadata: dict):
+    """JP-specific price limits, unit and tick in the ordinary DailyBar contract."""
+    unit = japan_trading_unit(day, metadata)
+    up, down, tick = japan_price_rules(day, previous_close, close, metadata)
+    return up, down, unit, tick
+
+
+def japan_price_rules(day: date, previous_close: float, close: float, metadata: dict):
+    """Price metadata can be cached even when historical board lots are unknown."""
+    from backend.services.simulation.jp.rules import daily_limit_width, tick_size
+
+    category = metadata.get("scale_category")
+    if category is None or str(category) == "nan":
+        category = ""  # Unclassified securities use the ordinary tick table.
+    tick = float(
+        tick_size(Decimal(str(max(close, 0.01))), day, {"scale_category": category})
+    )
+    if previous_close <= 0:
+        return float("inf"), 0.0, tick
+    base = Decimal(str(previous_close))
+    width = daily_limit_width(base)
+    return float(base + width), float(max(Decimal(0), base - width)), tick
+
 
 RULES_BY_MARKET: dict[Market, MarketTradingRules] = {
     Market.CN: CN_RULES,
@@ -199,7 +242,9 @@ def infer_market(symbol: str) -> Market:
     if _FUTURES_RE.search(text):
         return Market.FUTURES
     # 上金所品种（Au99.99 / AG(T+D)）归期货
-    if "(T+D)" in text.upper() or re.fullmatch(r"[A-Z]{2}\d{2}\.\d{2}", text, re.IGNORECASE):
+    if "(T+D)" in text.upper() or re.fullmatch(
+        r"[A-Z]{2}\d{2}\.\d{2}", text, re.IGNORECASE
+    ):
         return Market.FUTURES
     if _CRYPTO_RE.fullmatch(text):
         return Market.CRYPTO

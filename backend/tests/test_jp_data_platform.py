@@ -248,11 +248,18 @@ def test_date_bounds_do_not_change_adjustment_anchor(snapshot, tmp_path):
     assert adjusted["close"].tolist() == pytest.approx([45])
 
 
-def test_legacy_simulator_cannot_bypass_jp_cash_rules():
+def test_jp_raw_import_is_available_to_standard_simulator(snapshot, tmp_path):
     from backend.services.simulation.services.local_market_data import LocalMarketData
 
-    with pytest.raises(NotImplementedError, match="cash-account"):
-        LocalMarketData(market="JP")
+    root = tmp_path / "quantjp"
+    import_jquants_snapshot(snapshot, root)
+    market_data = LocalMarketData(hub=QuantJPDataHub(root), market="JP")
+    assert market_data._sessions() == [20260928, 20260929, 20260930]
+    raw = market_data.get_bar("JP72030", date(2026, 9, 29))
+    assert raw.close == 50
+    assert raw.volume == 1000
+    assert raw.pre_close == 50  # The shared quote keeps the split price basis.
+    assert raw.lot_size == 100
 
 
 def test_jp_factor_reader_resolves_published_generation(

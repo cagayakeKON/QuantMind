@@ -430,7 +430,11 @@ export const QlibQuickBacktest: React.FC = () => {
         // 全局股票池引用：后端 pool_id 优先于 universe 解析并物化
         pool_id: universePath.startsWith('pool:') ? universePath : undefined,
         strategy_type: strategyType,
-        strategy_params: strategyParams,
+        strategy_params: marketConfig.backtest?.market === 'JP' ? {
+          ...strategyParams,
+          buy_cost: marketCommission, sell_cost: marketCommission,
+          open_cost: marketCommission, close_cost: marketCommission,
+        } : strategyParams,
         benchmark_symbol: benchmark,
         strategy_code: overrideCode || strategyInfo?.code || '',
         strategy_id: strategyInfo?.id,

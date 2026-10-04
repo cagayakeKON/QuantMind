@@ -1,7 +1,7 @@
 import axios, { AxiosHeaders } from 'axios';
 import { SERVICE_ENDPOINTS, SERVICE_URLS } from '../config/services';
 import { authService } from '../features/auth/services/authService';
-import type { DatedExecutionContext, SimulationExecutionInputs, ExecutionConfig, LiveTradeConfig } from '../types/liveTrading';
+import type { ExecutionConfig, LiveTradeConfig } from '../types/liveTrading';
 
 function getTenantId(): string {
     const fromEnv = String((import.meta as any).env?.VITE_TENANT_ID || '').trim();
@@ -137,7 +137,6 @@ export interface RealTradingStatus {
     };
     execution_config?: ExecutionConfig | null;
     live_trade_config?: LiveTradeConfig | null;
-    execution_context?: DatedExecutionContext;
     latest_hosted_task?: ManualExecutionTaskRecord | null;
     latest_signal_run_id?: string | null;
     signal_source_status?: {
@@ -399,7 +398,6 @@ export interface RealAccountLedgerDailySnapshot {
 }
 
 export interface StartTradingResponse {
-    execution_context?: DatedExecutionContext;
     status: string;
     message?: string;
     effective_execution_config?: ExecutionConfig;
@@ -561,28 +559,28 @@ export const realTradingService = {
         tradingMode: 'REAL' | 'SHADOW' | 'SIMULATION',
         _userId: string,
         _tenantId: string = getTenantId(),
-        executionContext?: DatedExecutionContext
+        market?: string
     ): Promise<PreflightCheckResponse> => {
         return await requestRealTradingWithFallback<PreflightCheckResponse>({
             method: 'get',
             url: '/preflight',
             params: {
                 trading_mode: tradingMode,
-                ...(executionContext ? { market: executionContext.market, execution_context: JSON.stringify(executionContext) } : {}),
+                ...(market ? { market } : {}),
             },
         });
     },
 
     getTradingPrecheck: async (
         tradingMode: 'REAL' | 'SHADOW' | 'SIMULATION',
-        executionContext?: DatedExecutionContext
+        market?: string
     ): Promise<TradingPrecheckResult> => {
         return await requestRealTradingWithFallback<TradingPrecheckResult>({
             method: 'get',
             url: '/trading-precheck',
             params: {
                 trading_mode: tradingMode,
-                ...(executionContext ? { market: executionContext.market, execution_context: JSON.stringify(executionContext) } : {}),
+                ...(market ? { market } : {}),
             },
         });
     },
@@ -595,20 +593,17 @@ export const realTradingService = {
         _tenantId: string = getTenantId(),
         executionConfig?: ExecutionConfig,
         liveTradeConfig?: LiveTradeConfig,
-        executionContext?: DatedExecutionContext
+        market?: string
     ): Promise<StartTradingResponse> => {
         const formData = new FormData();
         formData.append('strategy_id', strategyId);
         formData.append('trading_mode', tradingMode);
+        if (market) formData.append('market', market);
         if (executionConfig) {
             formData.append('execution_config', JSON.stringify(executionConfig));
         }
         if (liveTradeConfig) {
             formData.append('live_trade_config', JSON.stringify(liveTradeConfig));
-        }
-
-        if (executionContext) {
-            formData.append('execution_context', JSON.stringify(executionContext));
         }
 
         return await requestRealTradingWithFallback<StartTradingResponse>({
@@ -631,7 +626,7 @@ export const realTradingService = {
     },
 
     // Get Status
-    getStatus: async (userId?: string, tradingMode?: string, tenantId: string = getTenantId(), market?: string, executionContext?: DatedExecutionContext): Promise<RealTradingStatus> => {
+    getStatus: async (userId?: string, tradingMode?: string, tenantId: string = getTenantId()): Promise<RealTradingStatus> => {
         const actualUserId = userId || (authService.getStoredUser() as any)?.user_id || (authService.getStoredUser() as any)?.sub || '';
         return await requestRealTradingWithFallback<RealTradingStatus>({
             method: 'get',
@@ -640,8 +635,6 @@ export const realTradingService = {
                 user_id: actualUserId,
                 tenant_id: tenantId,
                 trading_mode: tradingMode?.toUpperCase(),
-                ...(market ? { market } : {}),
-                ...(executionContext ? { execution_context: JSON.stringify(executionContext) } : {}),
             },
         });
     },
@@ -661,7 +654,7 @@ export const realTradingService = {
         strategy_id: string;
         trading_mode?: 'REAL' | 'SHADOW' | 'SIMULATION';
         note?: string;
-        execution_context?: DatedExecutionContext;
+        market?: string;
     }): Promise<ManualExecutionPreview> => {
         return await requestRealTradingWithFallback<ManualExecutionPreview>({
             method: 'post',
@@ -680,7 +673,7 @@ export const realTradingService = {
         trading_mode?: 'REAL' | 'SHADOW' | 'SIMULATION';
         preview_hash?: string;
         note?: string;
-        execution_context?: DatedExecutionContext;
+        market?: string;
     }): Promise<{ status: string; task_id: string; task?: ManualExecutionTaskRecord; preview_summary?: Record<string, unknown> }> => {
         return await requestRealTradingWithFallback<{
             status: string;
@@ -816,20 +809,6 @@ export const realTradingService = {
         return await realTradingService.getAccount(userId, tenantId).catch(() => null);
     },
 
-    getSimulationExecutionInputs: async (
-        market: string,
-        tradeDate?: string,
-        dataVersion?: string,
-    ): Promise<SimulationExecutionInputs | null> => {
-        const token = authService.getAccessToken();
-        const response = await axios.get(`${SERVICE_ENDPOINTS.API_GATEWAY}/simulation/execution-inputs`, {
-            params: { market, ...(tradeDate ? { trade_date: tradeDate } : {}), ...(dataVersion ? { data_version: dataVersion } : {}) },
-            headers: token ? new AxiosHeaders({ Authorization: `Bearer ${token}` }) : undefined,
-            timeout: 30000,
-        });
-        return response.data?.data || null;
-    },
-
     // Get Simulation Account Info
     getSimulationAccount: async (
         _userId: string,
@@ -870,13 +849,12 @@ export const realTradingService = {
         _userId: string,
         initialCash: number,
         _tenantId: string = getTenantId(),
-        market?: string,
-        executionContext?: DatedExecutionContext
+        market?: string
     ): Promise<AccountInfo | null> => {
         const token = authService.getAccessToken();
         const response = await axios.post(
             `${SERVICE_ENDPOINTS.API_GATEWAY}/simulation/reset`,
-            { initial_cash: initialCash, market, ...(executionContext ? { execution_context: executionContext } : {}) },
+            { initial_cash: initialCash, market },
             {
                 headers: token ? new AxiosHeaders({ Authorization: `Bearer ${token}` }) : undefined,
                 timeout: 30000,
@@ -910,10 +888,10 @@ export const realTradingService = {
     },
 
     // Get Simulation Fund Snapshots (from DB table simulation_fund_snapshots)
-    getSimulationDailySnapshots: async (days: number = 1, market?: string): Promise<SimulationFundSnapshot[]> => {
+    getSimulationDailySnapshots: async (days: number = 1): Promise<SimulationFundSnapshot[]> => {
         const token = authService.getAccessToken();
         const response = await axios.get(`${SERVICE_ENDPOINTS.API_GATEWAY}/simulation/snapshots/daily`, {
-            params: { days, ...(market ? {market} : {}) },
+            params: { days },
             headers: token ? new AxiosHeaders({ Authorization: `Bearer ${token}` }) : undefined,
             timeout: 30000,
         });
@@ -978,7 +956,6 @@ export const realTradingService = {
 
 
 export interface AccountInfo {
-    execution_context?: DatedExecutionContext;
     account_id?: string;
     snapshot_kind?: 'account_snapshot';
     timestamp?: string | number;

@@ -111,15 +111,15 @@ describe('market context in the existing backtest components', () => {
     await waitFor(() => expect(state.run).toHaveBeenCalledWith(expect.objectContaining({ market: 'JP', commission: 0.00035 })));
   });
 
-  it('preserves the stored closing-mode preference while applying JP execution capabilities', async () => {
+  it('uses the shared closing-mode preference for both JP and CN backtests', async () => {
     localStorage.setItem('backtest_tail_trade_mode', '1');
     const view = render(<QlibQuickBacktest />);
-    expect(screen.getByRole('button', { name: /尾盘交易 OFF/ })).toBeDisabled();
-    expect(screen.queryByRole('option', { name: '收盘价成交 (Close)' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /尾盘交易 ON/ })).toBeEnabled();
+    expect(screen.getByRole('option', { name: '收盘价成交 (Close)' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: '开盘价成交 (Open)' })).toBeInTheDocument();
     await waitFor(() => expect(state.users).toHaveBeenCalled());
     fireEvent.click(screen.getByRole('button', { name: /立即执行回测/ }));
-    await waitFor(() => expect(state.run).toHaveBeenCalledWith(expect.objectContaining({ market: 'JP', deal_price: 'open' })));
+    await waitFor(() => expect(state.run).toHaveBeenCalledWith(expect.objectContaining({ market: 'JP', deal_price: 'close' })));
     state.market = 'CN'; view.rerender(<QlibQuickBacktest />);
     expect(screen.getByRole('button', { name: /尾盘交易 ON/ })).toBeEnabled();
     expect(screen.getByRole('option', { name: '收盘价成交 (Close)' })).toBeInTheDocument();

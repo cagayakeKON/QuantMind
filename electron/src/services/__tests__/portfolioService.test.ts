@@ -96,17 +96,15 @@ describe('PortfolioService', () => {
             await expect(portfolioService.getFundOverview('7', 'real', 'default', 'JP')).rejects.toThrow('尚未接入实盘账户');
             expect(mocks.get).not.toHaveBeenCalled();
         });
-        it('does not borrow CNY settings for an uninitialized JP baseline', async () => {
+        it('keeps the original base-currency account and baseline settings on JP selection', async () => {
             mocks.get.mockResolvedValueOnce({ data: { success: true, data: {
-                total_asset: 0, cash: 0, initial_equity: 0, account_not_initialized: true, currency: 'JPY', positions: {},
+                total_asset: 0, cash: 0, initial_equity: 0, account_not_initialized: true, currency: 'CNY', positions: {},
             } } });
             const settings = vi.spyOn(realTradingService, 'getSimulationSettings').mockResolvedValue({ initial_cash: 2000000 } as any);
             const result = await portfolioService.getFundOverview('7', 'simulation', 'default', 'JP');
-            expect(result.data.currency).toBe('JPY');
-            expect(result.data.initialCapital).toBe(0);
-            expect(result.data.initialCapitalAvailable).toBe(false);
-            expect(result.data.totalReturnAvailable).toBe(false);
-            expect(settings).not.toHaveBeenCalled();
+            expect(result.data.currency).toBeUndefined();
+            expect(result.data.initialCapital).toBe(2000000);
+            expect(settings).toHaveBeenCalledOnce();
             expect(mocks.get.mock.calls.some(([url]) => String(url).includes('/settings'))).toBe(false);
             settings.mockRestore();
         });

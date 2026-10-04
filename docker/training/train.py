@@ -1066,6 +1066,7 @@ def main() -> int:
             label_cfg["label_formula"] = label_formula(
                 int(label_cfg.get("target_horizon_days") or 1),
                 str(label_cfg.get("target_mode") or "return"),
+                str(context_cfg.get("deal_price") or "open"),
             )
 
         df, valid_features = load_data(
@@ -1089,6 +1090,7 @@ def main() -> int:
             # 中心 pin 的数据覆盖：训练窗口钳制的权威基准（远端数据独立初始化时
             # 靠它对齐时间切分，见 data/loading.py）
             factor_coverage=(cfg.get("data", {}) or {}).get("factor_coverage") or None,
+            **({"deal_price": context_cfg.get("deal_price") or "open"} if market == "JP" else {}),
         )
 
         # 实际读到的数据覆盖：与 config 里 pin 的 coverage 对照，可事后核对

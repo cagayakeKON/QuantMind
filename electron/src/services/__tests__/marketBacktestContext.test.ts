@@ -43,7 +43,7 @@ describe('common backtest market context', () => {
       symbol: '7203, 216A0.T, JP83060', benchmark_symbol: 'TOPIX', model_id: 'jp-model',
       deal_price: 'open', signal_lag_days: 1, strategy_total_position: 0.8 });
     expect(calls.post).toHaveBeenCalledWith('/backtest', expect.objectContaining({
-      market: 'JP', commission: 0, benchmark: 'TOPIX', universe: 'list:JP72030,JP216A0,JP83060',
+      market: 'JP', commission: 0, min_commission: 0, benchmark: 'TOPIX', universe: 'list:JP72030,JP216A0,JP83060',
       model_id: 'jp-model', deal_price: 'open', signal_lag_days: 1, strategy_total_position: 0.8,
       user_id: 'alice', tenant_id: 'tenant-a',
     }), { params: { async_mode: true } });
@@ -64,6 +64,15 @@ describe('common backtest market context', () => {
     expect(calls.post.mock.calls[0][1].deal_price).toBe('close');
   });
 
+  it('preserves explicitly overridden JP commission, minimum, and buy/sell costs', async () => {
+    await new BacktestService().runBacktest({ ...base, market: 'JP', commission: 0.0008,
+      min_commission: 7, buy_cost: 0.0009, sell_cost: 0.001,
+    });
+    expect(calls.post.mock.calls[0][1]).toMatchObject({ commission: 0.0008,
+      min_commission: 7, buy_cost: 0.0009, sell_cost: 0.001,
+    });
+  });
+
   it('uses TOPIX for a JP public request without an explicit benchmark', async () => {
     await new BacktestService().runBacktest({ ...base, market: 'JP' });
     expect(calls.post.mock.calls[0][1].benchmark).toBe('TOPIX');
@@ -74,6 +83,7 @@ describe('common backtest market context', () => {
     await new BacktestService().runBacktest({ ...base, market, strategy_id: 'legacy-strategy' });
     expect(calls.post.mock.calls[0][1].deal_price).toBe('close');
     expect(calls.post.mock.calls[0][1].benchmark).toBe('SH000300');
+    expect(calls.post.mock.calls[0][1]).not.toHaveProperty('min_commission');
     expect(calls.post.mock.calls[0][1]).not.toHaveProperty('strategy_id');
   });
 

@@ -176,14 +176,10 @@ class ContextRequest(BaseModel):
             raise HTTPException(
                 status_code=422, detail="context.deal_price must be one of: open, close"
             )
-        if market == "JP" and deal_price != "open":
-            raise HTTPException(
-                status_code=422, detail="JP training uses next-session open execution"
-            )
         if market == "JP" and self.industry_as_feature:
             raise HTTPException(
                 status_code=422,
-                detail="JP industry features require dated disclosure data and are not yet supported",
+                detail="JP published training features do not contain ind_code_l1",
             )
 
         return {

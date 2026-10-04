@@ -1,5 +1,3 @@
-import { getMarketConfig } from '../config/marketConfig';
-import type { AppMarket } from '../store/slices/uiSlice';
 /**
  * 投资组合服务
  *
@@ -340,7 +338,7 @@ class PortfolioService {
         userId: string,
         mode: 'real' | 'simulation' = 'simulation',
         tenantId = 'default',
-        market = 'CN',
+        market?: string,
     ): Promise<{ data: FundData; isSimulated: boolean }> {
         if (market === 'JP' && mode === 'real') {
             throw new Error('日本市场尚未接入实盘账户，请使用模拟交易。');
@@ -365,7 +363,7 @@ class PortfolioService {
                     account = await realTradingService.getSimulationAccount(
                         userId,
                         tenantId,
-                        getMarketConfig(market as AppMarket).simulationExecution === 'dated_daily' ? market : undefined,
+                        undefined,
                         { timeoutMs: 8_000 },
                     );
                     useSimulation = true;
@@ -374,7 +372,7 @@ class PortfolioService {
                 account = await realTradingService.getSimulationAccount(
                     userId,
                     tenantId,
-                    getMarketConfig(market as AppMarket).simulationExecution === 'dated_daily' ? market : undefined,
+                    undefined,
                     { timeoutMs: 8_000 },
                 );
                 useSimulation = true;
@@ -424,7 +422,7 @@ class PortfolioService {
 
             // /simulation/account 已写入 initial_equity（来自 settings）；
             // 仅在缺失时再打 settings，避免资金概览多一次串行 RTT。
-            if (useSimulation && market !== 'JP' && initialCapital <= 0) {
+            if (useSimulation && initialCapital <= 0) {
                 try {
                     const settings = await realTradingService.getSimulationSettings();
                     const configuredInitialCash = this.pickFirstNumber(
@@ -440,7 +438,7 @@ class PortfolioService {
             }
             if (initialCapital <= 0) {
                 if (useSimulation) {
-                    initialCapital = getMarketConfig(market as AppMarket).simulationExecution === 'dated_daily' ? 0 : DEFAULT_INITIAL_CAPITAL;
+                    initialCapital = DEFAULT_INITIAL_CAPITAL;
                 } else {
                     // 实盘未知初始权益时，不再用当前总资产硬回退，避免总收益率长期假 0。
                     initialCapital = totalAsset;
@@ -507,7 +505,7 @@ class PortfolioService {
             const accountOnline = useSimulation
                 ? undefined
                 : Boolean(account.is_online === true);
-            const initialCapitalAvailable = useSimulation ? (market !== 'JP' || initialCapital > 0) : (
+            const initialCapitalAvailable = useSimulation || (
                 this.pickFirstNumber([account.initial_equity], 0) > 0 ||
                 (totalAsset > 0 && Number.isFinite(totalPnL))
             );
@@ -539,8 +537,6 @@ class PortfolioService {
 
             return {
                 data: {
-                    ...(useSimulation && getMarketConfig(market as AppMarket).simulationExecution === 'dated_daily'
-                        ? {currency: account.currency || getMarketConfig(market as AppMarket).currency, accountName: getMarketConfig(market as AppMarket).label} : {}),
                     totalAsset,
                     availableBalance,
                     frozenBalance,

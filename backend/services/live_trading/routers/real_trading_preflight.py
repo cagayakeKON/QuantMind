@@ -29,20 +29,6 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _dated_readiness_kwargs(raw, *, mode, market):
-    if raw is None:
-        return {}
-    from backend.services.live_trading.services.hosted_readiness_inputs import (
-        parse_hosted_readiness_inputs,
-    )
-
-    try:
-        inputs = parse_hosted_readiness_inputs(raw, mode=mode, market=market)
-    except (ValueError, TypeError) as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    return {"execution_context": inputs}
-
-
 def _parse_snapshot_timestamp(raw: Any) -> float | None:
     if isinstance(raw, datetime):
         if raw.tzinfo is None:
@@ -84,7 +70,6 @@ async def preflight_check(
     redis: RedisClient = Depends(get_redis),
     db: AsyncSession = Depends(get_db),
     market: str = "CN",
-    execution_context: Optional[str] = None,
 ):
     """
     启动前自检：
@@ -98,10 +83,8 @@ async def preflight_check(
     mode = str(trading_mode or "REAL").strip().upper()
     if mode not in {"REAL", "SHADOW", "SIMULATION"}:
         raise HTTPException(status_code=400, detail=f"unsupported trading_mode: {mode}")
-
-    dated_kwargs = _dated_readiness_kwargs(
-        execution_context, mode=mode, market=market
-    )
+    if str(market or "CN").upper() == "JP" and mode != "SIMULATION":
+        raise HTTPException(status_code=400, detail="JP supports simulation only")
 
     # 模拟盘：与 trading-precheck 共用精简 5 项，避免两阶段重复噪音。
     if mode == "SIMULATION":
@@ -111,8 +94,7 @@ async def preflight_check(
             redis_client=redis.client,
             user_id=resolved_user_id,
             tenant_id=resolved_tenant_id,
-            market=market if dated_kwargs else "CN",
-            **dated_kwargs,
+            market=market,
         )
         checks = [
             {
@@ -607,11 +589,12 @@ async def trading_precheck(
     auth: AuthContext = Depends(get_auth_context),
     redis: RedisClient = Depends(get_redis),
     db: AsyncSession = Depends(get_db),
-    execution_context: Optional[str] = None,
 ):
     mode = str(trading_mode or "REAL").strip().upper()
     if mode not in {"REAL", "SHADOW", "SIMULATION"}:
         raise HTTPException(status_code=400, detail=f"unsupported trading_mode: {mode}")
+    if str(market or "CN").upper() == "JP" and mode != "SIMULATION":
+        raise HTTPException(status_code=400, detail="JP supports simulation only")
     resolved_user_id, resolved_tenant_id = _normalize_identity(auth)
     return await run_trading_readiness_precheck(
         db,
@@ -620,7 +603,6 @@ async def trading_precheck(
         user_id=resolved_user_id,
         tenant_id=resolved_tenant_id,
         market=str(market or "CN").upper(),
-        **_dated_readiness_kwargs(execution_context, mode=mode, market=market),
     )
 
 

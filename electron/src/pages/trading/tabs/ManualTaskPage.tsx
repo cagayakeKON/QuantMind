@@ -31,15 +31,11 @@ import type {
     ManualExecutionTaskRecord,
 } from '../../../services/realTradingService';
 import type { StrategyFile } from '../../../types/backtest/strategy';
-import type { DatedExecutionContext } from '../../../types/liveTrading';
 
 interface ManualTaskPageProps {
     tenantId: string;
     userId: string;
     tradingMode?: 'real' | 'simulation';
-    executionContext?: DatedExecutionContext;
-    executionCurrency?: string;
-    requiresExecutionInputs?: boolean;
     onBack?: () => void;
 }
 
@@ -122,7 +118,7 @@ const modelDisplayName = (model: any) => {
     return (meta.display_name || meta.model_name || model.model_id) as string;
 };
 
-const renderOrderCard = (order: ManualExecutionPreviewOrder, tone: 'buy' | 'sell', formatMoney = renderMoney) => (
+const renderOrderCard = (order: ManualExecutionPreviewOrder, tone: 'buy' | 'sell') => (
     <div
         key={`${order.side}-${order.symbol}-${order.quantity}`}
         className={`group relative overflow-hidden rounded-xl border transition-all duration-300 hover:shadow-md ${
@@ -160,26 +156,26 @@ const renderOrderCard = (order: ManualExecutionPreviewOrder, tone: 'buy' | 'sell
                 <div className="flex flex-col">
                     <span className="text-gray-400 font-bold uppercase tracking-tighter">目标价</span>
                     <span className="font-mono text-blue-600 font-bold">
-                        {order.price === 0 ? <span className="text-gray-400 font-medium">未获取</span> : formatMoney(order.price)}
+                        {order.price === 0 ? <span className="text-gray-400 font-medium">未获取</span> : renderMoney(order.price)}
                     </span>
                 </div>
                 <div className="flex flex-col">
                     <span className="text-gray-400 font-bold uppercase tracking-tighter">预估金额</span>
                     <span className="font-mono text-gray-900 font-bold">
-                        {order.price === 0 ? <span className="text-gray-300">--</span> : formatMoney(order.estimated_notional)}
+                        {order.price === 0 ? <span className="text-gray-300">--</span> : renderMoney(order.estimated_notional)}
                     </span>
                 </div>
             </div>
 
             <div className="mt-2.5 flex items-center justify-between bg-gray-50/50 rounded-lg p-2 text-[9px] font-medium">
                 <span className="text-gray-400">持仓: <span className="text-gray-700">{order.current_volume ?? 0}</span></span>
-                <span className="text-gray-400">Ref: {order.reference_price === 0 ? '未获取' : formatMoney(order.reference_price)}</span>
+                <span className="text-gray-400">Ref: {order.reference_price === 0 ? '未获取' : renderMoney(order.reference_price)}</span>
             </div>
         </div>
     </div>
 );
 
-const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, executionContext, executionCurrency, requiresExecutionInputs = false }) => {
+const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack }) => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     const [currentStep, setCurrentStep] = useState(0);
 
@@ -215,19 +211,6 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, ex
     const viewportRef = useRef<HTMLDivElement | null>(null);
 
     const isRealMode = tradingMode !== 'simulation';
-    const executionScope = requiresExecutionInputs || executionContext
-        ? JSON.stringify([currentMarket, tradingMode, executionContext]) : '';
-    const mountedRef = useRef(true);
-    const scopeRef = useRef(executionScope);
-    scopeRef.current = executionScope;
-    const previousScopeRef = useRef(executionScope);
-    const previewContextRef = useRef<{ scope: string; context: DatedExecutionContext }>();
-    const datedReady = !executionScope || (!isRealMode && executionContext?.market === currentMarket);
-    const formatMoney = executionContext && executionCurrency ? (value?: number) => (
-        Number.isFinite(value)
-            ? `${executionCurrency} ${Number(value).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-            : '--'
-    ) : renderMoney;
     const effectiveModelId = useMemo(() => manualModelId.trim() || defaultModel?.model_id || '', [defaultModel, manualModelId]);
 
     const [modelSearch, setModelSearch] = useState('');
@@ -449,16 +432,11 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, ex
     };
 
     const generatePreview = useCallback(async () => {
-        if (!datedReady) {
-            message.warning('请先选择有效的模拟执行输入');
-            return;
-        }
         if (!effectiveModelId || !selectedRunId || !selectedStrategyId) {
             message.warning('请先完成模型、推理批次和策略选择');
             return;
         }
         setPreviewLoading(true);
-        const context = executionContext ? structuredClone(executionContext) : undefined;
         try {
             const realTradingService = await loadRealTradingService();
             const result = await realTradingService.previewManualExecution({
@@ -468,46 +446,36 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, ex
                 // 手动任务同时支持实盘与模拟盘，预览与提交口径保持一致，
                 // 不再依赖后端默认值（默认 SIMULATION）。
                 trading_mode: isRealMode ? 'REAL' : 'SIMULATION',
+                ...(currentMarket === 'JP' ? {market: 'JP'} : {}),
                 note: note.trim() || undefined,
-                ...(context ? { execution_context: context } : {}),
             });
-            if (executionScope !== scopeRef.current || (executionScope && !mountedRef.current)) return;
-            previewContextRef.current = context ? { scope: executionScope, context } : undefined;
             setPreview(result);
             message.success('调仓预案已生成');
         } catch (error: any) {
-            if (executionScope !== scopeRef.current || (executionScope && !mountedRef.current)) return;
             const msg = error?.response?.data?.detail || error?.message || '生成调仓预案失败';
             message.error(String(msg));
             setPreview(null);
         } finally {
             setPreviewLoading(false);
         }
-    }, [effectiveModelId, isRealMode, note, selectedRunId, selectedStrategyId, executionScope, datedReady]);
+    }, [effectiveModelId, isRealMode, note, selectedRunId, selectedStrategyId, currentMarket]);
 
     const submitExecution = useCallback(async () => {
-        if ((executionScope && (!datedReady || previewContextRef.current?.scope !== executionScope))
-            || (previewContextRef.current && previewContextRef.current.scope !== executionScope)) {
-            message.warning('模拟执行输入已变化，请重新生成调仓预案');
-            return;
-        }
         if (!preview || !effectiveModelId || !selectedRunId || !selectedStrategyId) {
             message.warning('请先生成调仓预案');
             return;
         }
         setSubmitting(true);
-        const context = executionScope ? structuredClone(previewContextRef.current!.context) : undefined;
         try {
             const realTradingService = await loadRealTradingService();
-            if (executionScope !== scopeRef.current || (executionScope && !mountedRef.current)) return;
             const result = await realTradingService.createManualExecution({
                 model_id: effectiveModelId,
                 run_id: selectedRunId,
                 strategy_id: selectedStrategyId,
                 trading_mode: isRealMode ? 'REAL' : 'SIMULATION',
+                ...(currentMarket === 'JP' ? {market: 'JP'} : {}),
                 preview_hash: preview.preview_hash,
                 note: note.trim() || undefined,
-                ...(context ? { execution_context: context } : {}),
             });
             const taskId = String(result.task_id || '');
             if (taskId) {
@@ -522,31 +490,13 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, ex
         } finally {
             setSubmitting(false);
         }
-    }, [effectiveModelId, loadTaskLogs, note, preview, refreshTask, selectedRunId, selectedStrategyId, executionScope, datedReady]);
-
-    useEffect(() => {
-        if (executionScope !== previousScopeRef.current && (executionScope || previousScopeRef.current)) {
-            setPreview(null);
-            previewContextRef.current = undefined;
-            if (currentStep > 3 && !selectedTaskId) setCurrentStep(3);
-        }
-        previousScopeRef.current = executionScope;
-    }, [executionScope, currentStep, selectedTaskId]);
-
-    useEffect(() => {
-        mountedRef.current = true;
-        return () => { mountedRef.current = false; };
-    }, []);
+    }, [effectiveModelId, loadTaskLogs, note, preview, refreshTask, selectedRunId, selectedStrategyId, currentMarket]);
 
     const previewSummary = preview?.summary;
     const previewTaskSummary = (selectedTask?.result_json as Record<string, unknown> | undefined)?.preview_summary as Record<string, unknown> | undefined;
 
     return (
         <div className="h-full overflow-y-auto bg-gray-50 p-4 custom-scrollbar">
-            {executionScope && <div aria-label="手动任务执行输入" className="mb-3 text-xs text-slate-600">
-                {datedReady ? `${currentMarket} · ${executionContext!.trade_date} · ${executionCurrency || ''} · ${executionContext!.data_version}`
-                    : '请先选择有效的模拟执行输入'}
-            </div>}
             <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-3">
                     <div className="p-2 rounded-xl bg-blue-50 text-blue-600">
@@ -1251,7 +1201,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, ex
                                         <button
                                             type="button"
                                             onClick={() => void generatePreview()}
-                                            disabled={previewLoading || !datedReady}
+                                            disabled={previewLoading}
                                             className="px-6 py-3 rounded-xl bg-blue-600 text-white text-xs font-bold hover:bg-blue-700 disabled:opacity-50 shadow-md shadow-blue-100 transition-all flex items-center gap-2"
                                         >
                                             {previewLoading ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} fill="currentColor" />}
@@ -1271,11 +1221,11 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, ex
                                                 <div className="grid grid-cols-2 gap-4">
                                                     <div>
                                                         <div className="text-[9px] text-gray-400 font-bold mb-0.5 uppercase">现金</div>
-                                                        <div className="font-mono text-sm font-bold text-gray-900">{formatMoney(preview.account_snapshot.available_cash)}</div>
+                                                        <div className="font-mono text-sm font-bold text-gray-900">{renderMoney(preview.account_snapshot.available_cash)}</div>
                                                     </div>
                                                     <div>
                                                         <div className="text-[9px] text-gray-400 font-bold mb-0.5 uppercase">市值</div>
-                                                        <div className="font-mono text-sm font-bold text-gray-900">{formatMoney(preview.account_snapshot.market_value)}</div>
+                                                        <div className="font-mono text-sm font-bold text-gray-900">{renderMoney(preview.account_snapshot.market_value)}</div>
                                                     </div>
                                                 </div>
                                             </div>
@@ -1304,7 +1254,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, ex
                                                     卖出列表 ({preview.sell_orders.length})
                                                 </h4>
                                                 <div className="space-y-2.5 max-h-[400px] overflow-y-auto pr-1 custom-scrollbar">
-                                                    {preview.sell_orders.length > 0 ? preview.sell_orders.map((order) => renderOrderCard(order, 'sell', formatMoney)) : (
+                                                    {preview.sell_orders.length > 0 ? preview.sell_orders.map((order) => renderOrderCard(order, 'sell')) : (
                                                         <div className="py-10 border border-dashed border-gray-100 rounded-xl text-center text-[10px] font-bold text-gray-300 uppercase tracking-widest">Empty</div>
                                                     )}
                                                 </div>
@@ -1316,7 +1266,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, ex
                                                     买入列表 ({preview.buy_orders.length})
                                                 </h4>
                                                 <div className="space-y-2.5 max-h-[400px] overflow-y-auto pr-1 custom-scrollbar">
-                                                    {preview.buy_orders.length > 0 ? preview.buy_orders.map((order) => renderOrderCard(order, 'buy', formatMoney)) : (
+                                                    {preview.buy_orders.length > 0 ? preview.buy_orders.map((order) => renderOrderCard(order, 'buy')) : (
                                                         <div className="py-10 border border-dashed border-gray-100 rounded-xl text-center text-[10px] font-bold text-gray-300 uppercase tracking-widest">Empty</div>
                                                     )}
                                                 </div>
@@ -1373,16 +1323,16 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, ex
                                             <div className="p-4 rounded-xl bg-blue-50/50 border border-blue-100 space-y-3.5">
                                                 <div className="flex items-center justify-between text-[11px]">
                                                     <span className="text-blue-600/70 uppercase">卖出总额</span>
-                                                    <span className="font-mono text-gray-900">{formatMoney(previewSummary?.estimated_sell_proceeds)}</span>
+                                                    <span className="font-mono text-gray-900">{renderMoney(previewSummary?.estimated_sell_proceeds)}</span>
                                                 </div>
                                                 <div className="flex items-center justify-between text-[11px]">
                                                     <span className="text-blue-600/70 uppercase">买入总额</span>
-                                                    <span className="font-mono text-gray-900">{formatMoney(previewSummary?.estimated_buy_amount)}</span>
+                                                    <span className="font-mono text-gray-900">{renderMoney(previewSummary?.estimated_buy_amount)}</span>
                                                 </div>
                                                 <div className="h-px bg-blue-100" />
                                                 <div className="flex items-center justify-between text-[11px]">
                                                     <span className="text-blue-600 uppercase tracking-tighter">预估剩余</span>
-                                                    <span className="font-mono text-blue-700">{formatMoney(previewSummary?.estimated_remaining_cash)}</span>
+                                                    <span className="font-mono text-blue-700">{renderMoney(previewSummary?.estimated_remaining_cash)}</span>
                                                 </div>
                                             </div>
 
@@ -1404,7 +1354,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, ex
                                                 onClick={() => {
                                                     if (!preview) void generatePreview();
                                                 }}
-                                                disabled={previewLoading || !!preview || !datedReady}
+                                                disabled={previewLoading || !!preview}
                                                 className={`w-full py-3.5 rounded-2xl text-[13px] font-black transition-all active:scale-[0.95] flex items-center justify-center gap-2 ${preview
                                                         ? 'bg-emerald-50 text-emerald-600 border border-emerald-100 cursor-default'
                                                         : 'bg-blue-600 text-white hover:bg-blue-700 shadow-xl shadow-blue-200/50'
@@ -1548,7 +1498,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, ex
                                             </div>
                                             <div className="flex items-center justify-between text-[11px]">
                                                 <span className="text-gray-400">预估买入</span>
-                                                <span className="text-gray-900">{formatMoney(previewSummary?.estimated_buy_amount)}</span>
+                                                <span className="text-gray-900">{renderMoney(previewSummary?.estimated_buy_amount)}</span>
                                             </div>
                                             <div className="flex items-center justify-between text-[11px]">
                                                 <span className="text-gray-400">风险拦截</span>
@@ -1562,7 +1512,7 @@ const ManualTaskPage: React.FC<ManualTaskPageProps> = ({ tradingMode, onBack, ex
                                             <button
                                                 type="button"
                                                 onClick={() => void submitExecution()}
-                                                disabled={submitting || !preview || !datedReady}
+                                                disabled={submitting || !preview}
                                                 className="w-full py-3.5 rounded-xl bg-red-600 text-white text-xs font-bold hover:bg-red-700 shadow-md shadow-red-100 transition-all active:scale-[0.98] flex items-center justify-center gap-2"
                                             >
                                                 {submitting ? (

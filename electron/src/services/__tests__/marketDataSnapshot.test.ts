@@ -16,6 +16,49 @@ function reply(overrides = {}) {
 
 describe('dated stock details through the original market data service', () => {
   beforeEach(() => {vi.restoreAllMocks(); vi.clearAllMocks(); mocks.market = 'CN';});
+  it('reads mixed shared holdings by symbol without applying the JP page to CN codes', async () => {
+    mocks.market = 'JP';
+    mocks.get.mockResolvedValue({data: {data: {name: '原市场名称'}}});
+    expect((await marketDataService.getStockDetail('SH600036')).success).toBe(true);
+    expect(mocks.get).toHaveBeenLastCalledWith('/api/v1/stocks/SH600036', {params: {market: 'CN'}});
+    expect((await marketDataService.getStockDetail('600036.SH')).success).toBe(true);
+    expect(mocks.get).toHaveBeenLastCalledWith('/api/v1/stocks/600036.SH', {params: {market: 'CN'}});
+    await marketDataService.getStockDetail('JP72030');
+    expect(mocks.get).toHaveBeenLastCalledWith('/api/v1/stocks/JP72030', {params: {market: 'JP'}});
+    mocks.market = 'CN';
+    await marketDataService.getStockDetail('7203.T');
+    expect(mocks.get).toHaveBeenLastCalledWith('/api/v1/stocks/JP72030', {params: {market: 'JP'}});
+  });
+  it.each(['JPM', 'JPX', 'JPST'])('keeps the US ticker %s on the original query path', async symbol => {
+    mocks.market = 'JP';
+    mocks.get.mockResolvedValue({data: {data: {name: 'US company'}}});
+    expect((await marketDataService.getStockDetail(symbol)).success).toBe(true);
+    expect(mocks.get).toHaveBeenLastCalledWith(`/api/v1/stocks/${symbol}`, {params: {market: 'US'}});
+    mocks.market = 'US';
+    await marketDataService.getStockDetail(symbol);
+    expect(mocks.get).toHaveBeenLastCalledWith(`/api/v1/stocks/${symbol}`, {params: {market: 'US'}});
+  });
+  it('keeps the CN holding name fallback on its original market while the page is JP', async () => {
+    mocks.market = 'JP';
+    mocks.get.mockResolvedValue({data: {data: {}}});
+    const search = vi.spyOn(marketDataService, 'searchStocks').mockResolvedValue({success: true, data: [{symbol: 'SH600036', code: 'SH600036', name: 'CN company'}], total: 1});
+    expect((await marketDataService.getStockDetail('SH600036')).data?.name).toBe('CN company');
+    expect(search).toHaveBeenCalledWith('SH600036', 10, 'CN');
+  });
+  it.each(['0700', '00700', '00700.HK'])('keeps shared HK holding %s in HK on a JP page', async symbol => {
+    mocks.market = 'JP';
+    mocks.get.mockResolvedValue({data: {data: {name: 'HK company'}}});
+    await marketDataService.getStockDetail(symbol);
+    expect(mocks.get).toHaveBeenLastCalledWith(`/api/v1/stocks/${symbol}`, {params: {market: 'HK'}});
+  });
+  it.each(['SH600036', 'JPM', '00700'])('keeps error fallback for %s in the resolved holding market', async symbol => {
+    mocks.market = 'JP';
+    mocks.get.mockRejectedValue(new Error('controlled detail failure'));
+    const market = symbol === 'SH600036' ? 'CN' : symbol === 'JPM' ? 'US' : 'HK';
+    const search = vi.spyOn(marketDataService, 'searchStocks').mockResolvedValue({success: true, data: [{symbol, code: symbol, name: 'original name'}], total: 1});
+    expect((await marketDataService.getStockDetail(symbol)).data?.name).toBe('original name');
+    expect(search).toHaveBeenCalledWith(symbol, 10, market);
+  });
   it('normalizes against explicit context instead of mutable current market and verifies provenance', async () => {
     mocks.get.mockResolvedValue(reply());
     const result = await marketDataService.getStockDetail('7203.T', context);

@@ -1,7 +1,6 @@
 """Behavioral regressions for the second independent JP integration review."""
 
 from datetime import date
-from decimal import Decimal
 from types import SimpleNamespace
 import sys
 from pathlib import Path
@@ -12,9 +11,7 @@ from backend.tests.test_jp_review_regressions import (
     native as native_fixture,
     snapshot as source_fixture,
 )
-from backend.tests.test_jp_common_matching import match_context
 from backend.services.simulation.services.ashare_matcher import MatchConfig, match_order
-from backend.services.simulation.jp.matching_rules import JapanDailyMatchRules
 
 snapshot = source_fixture
 native = native_fixture
@@ -44,35 +41,37 @@ def lab_native(snapshot, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "side,opened,high,low", [("buy", 1290, 1300, 1250), ("sell", 1010, 1050, 1000)]
+    "side,base_price,expected", [("buy", 279, 280), ("sell", 121, 120)]
 )
-def test_post_slippage_price_cannot_cross_observed_range(side, opened, high, low):
-    from dataclasses import replace
+def test_standard_slippage_price_is_clamped_to_daily_limit(side, base_price, expected):
+    from backend.services.simulation.services.local_market_data import DailyBar
 
-    bar, raw, metadata = match_context(open=opened, high=high, low=low)
-    bar = replace(bar, high=high, low=low)
-    with pytest.raises(ValueError, match="observed daily range"):
-        match_order(
-            side,
-            100,
-            bar,
-            MatchConfig(price_mode="open", slippage_bps=100),
-            available_volume=100,
-            rules=JapanDailyMatchRules(metadata, raw),
-        )
-
-
-def test_tick_rounded_execution_cannot_cross_daily_limit():
-    bar, raw, metadata = match_context(open=1290, high=1400, low=900)
-    metadata["limit_base_price"] = 1000
-    with pytest.raises(ValueError, match="daily price limits"):
-        match_order(
-            "buy",
-            100,
-            bar,
-            MatchConfig(price_mode="open", slippage_bps=100),
-            rules=JapanDailyMatchRules(metadata, raw),
-        )
+    bar = DailyBar(
+        symbol="JP72030",
+        trade_date=date(2026, 9, 29),
+        open=base_price,
+        high=280,
+        low=120,
+        close=200,
+        volume=10000,
+        amount=2000000,
+        vwap=200,
+        pre_close=200,
+        is_st=False,
+        suspended=False,
+        limit_up=280,
+        limit_down=120,
+        lot_size=100,
+        price_tick=1,
+    )
+    fill = match_order(
+        side,
+        100,
+        bar,
+        MatchConfig(price_mode="open", slippage_bps=100),
+        available_volume=100,
+    )
+    assert fill.success and fill.fill_price == expected
 
 
 def test_explicit_kline_range_keeps_all_240_rows(monkeypatch):
@@ -129,7 +128,7 @@ def test_public_parameter_market_rule_accepts_jp_without_accepting_unknown():
     assert rule.validate("JP") and rule.validate("US") and not rule.validate("UNKNOWN")
 
 
-def test_sdk_worker_uses_published_jp_and_next_open_cash_execution(lab_native):
+def test_sdk_worker_uses_standard_qlib_and_simple_broker_close_execution(lab_native):
     from backend.services.engine.strategy_lab.runner.worker import _resolve_provider
     from backend.services.engine.strategy_lab.engine.loop import run_backtest
     from backend.services.engine.strategy_lab.sdk.context import Context
@@ -159,9 +158,13 @@ def test_sdk_worker_uses_published_jp_and_next_open_cash_execution(lab_native):
     )
     assert result.status == "success" and len(result.trades) == 1
     trade = result.trades[0]
-    raw = provider.reader.get_bar("JP72030", date(2026, 9, 29))
-    assert trade.date == "2026-09-29" and trade.price == raw.open and trade.qty == 200
-    assert trade.detail["currency"] == "JPY" and trade.detail["fee"] == "0"
+    adjusted = provider.current_bar("JP72030", pd.Timestamp("2026-09-28"))
+    assert trade.date == "2026-09-28" and trade.price == adjusted.close.iloc[-1]
+    assert trade.qty == 100
+    assert (
+        result.config["currency"] == "JPY"
+        and result.config["execution_model"] == "simple"
+    )
     assert len(result.equity) == 3
 
 

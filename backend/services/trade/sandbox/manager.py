@@ -124,16 +124,8 @@ class SandboxPlatformManager:
         code_str: str,
         exec_config: dict,
         live_trade_config: dict | None = None,
-        *, execution_context: dict | None = None,
     ) -> str:
         """分发策略到其中一个空闲的 Worker，返回 run_id"""
-        if execution_context is not None:
-            from backend.services.trade.sandbox.registered_account_reader import validate_sandbox_execution_inputs
-
-            execution_context = validate_sandbox_execution_inputs(
-                execution_context, mode="SIMULATION", execution_config=exec_config,
-                live_trade_config=live_trade_config,
-            ).model_dump(mode="json")
         self._ensure_pool_capacity()
         if not self._workers:
             raise RuntimeError("Sandbox Worker Pool is empty.")
@@ -162,8 +154,6 @@ class SandboxPlatformManager:
             "exec_config": exec_config,
             "live_trade_config": live_trade_config or {},
         }
-        if execution_context is not None:
-            task["execution_context"] = execution_context
 
         self._task_queues[assigned_pid].put(task)
         self._active_runs[key] = assigned_pid

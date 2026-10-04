@@ -2,7 +2,6 @@ from fastapi import APIRouter
 import json
 import logging
 import os
-from typing import Annotated
 from .real_trading_utils import *
 from .real_trading_utils import (
     _active_strategy_key,
@@ -23,27 +22,18 @@ from backend.services.live_trading.services.manual_execution_service import (
 from backend.services.simulation.services.simulation_hosted_scheduler import (
     run_simulation_cycle_for_active,
 )
-from backend.services.live_trading.services.hosted_lifecycle_inputs import (
-    lifecycle_status_cache,
-    parse_lifecycle_inputs,
-)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
 async def _build_signal_source_status(
-    _redis_client, tenant_id: str, user_id: str, *, market=None, execution_context=None
+    _redis_client, tenant_id: str, user_id: str
 ) -> tuple[str | None, dict]:
     try:
         hosted_status = await manual_execution_service.get_default_model_hosted_status(
             tenant_id=tenant_id,
             user_id=user_id,
-            **({"market": market} if market is not None else {}),
-            **(
-                {"trade_date": execution_context.trade_date}
-                if execution_context is not None else {}
-            ),
         )
     except Exception as exc:
         return None, {
@@ -176,7 +166,7 @@ async def start_trading(
     auth: AuthContext = Depends(get_auth_context),
     redis: RedisClient = Depends(get_redis),
     db: AsyncSession = Depends(get_db),
-    execution_context: Annotated[Optional[str], Form()] = None,
+    market: Optional[str] = Form(None),
 ):
     resolved_user_id, resolved_tenant_id = _normalize_identity(
         auth, user_id=user_id, tenant_id=tenant_id
@@ -190,14 +180,6 @@ async def start_trading(
                 status_code=400,
                 detail=f"不支持的交易模式: {mode}。支持 SIMULATION(模拟盘) / REAL(通达信实盘)",
             )
-        dated_inputs = None
-        dated_kwargs = {}
-        if execution_context is not None:
-            dated_inputs = parse_lifecycle_inputs(
-                execution_context, mode=mode,
-                execution_config=None, live_trade_config=None,
-            )
-            dated_kwargs = {"execution_context": dated_inputs.model_dump(mode="json")}
         # REAL 模式需确认通达信实盘桥已启用
         if mode == "REAL":
             enable_real = (
@@ -229,9 +211,12 @@ async def start_trading(
         elif strategy_file:
             strategy_name = strategy_file.filename or strategy_name
 
+        if str(market or "").upper() == "JP":
+            exec_config = {**exec_config, "market": "JP"}
+            live_config = {**live_config, "market": "JP"}
         exec_config = _normalize_execution_config({}, exec_config)
         ExecutionConfigSchema.model_validate(exec_config)
-        live_config = _normalize_live_trade_config({}, live_config, **dated_kwargs)
+        live_config = _normalize_live_trade_config({}, live_config)
 
         # 前端可覆盖风控参数（以本次启动快照为准）
         if execution_config:
@@ -258,33 +243,15 @@ async def start_trading(
                 raise HTTPException(
                     status_code=400, detail="live_trade_config 必须是对象"
                 )
-            live_config = _normalize_live_trade_config(
-                user_live_cfg, live_config, **dated_kwargs
-            )
-
-        if dated_inputs is not None:
-            parse_lifecycle_inputs(
-                dated_inputs, mode=mode,
-                execution_config=exec_config, live_trade_config=live_config,
-            )
-            exec_config = {**exec_config, "market": dated_inputs.market}
-            live_config = {**live_config, "market": dated_inputs.market}
-        else:
-            from backend.services.trade.sandbox.registered_account_reader import (
-                registered_sandbox_market,
-            )
-
-            if registered_sandbox_market(exec_config, live_config) is not None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Registered market start requires dated execution_context",
-                )
+            live_config = _normalize_live_trade_config(user_live_cfg, live_config)
 
         deployment_market = str(
             (live_config or {}).get("market")
             or (exec_config or {}).get("market")
             or "CN"
         ).upper()
+        if deployment_market == "JP" and mode != "SIMULATION":
+            raise HTTPException(status_code=400, detail="JP supports simulation only")
         readiness = await run_trading_readiness_precheck(
             db,
             mode=mode,
@@ -292,7 +259,6 @@ async def start_trading(
             user_id=resolved_user_id,
             tenant_id=resolved_tenant_id,
             market=deployment_market,
-            **dated_kwargs,
         )
         signal_readiness = readiness.get("signal_readiness") or {}
         trading_permission = str(
@@ -376,9 +342,7 @@ async def start_trading(
                 ExecutionConfigSchema.model_validate(exec_config)
                 code_overrides["execution_config"] = sorted(_code_exec_over.keys())
             if _code_live_over:
-                live_config = _normalize_live_trade_config(
-                    _code_live_over, live_config, **dated_kwargs
-                )
+                live_config = _normalize_live_trade_config(_code_live_over, live_config)
                 code_overrides["live_trade_config"] = sorted(_code_live_over.keys())
             if code_overrides:
                 logger.info(
@@ -400,12 +364,11 @@ async def start_trading(
                 exc,
             )
 
+        if str(market or "").upper() == "JP":
+            exec_config = {**exec_config, "market": "JP"}
+            live_config = {**live_config, "market": "JP"}
+
         # 3. 沙箱模拟盘执行
-        if dated_inputs is not None and live_config.get("order_type") != "MARKET":
-            raise HTTPException(
-                status_code=400,
-                detail="日期开盘模拟仅支持 MARKET 市价单",
-            )
         result = {"status": "success", "mode": "SIMULATION"}
         from backend.services.trade.sandbox.manager import sandbox_manager
 
@@ -417,7 +380,6 @@ async def start_trading(
                 code_str=code_str,
                 exec_config=exec_config,
                 live_trade_config=live_config,
-                **dated_kwargs,
             )
             logger.info(
                 f"[Sim] 用户 {resolved_user_id} 启动了沙箱模拟盘 {strategy_name} -> PID Task"
@@ -449,10 +411,6 @@ async def start_trading(
                     # 重启恢复/托管调度解析身份用，避免按键后缀反推（历史 000admin 坑）
                     "runtime_tenant_id": resolved_tenant_id,
                     "runtime_user_id": resolved_user_id,
-                    **(
-                        {**dated_kwargs, "sandbox_run_id": sandbox_run_id}
-                        if dated_inputs is not None else {}
-                    ),
                 }
             ),
         )
@@ -483,19 +441,7 @@ async def start_trading(
                                 strategy_id=strategy_id or strategy_name,
                                 live_trade_config=live_config,
                                 run_id=bootstrap_task_id,
-                                **({"active_runtime_id": run_id} if dated_inputs is not None else {}),
-                                **dated_kwargs,
                             )
-                            if dated_inputs is not None:
-                                from backend.services.simulation.services.hosted_runtime_context import publish_hosted_runtime_context
-
-                                active_key = _active_strategy_key(resolved_tenant_id, resolved_user_id)
-                                active_raw = redis.client.get(active_key)
-                                active_snapshot = json.loads(active_raw) if active_raw else None
-                                if isinstance(active_snapshot, dict) and active_snapshot.get("run_id") == run_id:
-                                    publish_hosted_runtime_context(
-                                        redis.client, active_key, active_snapshot, bootstrap_result
-                                    )
                             if bootstrap_result.get("status") == "failed":
                                 bootstrap_skipped_reason = str(
                                     bootstrap_result.get("error") or "simulation cycle failed"
@@ -611,7 +557,6 @@ async def start_trading(
             "code_overrides": code_overrides,
             "trading_permission": trading_permission,
             "signal_readiness": signal_readiness,
-            **dated_kwargs,
             "bootstrap": {
                 "attempted": mode == "SIMULATION" and trading_permission != "blocked",
                 "task_id": (bootstrap_result or {}).get("task_id") if isinstance(bootstrap_result, dict) else None,
@@ -778,7 +723,7 @@ async def stop_trading(
 
 
 @router.get("/status")
-@lifecycle_status_cache(ttl=5)
+@redis_cache(ttl=5)
 async def get_status(
     user_id: Optional[str] = None,
     tenant_id: Optional[str] = None,
@@ -786,8 +731,6 @@ async def get_status(
     auth: AuthContext = Depends(get_auth_context),
     redis: RedisClient = Depends(get_redis),
     db: AsyncSession = Depends(get_db),
-    market: Optional[str] = None,
-    execution_context: Optional[str] = None,
 ):
     resolved_user_id, resolved_tenant_id = _normalize_identity(
         auth, user_id=user_id, tenant_id=tenant_id
@@ -814,7 +757,6 @@ async def get_status(
     active_live_trade_config = None
     trading_permission = "trade_enabled"
     signal_readiness = None
-    active_inputs = None
     if active_strat_raw:
         try:
             active_data = json.loads(active_strat_raw)
@@ -844,12 +786,6 @@ async def get_status(
             trading_permission = str(active_data.get("trading_permission"))
         if isinstance(active_data.get("signal_readiness"), dict):
             signal_readiness = active_data.get("signal_readiness")
-        if active_data.get("execution_context") is not None:
-            active_inputs = parse_lifecycle_inputs(
-                active_data["execution_context"], mode=current_mode,
-                execution_config=active_exec_config,
-                live_trade_config=active_live_trade_config,
-            )
         if active_data.get("strategy_name"):
             strategy_info = {
                 "id": active_strat_id,
@@ -896,50 +832,10 @@ async def get_status(
             except Exception:
                 pass
 
-    query_inputs = None
-    if execution_context is not None:
-        query_inputs = parse_lifecycle_inputs(
-            execution_context, mode=str(trading_mode or current_mode).strip().upper(),
-            execution_config={"market": market} if market is not None else None,
-            live_trade_config=None,
-        )
-        if (
-            active_inputs is not None and query_inputs.market == active_inputs.market
-            and query_inputs.model_dump() != active_inputs.model_dump()
-        ):
-            raise HTTPException(
-                status_code=409, detail="Status inputs differ from saved runtime"
-            )
-    from backend.services.trade.sandbox.registered_account_reader import (
-        registered_sandbox_market,
-    )
-
-    signal_market = (
-        registered_sandbox_market({"market": market}, None) if market is not None
-        else active_inputs.market if active_inputs is not None else None
-    )
-    signal_inputs = query_inputs or (
-        active_inputs if active_inputs is not None
-        and signal_market == active_inputs.market else None
-    )
-    if query_inputs is not None:
-        signal_market = query_inputs.market
-    status_inputs = active_inputs or query_inputs
-    dated_status = (
-        {"execution_context": status_inputs.model_dump(mode="json")}
-        if status_inputs is not None else {}
-    )
-    if active_inputs is not None and isinstance(active_data.get("execution_context_provenance"), dict):
-        dated_status["execution_context_provenance"] = active_data["execution_context_provenance"]
     latest_signal_run_id, signal_source_status = await _build_signal_source_status(
         redis.client,
         resolved_tenant_id,
         resolved_user_id,
-        **({"market": signal_market} if signal_market is not None else {}),
-        **(
-            {"execution_context": signal_inputs}
-            if signal_inputs is not None else {}
-        ),
     )
     latest_hosted_task = await manual_execution_service.get_latest_hosted_task(
         tenant_id=resolved_tenant_id,
@@ -1000,7 +896,6 @@ async def get_status(
                 "latest_hosted_task": latest_hosted_task,
                 "latest_signal_run_id": latest_signal_run_id,
                 "signal_source_status": signal_source_status,
-                **dated_status,
             }
 
         return {
@@ -1018,7 +913,6 @@ async def get_status(
             "signal_source_status": signal_source_status,
             "trading_permission": trading_permission,
             "signal_readiness": signal_readiness,
-            **dated_status,
         }
 
     # No active strategy
@@ -1037,7 +931,6 @@ async def get_status(
         "signal_source_status": signal_source_status,
         "trading_permission": trading_permission,
         "signal_readiness": signal_readiness,
-        **dated_status,
     }
 
 

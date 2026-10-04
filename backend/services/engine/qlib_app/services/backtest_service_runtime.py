@@ -53,8 +53,11 @@ from backend.services.engine.qlib_app.utils.structured_logger import (
 )
 from backend.shared.notification_publisher import publish_notification_async
 from backend.shared.utils import normalize_user_id
-from backend.shared.utc_datetime import utc_now
-from .backtest_execution import resolve_market_execution
+from .market_backtest_config import (
+    configure_market_exchange,
+    configure_market_strategy,
+    prepare_market_batch_request,
+)
 from .backtest_service_query import QlibBacktestServiceQueryMixin
 
 logger = logging.getLogger(__name__)
@@ -102,9 +105,6 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
 
     async def run_backtest(self, request: QlibBacktestRequest) -> QlibBacktestResult:
         """运行回测"""
-        execution = resolve_market_execution(request)
-        if execution is not None:
-            request.market = execution.market
         self._cleanup_stale_runs()
         start_time = time.time()
         signal_meta: dict[str, Any] = {"source": "unknown"}
@@ -117,7 +117,7 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
         )
 
         backtest_id = getattr(request, "backtest_id", None) or uuid4().hex
-        created_at = utc_now() if execution is not None else datetime.now()
+        created_at = datetime.now()
         task_log = StructuredTaskLogger(
             logger,
             "qlib-backtest-runtime",
@@ -130,11 +130,7 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
         )
         self._runs[backtest_id] = {
             "status": "running",
-            # The existing polling clock uses local naive time in memory only.
-            # Registered execution results and persistence retain aware UTC.
-            "created_at": created_at.astimezone().replace(tzinfo=None)
-            if execution is not None
-            else created_at,
+            "created_at": created_at,
             "completed_at": None,
             "user_id": request.user_id,
             "tenant_id": request.tenant_id,
@@ -147,9 +143,7 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                 tenant_id=request.tenant_id,
                 status="running",
                 created_at=created_at,
-                config=request.model_dump(mode="json")
-                if execution is not None
-                else self._build_config_payload(request, signal_meta=signal_meta),
+                config=self._build_config_payload(request, signal_meta=signal_meta),
                 result=None,
             )
         await self._notify_progress(
@@ -162,152 +156,8 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             initial_capital=request.initial_capital,
         )
 
-        signal_state = {"meta": signal_meta}
         try:
-            if execution is None:
-                result, signal_meta = await self._execute_qlib_backtest(
-                    request, backtest_id, created_at, start_time, task_log, signal_meta,
-                    signal_state,
-                )
-            else:
-                request.backtest_id = backtest_id
-                result = await execution.execute(request)
-                result.created_at = created_at
-                signal_meta = {
-                    "source": (result.config or {}).get("signal_source", "unknown")
-                }
-
-            self._runs[backtest_id].update(
-                {
-                    "status": result.status,
-                    "completed_at": result.completed_at,
-                    "result": result,
-                }
-            )
-            if not is_optimization_child:
-                await self._persistence.save_run(
-                    backtest_id=backtest_id,
-                    user_id=request.user_id,
-                    tenant_id=request.tenant_id,
-                    status=result.status,
-                    created_at=created_at,
-                    completed_at=result.completed_at,
-                    config=result.config
-                    if execution is not None
-                    else self._build_config_payload(request, signal_meta=signal_meta),
-                    result=result,
-                )
-            await self._notify_progress(
-                backtest_id,
-                request.user_id,
-                status="completed",
-                progress=1.0,
-                strategy_name=request.strategy_type,
-                benchmark_symbol=request.benchmark,
-                initial_capital=request.initial_capital,
-                information_ratio=result.information_ratio,
-                beta=result.beta,
-                benchmark_return=result.benchmark_return,
-            )
-            if not is_optimization_child:
-                await publish_notification_async(
-                    user_id=str(request.user_id),
-                    tenant_id=str(request.tenant_id or "default"),
-                    title="回测已完成",
-                    content=f"{request.strategy_type} 回测完成，年化 {result.annual_return:.2%}，最大回撤 {result.max_drawdown:.2%}",
-                    type="strategy",
-                    level="success",
-                    action_url="/backtest",
-                )
-
-            return result
-
-        except Exception as e:
-            if execution is None:
-                signal_meta = signal_state["meta"]
-            execution_time = time.time() - start_time
-            error_detail = traceback.format_exc()
-            task_log.exception("run_failed", "回测失败", error=e)
-
-            # Create failure result for persistence
-            result = QlibBacktestResult(
-                backtest_id=backtest_id,
-                tenant_id=request.tenant_id,
-                status="failed",
-                created_at=created_at,
-                completed_at=utc_now() if execution is not None else datetime.now(),
-                config=request.model_dump(mode="json")
-                if execution is not None
-                else self._build_config_payload(request, signal_meta=signal_meta),
-                annual_return=0.0,
-                sharpe_ratio=0.0,
-                max_drawdown=0.0,
-                alpha=0.0,
-                long_short_is_theoretical=False
-                if execution is not None
-                else request.strategy_params.short_topk > 0,
-                signal_lag_days=request.signal_lag_days,
-                deal_price=request.deal_price,
-                error_message=f"{str(e)}",
-                full_error=error_detail,
-                execution_time=execution_time,
-                **(
-                    {
-                        "market": execution.market,
-                        "currency": execution.currency,
-                        "user_id": request.user_id,
-                    }
-                    if execution is not None
-                    else {}
-                ),
-            )
-
-            self._runs[backtest_id].update(
-                {
-                    "status": "failed",
-                    "completed_at": utc_now() if execution is not None else datetime.now(),
-                    "error_message": str(e),
-                    "full_error": error_detail,
-                }
-            )
-            if not is_optimization_child:
-                await self._persistence.save_run(
-                    backtest_id=backtest_id,
-                    user_id=request.user_id,
-                    tenant_id=request.tenant_id,
-                    status="failed",
-                    created_at=created_at,
-                    completed_at=utc_now() if execution is not None else datetime.now(),
-                    config=result.config
-                    if execution is not None
-                    else self._build_config_payload(request, signal_meta=signal_meta),
-                    result=result,
-                )
-            await self._notify_progress(
-                backtest_id,
-                request.user_id,
-                status="failed",
-                progress=1.0,
-                error_message=f"{str(e)}",
-                full_error=error_detail,
-            )
-            if not is_optimization_child:
-                await publish_notification_async(
-                    user_id=str(request.user_id),
-                    tenant_id=str(request.tenant_id or "default"),
-                    title="回测执行失败",
-                    content=f"{request.strategy_type} 回测失败：{str(e)}",
-                    type="strategy",
-                    level="error",
-                    action_url="/backtest",
-                )
-
-            return result
-
-    async def _execute_qlib_backtest(
-        self, request, backtest_id, created_at, start_time, task_log, signal_meta, signal_state
-    ):
-        try:
+            await prepare_market_batch_request(request)
             self.initialize(
                 provider_uri=getattr(request, "qlib_provider_uri", None),
                 region=getattr(request, "qlib_region", None),
@@ -828,6 +678,7 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     "allow_short_selling": enable_short_selling,
                 },
             }
+            exchange_config = configure_market_exchange(request, exchange_config)
             pos_type = "Position"
             if enable_short_selling:
                 pos_type = ensure_margin_backtest_support()
@@ -862,20 +713,27 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                 period=f"{request.start_date}~{request.end_date}",
             )
 
-            if "kwargs" in strategy:
+            strategy_log_config = strategy
+            if request.market == "JP" and not isinstance(strategy, dict):
+                strategy_log_config = {
+                    "kwargs": {"rebalance_days": getattr(strategy, "rebalance_days", None)}
+                }
+            if "kwargs" in strategy_log_config:
                 task_log.info(
-                    "strategy_kwargs", "最终策略配置参数", kwargs=strategy["kwargs"]
+                    "strategy_kwargs", "最终策略配置参数", kwargs=strategy_log_config["kwargs"]
                 )
             task_log.info(
                 "rebalance_days",
                 "最终调仓周期参数",
-                rebalance_days=strategy["kwargs"].get(
+                rebalance_days=strategy_log_config["kwargs"].get(
                     "rebalance_days", "<missing; strategy default applies>"
                 ),
             )
 
             use_vect = getattr(request, "use_vectorized", False)
-            if use_vect and not self._is_vectorized_safe(request, strategy):
+            if use_vect and (
+                request.market == "JP" or not self._is_vectorized_safe(request, strategy)
+            ):
                 use_vect = False
                 task_log.info(
                     "vectorized_safety_gate",
@@ -981,7 +839,7 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
             else:
                 portfolio_dict, indicator_dict = await asyncio.to_thread(
                     backtest,
-                    strategy=strategy,
+                    strategy=configure_market_strategy(request, strategy),
                     executor=executor,
                     **backtest_config,
                 )
@@ -1015,9 +873,117 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
                     on_progress=analysis_progress_callback,
                 )
 
-            return result, signal_meta
-        finally:
-            signal_state["meta"] = signal_meta
+            self._runs[backtest_id].update(
+                {
+                    "status": result.status,
+                    "completed_at": result.completed_at,
+                    "result": result,
+                }
+            )
+            if not is_optimization_child:
+                await self._persistence.save_run(
+                    backtest_id=backtest_id,
+                    user_id=request.user_id,
+                    tenant_id=request.tenant_id,
+                    status=result.status,
+                    created_at=created_at,
+                    completed_at=result.completed_at,
+                    config=self._build_config_payload(request, signal_meta=signal_meta),
+                    result=result,
+                )
+            await self._notify_progress(
+                backtest_id,
+                request.user_id,
+                status="completed",
+                progress=1.0,
+                strategy_name=request.strategy_type,
+                benchmark_symbol=request.benchmark,
+                initial_capital=request.initial_capital,
+                information_ratio=result.information_ratio,
+                beta=result.beta,
+                benchmark_return=result.benchmark_return,
+            )
+            if not is_optimization_child:
+                await publish_notification_async(
+                    user_id=str(request.user_id),
+                    tenant_id=str(request.tenant_id or "default"),
+                    title="回测已完成",
+                    content=f"{request.strategy_type} 回测完成，年化 {result.annual_return:.2%}，最大回撤 {result.max_drawdown:.2%}",
+                    type="strategy",
+                    level="success",
+                    action_url="/backtest",
+                )
+
+            return result
+
+        except Exception as e:
+            execution_time = time.time() - start_time
+            error_detail = traceback.format_exc()
+            task_log.exception("run_failed", "回测失败", error=e)
+
+            # Create failure result for persistence
+            result = QlibBacktestResult(
+                backtest_id=backtest_id,
+                tenant_id=request.tenant_id,
+                status="failed",
+                created_at=created_at,
+                completed_at=datetime.now(),
+                config=self._build_config_payload(request, signal_meta=signal_meta),
+                annual_return=0.0,
+                sharpe_ratio=0.0,
+                max_drawdown=0.0,
+                alpha=0.0,
+                long_short_is_theoretical=request.strategy_params.short_topk > 0,
+                signal_lag_days=request.signal_lag_days,
+                deal_price=request.deal_price,
+                error_message=f"{str(e)}",
+                full_error=error_detail,
+                execution_time=execution_time,
+                **(
+                    {"market": "JP", "currency": "JPY", "user_id": request.user_id}
+                    if request.market == "JP" else {}
+                ),
+            )
+
+            self._runs[backtest_id].update(
+                {
+                    "status": "failed",
+                    "completed_at": datetime.now(),
+                    "error_message": str(e),
+                    "full_error": error_detail,
+                }
+            )
+            if not is_optimization_child:
+                await self._persistence.save_run(
+                    backtest_id=backtest_id,
+                    user_id=request.user_id,
+                    tenant_id=request.tenant_id,
+                    status="failed",
+                    created_at=created_at,
+                    completed_at=datetime.now(),
+                    config=self._build_config_payload(request, signal_meta=signal_meta),
+                    result=result,
+                )
+            await self._notify_progress(
+                backtest_id,
+                request.user_id,
+                status="failed",
+                progress=1.0,
+                error_message=f"{str(e)}",
+                full_error=error_detail,
+            )
+            if not is_optimization_child:
+                await publish_notification_async(
+                    user_id=str(request.user_id),
+                    tenant_id=str(request.tenant_id or "default"),
+                    title="回测执行失败",
+                    content=f"{request.strategy_type} 回测失败：{str(e)}",
+                    type="strategy",
+                    level="error",
+                    action_url="/backtest",
+                )
+
+            return result
 
     def _resolve_path(self, path_str: str) -> str | None:
         if not path_str:
@@ -1204,6 +1170,9 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
         s = str(code or "").strip().lower()
         if not s:
             return s
+        from backend.shared.stock_utils import StockCodeUtil
+        if StockCodeUtil.is_jp_symbol(s):
+            return StockCodeUtil.to_qlib(s, market="JP")
         # 已是 qlib 小写前缀格式
         if len(s) == 8 and s[:2] in {"sh", "sz", "bj"}:
             return s
@@ -1585,6 +1554,8 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
     @staticmethod
     def _infer_backtest_market(request: "QlibBacktestRequest") -> str:
         """从回测请求中推断目标市场（CN/HK/US/CRYPTO）。"""
+        if getattr(request, "market", None) == "JP":
+            return "JP"
         # 1. 从 qlib_provider_uri 或 qlib_region 推断
         provider_uri = str(getattr(request, "qlib_provider_uri", "") or "").lower()
         region = str(getattr(request, "qlib_region", "") or "").lower()
@@ -1630,6 +1601,8 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
         context = meta.get("context") or {}
         if isinstance(context, dict):
             market = str(context.get("market") or "").upper().strip()
+            if market == "JP":
+                return "JP"
             if market in ("CUSTOM", "自定义"):
                 return "CN"
             if market in ("HK", "HONG_KONG", "港股"):

@@ -32,7 +32,12 @@ def copy_research_hdf(source: str, target: Path, instruments: list[str]) -> None
 
 
 def read_research_features(
-    data: DataConfig, region: str, start: str, end: str
+    data: DataConfig,
+    region: str,
+    start: str,
+    end: str,
+    *,
+    fields: list[str] | None = None,
 ) -> pd.DataFrame:
     """Return the common factor-backtest frame from an isolated Qlib reader."""
     script = """
@@ -43,14 +48,20 @@ config = json.loads(sys.argv[1])
 qlib.init(provider_uri=config['data']['provider_uri'], region=config['region'])
 universe = config['data']['market']
 instruments = D.instruments(market=universe) if isinstance(universe, str) else universe
-fields = ['$open', '$high', '$low', '$close', '$volume', '$amount', '$factor']
+fields = config['fields'] or ['$open', '$high', '$low', '$close', '$volume', '$amount', '$factor']
 frame = D.features(instruments, fields,
                    start_time=config['start'], end_time=config['end'], freq='day')
 if frame.empty:
     raise ValueError('Configured market research data is empty')
 frame.to_hdf(sys.argv[2], key='data', mode='w')
 """
-    config = {"data": asdict(data), "region": region, "start": start, "end": end}
+    config = {
+        "data": asdict(data),
+        "region": region,
+        "start": start,
+        "end": end,
+        "fields": fields,
+    }
     with tempfile.TemporaryDirectory(prefix="rd-provider-") as directory:
         output = Path(directory) / "features.h5"
         result = subprocess.run(

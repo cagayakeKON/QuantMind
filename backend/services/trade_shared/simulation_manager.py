@@ -291,7 +291,9 @@ return cjson.encode({success=true, unlocked=unlocked})
 
         return account_key(tenant_id, canonical_sim_user_suffix(user_id), market)
 
-    def _lookup_keys(self, user_id: int, tenant_id: str, market: str = "CN") -> list[str]:
+    def _lookup_keys(
+        self, user_id: int, tenant_id: str, market: str = "CN"
+    ) -> list[str]:
         from backend.shared.simulation_account_keys import account_lookup_keys
 
         return account_lookup_keys(tenant_id, user_id, market)
@@ -325,6 +327,16 @@ return cjson.encode({success=true, unlocked=unlocked})
             data = read_json_cache(self.redis, key)
             if not data:
                 continue
+            if self._normalize_market(market) == "JP":
+                from backend.services.simulation.services.legacy_jp_state import (
+                    LegacyJPNativeState,
+                    is_legacy_jp_native,
+                )
+
+                if is_legacy_jp_native(data):
+                    raise LegacyJPNativeState(
+                        "Existing native-JPY cache is retained read-only"
+                    )
             score = account_payload_score(data)
             if (
                 best is None
@@ -572,6 +584,8 @@ return 0
         tenant_id = self._normalize_tenant(tenant_id)
         key = self._get_key(user_id, tenant_id, market)
 
+        if self._normalize_market(market) == "JP":
+            self._pick_cached_account(user_id, tenant_id, market)
         account_data = {
             "cash": initial_cash,
             "available_cash": initial_cash,
@@ -651,6 +665,9 @@ return 0
 
         try:
             async with _get_session() as session:
+                from backend.services.simulation.services.legacy_jp_state import require_standard_account
+
+                await require_standard_account(session, tenant_id, user_id)
                 projection_svc = SimulationProjectionService(session)
                 projection = await projection_svc.load_projection(
                     tenant_id=tenant_id,
@@ -1003,12 +1020,12 @@ return 0
             return {"success": False, "reason": "REDIS_UNAVAILABLE"}
         market_norm = self._normalize_market(market)
         if market_norm != "CN":
-            return await self.unlock_t1(user_id, tenant_id=tenant_id, market=market_norm)
+            return await self.unlock_t1(
+                user_id, tenant_id=tenant_id, market=market_norm
+            )
 
         tenant_id = self._normalize_tenant(tenant_id)
-        target_date = as_of_date or _datetime.now(
-            _ZoneInfo("Asia/Shanghai")
-        ).date()
+        target_date = as_of_date or _datetime.now(_ZoneInfo("Asia/Shanghai")).date()
         try:
             async with self.locked_execution(user_id, tenant_id):
                 account = self._pick_cached_account(user_id, tenant_id, market_norm)
@@ -1055,13 +1072,9 @@ return 0
                         # Unknown Redis-only holdings retain their current lock
                         # state. Never increase sellable quantity without dated
                         # evidence, but do not permanently relock old accounts.
-                        ledger_value = float(
-                            raw_pos.get("available_volume") or 0.0
-                        )
+                        ledger_value = float(raw_pos.get("available_volume") or 0.0)
                     volume = max(0.0, float(raw_pos.get("volume") or 0.0))
-                    old_value = max(
-                        0.0, float(raw_pos.get("available_volume") or 0.0)
-                    )
+                    old_value = max(0.0, float(raw_pos.get("available_volume") or 0.0))
                     new_value = min(volume, max(0.0, float(ledger_value)))
                     if abs(old_value - new_value) > 1e-6:
                         unlocked += 1
@@ -1149,9 +1162,9 @@ return 0
             pos["price"] = float(price)
             pos["market_value"] = new_qty * float(price)
             pos["side"] = "short"
-            pos["borrow_fee"] = float(pos.get("borrow_fee") or 0.0) + deltas[
-                "borrow_fee"
-            ]
+            pos["borrow_fee"] = (
+                float(pos.get("borrow_fee") or 0.0) + deltas["borrow_fee"]
+            )
 
             # 融券所得资金冻结；现金只扣减借券费；负债记卖出金额
             short_proceeds += deltas["short_proceeds"]
@@ -1174,9 +1187,9 @@ return 0
                 pos["volume"] = new_qty
                 pos["price"] = float(price)
                 pos["market_value"] = new_qty * float(price)
-                pos["borrow_fee"] = float(pos.get("borrow_fee") or 0.0) + deltas[
-                    "borrow_fee"
-                ]
+                pos["borrow_fee"] = (
+                    float(pos.get("borrow_fee") or 0.0) + deltas["borrow_fee"]
+                )
                 pos["realized_pnl"] = (
                     float(pos.get("realized_pnl") or 0.0) + deltas["cash"]
                 )

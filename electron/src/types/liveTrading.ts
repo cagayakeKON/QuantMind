@@ -5,43 +5,12 @@ export type TradeWeekday = 'MON' | 'TUE' | 'WED' | 'THU' | 'FRI';
 export type TradingSession = 'AM' | 'PM';
 export type LiveOrderType = 'LIMIT' | 'MARKET';
 
-/** Optional inputs supplied by a registered dated simulation adapter. */
-export interface DatedExecutionContext {
-  market: string;
-  data_version: string;
-  trade_date: string;
-  commission_rate: string | number;
-  slippage_bps: string | number;
-  model_data_version?: string;
-  prediction_sha256?: string;
-  /** Read-only provenance of the last committed dated account cycle. */
-  last_cycle_inputs?: {
-    market?: string;
-    trade_date: string;
-    scheduled_trade_date?: string;
-    execution_date_mode?: 'published_daily_delayed';
-  };
-}
-
-export interface SimulationExecutionInputs {
-  market: string;
-  currency: string;
-  timezone: string;
-  trade_dates: string[];
-  execution_context: DatedExecutionContext;
-  session_ranges: Record<TradingSession, [string, string]>;
-  session_end_exclusive: boolean;
-  allowed_order_types: LiveOrderType[];
-}
-
 export interface ExecutionConfig {
-  market?: string;
   max_buy_drop?: number;
   stop_loss?: number;
 }
 
 export interface LiveTradeConfig {
-  market?: string;
   rebalance_days?: 1 | 3 | 5 | 10 | 20;
   schedule_type: ScheduleType;
   trade_weekdays?: TradeWeekday[];

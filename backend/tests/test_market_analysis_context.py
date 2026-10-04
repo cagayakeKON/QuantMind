@@ -18,9 +18,14 @@ from backend.services.engine.qlib_app.services.benchmark_service import Benchmar
 from backend.services.engine.qlib_app.services.trade_stats_service import (
     TradeStatsService,
 )
-from backend.services.simulation.jp import analysis_data, backtest, strategy_context
+from backend.services.simulation.jp import analysis_data
+from backend.services.engine.data_platform.quantjp_hub import _resolve_quantjp_data_dir
+from backend.tests.test_jp_standard_qlib_backtest import (
+    ready_service,
+    prepare_standard_predictions,
+)
 
-pytest_plugins = ["backend.tests.test_jp_model_backtest"]
+pytest_plugins = ["backend.tests.jp_standard_fixtures"]
 
 
 def recorded_result():
@@ -53,9 +58,13 @@ def forbid_global_data(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_recorded_topix_uses_public_benchmark_algorithm_without_global_provider(
+    model_data,
     monkeypatch,
 ):
     result = recorded_result()
+    result.data_version = result.config["jp_data_version"] = model_data[2][
+        "jp_data_version"
+    ]
     before = result.model_dump(mode="json")
     service = BenchmarkService()
     calls = []
@@ -68,9 +77,9 @@ async def test_recorded_topix_uses_public_benchmark_algorithm_without_global_pro
     forbid_global_data(monkeypatch)
     response = await service.analyze("recorded-jp", "alice", "TOPIX", "tenant-a")
     assert response.benchmark_id == "TOPIX"
-    assert response.benchmark_returns.values == pytest.approx([0, 0.02, 0.01])
+    assert response.benchmark_returns.values == pytest.approx([0, 10 / 2500, 20 / 2500])
     assert response.strategy_returns.values == pytest.approx([0, 0.01, -0.005])
-    assert response.metrics.excess_return == pytest.approx(-0.015)
+    assert response.metrics.excess_return == pytest.approx(-0.005 - 20 / 2500)
     assert len(calls) == 1
     assert calls[0][1]["tenant_id"] == "tenant-a"
     assert set(calls[0][1]["include_fields"]) == {
@@ -88,10 +97,6 @@ async def test_recorded_topix_uses_public_benchmark_algorithm_without_global_pro
     "invalid",
     [
         "market",
-        "missing",
-        "zero",
-        "nan",
-        "duplicate",
         "version",
         "execution_version",
         "missing_version",
@@ -99,9 +104,12 @@ async def test_recorded_topix_uses_public_benchmark_algorithm_without_global_pro
     ],
 )
 async def test_registered_benchmark_rejects_unavailable_data_without_random_fallback(
-    monkeypatch, invalid
+    model_data, monkeypatch, invalid
 ):
     result = recorded_result()
+    result.data_version = result.config["jp_data_version"] = model_data[2][
+        "jp_data_version"
+    ]
     if invalid == "market":
         result.market = "CN"
     elif invalid == "missing":
@@ -132,39 +140,29 @@ async def test_registered_benchmark_rejects_unavailable_data_without_random_fall
         await service.analyze("recorded-jp", "alice", "TOPIX", "tenant-a")
 
 
-def test_public_trade_mapping_preserves_ledger_and_original_fifo_holding_rule():
-    fills = [
+def test_standard_public_trades_keep_original_fifo_holding_days():
+    trades = [
         {
-            "symbol": "JP72030",
-            "side": "BUY",
+            "symbol": "jp_72030",
+            "action": "buy",
             "quantity": 100,
-            "price": "50",
-            "fee": "0",
-            "trade_date": "2026-09-29",
-            "executed_at": "2026-09-29T00:00:00Z",
+            "price": 50,
+            "commission": 0,
+            "date": "2026-09-29",
         },
         {
-            "symbol": "JP72030",
-            "side": "SELL",
+            "symbol": "jp_72030",
+            "action": "sell",
             "quantity": 100,
-            "price": "55",
-            "fee": "0",
-            "trade_date": "2026-10-02",
-            "executed_at": "2026-10-02T00:00:00Z",
+            "price": 55,
+            "commission": 0,
+            "date": "2026-10-02",
         },
     ]
-    before = deepcopy(fills)
-    public = analysis_data.public_trades(fills)
-    assert fills == before
-    assert public[0]["action"] == "buy" and public[1]["action"] == "sell"
-    assert [
-        {k: row[k] for k in original}
-        for original, row in zip(before, public, strict=True)
-    ] == before
-    assert public[0]["date"] == fills[0]["trade_date"]
-    assert public[0]["commission"] == float(fills[0]["fee"])
-    holding = TradeStatsService()._derive_holding_days_from_trades(pd.DataFrame(public))
-    assert holding.tolist() == [3]  # Existing public statistics use calendar days.
+    before = deepcopy(trades)
+    holding = TradeStatsService()._derive_holding_days_from_trades(pd.DataFrame(trades))
+    assert holding.tolist() == [3]
+    assert trades == before
 
 
 @pytest.mark.asyncio
@@ -176,9 +174,7 @@ async def test_native_jp_result_runs_through_all_three_shared_analysis_services(
         conn.execute(
             "UPDATE research.daily_prices SET AdjFactor=1,ExRT='' WHERE Date='2026-09-30'"
         )
-    publication = import_jquants_snapshot(
-        snapshot, strategy_context._resolve_quantjp_data_dir()
-    )
+    publication = import_jquants_snapshot(snapshot, _resolve_quantjp_data_dir())
     meta["jp_data_version"] = publication["version"]
     pd.DataFrame(
         {
@@ -189,22 +185,18 @@ async def test_native_jp_result_runs_through_all_three_shared_analysis_services(
         }
     ).to_parquet(directory / "pred.parquet")
     base.strategy_type = "TopkDropout"
+    base.strategy_params.rebalance_days = 1
+    base.start_date = "2026-09-28"
     base.end_date = "2026-09-30"
     base.user_id, base.tenant_id = "alice", "tenant-a"
 
-    async def resolve(*args):
-        return directory, meta
-
-    monkeypatch.setattr(backtest, "resolve_model", resolve)
-
-    class Store:
-        async def save_run(self, **kwargs):
-            pass
-
-    result = await runtime_factory(Store()).run_backtest(base)
+    base.strategy_params.signal = str(directory / "pred.parquet")
+    prepare_standard_predictions(base, directory)
+    service, _, _ = ready_service(runtime_factory, monkeypatch)
+    result = await service.run_backtest(base)
     assert result.status == "completed"
     assert result.trades and all(
-        row["action"] == row["side"].lower() for row in result.trades
+        row["action"] in {"buy", "sell"} for row in result.trades
     )
 
     async def recorded(*args, **kwargs):

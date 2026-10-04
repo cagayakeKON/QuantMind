@@ -1576,10 +1576,6 @@ CREATE TABLE IF NOT EXISTS replay_equity_snapshots (
     CONSTRAINT uq_replay_equity_session_date UNIQUE (session_id, trade_date)
 );
 
--- Registered replay cash rules retain funding/settlement metadata atomically
--- with the existing equity snapshot. Do not reconstruct it from float balances.
-ALTER TABLE replay_equity_snapshots ADD COLUMN IF NOT EXISTS market_state JSONB;
-
 CREATE TABLE IF NOT EXISTS replay_signals (
     id              SERIAL PRIMARY KEY,
     session_id      UUID NOT NULL REFERENCES replay_sessions(session_id) ON DELETE CASCADE,
@@ -1903,7 +1899,6 @@ CREATE TABLE IF NOT EXISTS simulation_accounts (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_simulation_accounts_tenant_user
     ON simulation_accounts (tenant_id, user_id);
-ALTER TABLE simulation_accounts ADD COLUMN IF NOT EXISTS market_state JSONB;
 
 -- 60.2 SIMULATION_ACCOUNT_DAILY
 CREATE TABLE IF NOT EXISTS simulation_account_daily (
@@ -2686,35 +2681,3 @@ END $$;
 -- ========================
 -- DONE - 所有缺失表已创建
 -- ========================
-
--- JP cash accounts: separate JPY ledger for daily simulation and historical replay.
-CREATE TABLE IF NOT EXISTS jp_simulation_sessions (
-    session_id UUID PRIMARY KEY,
-    tenant_id VARCHAR(64) NOT NULL,
-    user_id VARCHAR(64) NOT NULL,
-    name VARCHAR(128) NOT NULL,
-    mode VARCHAR(16) NOT NULL CHECK (mode IN ('daily', 'replay')),
-    anchor_date DATE NOT NULL,
-    end_date DATE,
-    data_version VARCHAR(96) NOT NULL,
-    state JSONB NOT NULL,
-    pending JSONB NOT NULL DEFAULT '[]'::jsonb,
-    revision INTEGER NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_jp_simulation_scope
-    ON jp_simulation_sessions (tenant_id, user_id, mode);
-
--- One-time replay import provenance survives the original session DELETE/CASCADE.
--- No foreign key to a disposable replay session and no ordinary account state.
-CREATE TABLE IF NOT EXISTS replay_import_receipts (
-    session_id UUID PRIMARY KEY,
-    tenant_id VARCHAR(64) NOT NULL,
-    user_id INTEGER NOT NULL,
-    market VARCHAR(16) NOT NULL,
-    data_version VARCHAR(96) NOT NULL,
-    source_format VARCHAR(64) NOT NULL,
-    source_sha256 VARCHAR(64) NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);

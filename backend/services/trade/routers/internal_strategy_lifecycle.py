@@ -1,4 +1,3 @@
-import json
 import logging
 import time
 from typing import Any
@@ -12,7 +11,6 @@ from backend.services.trade_shared.portfolio.models import Portfolio, Position
 from backend.services.trade_shared.redis_client import RedisClient
 from backend.services.live_trading.services.internal_strategy_dispatcher import dispatch_internal_strategy_order
 from backend.services.live_trading.services.manual_execution_service import manual_execution_service
-from backend.services.live_trading.services.manual_execution_context import DatedManualInputs
 from .internal_strategy_utils import verify_internal_call
 
 router = APIRouter(tags=["Internal Strategy Gateway"])
@@ -30,7 +28,6 @@ class HostedExecutionCreateRequest(BaseModel):
     trigger_context: dict[str, Any] | None = None
     parent_runtime_id: str | None = None
     note: str | None = None
-    execution_context: DatedManualInputs | None = None
 
 @router.post("/heartbeat", dependencies=[Depends(verify_internal_call)])
 async def strategy_heartbeat(
@@ -67,62 +64,29 @@ async def strategy_heartbeat(
 async def sync_account_state(
     x_user_id: str = Header(...), x_tenant_id: str | None = Header(None), db=Depends(get_db),
     market: str | None = None, trading_mode: str | None = None,
-    execution_context: str | None = None,
 ):
     """
     供策略 Pod 启动时初始化：获取真实的资金和持仓
     """
-    inputs = None
-    if execution_context is not None:
-        from backend.services.trade.sandbox.registered_account_reader import (
-            validate_sandbox_execution_inputs,
-        )
+    if str(market or "").upper() == "JP":
+        if str(trading_mode or "").upper() != "SIMULATION":
+            raise HTTPException(status_code=400, detail="JP supports simulation only")
+        from backend.services.trade_shared.simulation_manager import SimulationAccountManager, canonical_sim_uid
+        from backend.services.simulation.services.legacy_jp_state import LegacyJPNativeState, read_existing_jp_account, require_standard_account
 
+        uid = canonical_sim_uid(x_user_id)
+        tenant = (x_tenant_id or "").strip() or "default"
+        redis = get_redis()
         try:
-            if market is None:
-                raise ValueError("Dated account reads require an explicit market")
-            inputs = validate_sandbox_execution_inputs(
-                json.loads(execution_context),
-                mode=str(trading_mode or "").upper(),
-                execution_config={"market": market},
-                live_trade_config=None,
+            await require_standard_account(
+                db, tenant, uid, cached=read_existing_jp_account(redis, tenant, uid),
             )
-        except (ValueError, NotImplementedError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if market is not None:
-        from backend.services.simulation.services.account_context import (
-            read_registered_simulation_account,
-            registered_account_input_adapter,
-        )
-        from backend.services.trade_shared.simulation_manager import canonical_sim_uid
-
-        selected = market.strip().upper()
-        if registered_account_input_adapter(selected) is not None:
-            if str(trading_mode or "").upper() != "SIMULATION":
-                raise HTTPException(
-                    status_code=400, detail="Registered account reads require SIMULATION"
-                )
-            uid = canonical_sim_uid(x_user_id)
-            if uid <= 0:
-                raise HTTPException(status_code=400, detail="Invalid simulation user_id")
-            tenant = (x_tenant_id or "").strip() or "default"
-            try:
-                registered, account = await read_registered_simulation_account(
-                    selected, redis=None, tenant_id=tenant,
-                    raw_user_id=x_user_id, user_id=uid,
-                    **({"execution_inputs": inputs.model_dump()}
-                       if inputs is not None else {}),
-                )
-            except (ValueError, NotImplementedError) as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
-            if not registered or account is None:
-                raise HTTPException(
-                    status_code=409, detail="Registered simulation account is not initialized"
-                )
-            return {
-                **account, "tenant_id": tenant, "user_id": uid,
-                "portfolio_id": None, "market": selected,
-            }
+        except LegacyJPNativeState as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        account = await SimulationAccountManager(redis).get_account(uid, tenant_id=tenant)
+        if account is None:
+            raise HTTPException(status_code=409, detail="Simulation account is not initialized")
+        return {**account, "tenant_id": tenant, "user_id": uid, "portfolio_id": None, "market": "JP"}
     try:
         user_id = int(x_user_id)
         tenant_id = (x_tenant_id or "").strip() or "default"
@@ -219,7 +183,5 @@ async def create_hosted_execution(
         trigger_context=payload.trigger_context,
         parent_runtime_id=payload.parent_runtime_id,
         note=payload.note,
-        **({"execution_context": payload.execution_context.model_dump(mode="json")}
-           if payload.execution_context is not None else {}),
     )
     return {"status": "success", **result}

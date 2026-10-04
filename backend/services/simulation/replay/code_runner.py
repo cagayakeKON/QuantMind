@@ -91,6 +91,28 @@ def _build_user_globals() -> dict[str, Any]:
     return {"__builtins__": safe_builtins}
 
 
+def _symbol_suffix(symbol: str, *, market: str | None = None) -> str:
+    from backend.services.simulation.services.local_market_data import (
+        symbol_conversion_market,
+    )
+    from backend.shared.stock_utils import StockCodeUtil
+
+    return StockCodeUtil.to_suffix(
+        symbol, market=symbol_conversion_market(symbol, market)
+    )
+
+
+def _symbol_prefix(symbol: str, *, market: str | None = None) -> str:
+    from backend.services.simulation.services.local_market_data import (
+        symbol_conversion_market,
+    )
+    from backend.shared.stock_utils import StockCodeUtil
+
+    return StockCodeUtil.to_prefix(
+        symbol, market=symbol_conversion_market(symbol, market)
+    )
+
+
 def _resolve_universe_symbols(
     universe: Any, market_data: Any
 ) -> list[str]:
@@ -99,19 +121,25 @@ def _resolve_universe_symbols(
     list 直接用；str 先走 strategy_lab 的 qlib instruments（与回测同源），
     读不到再回退回放本地行情全量标的。
     """
-    from backend.shared.stock_utils import StockCodeUtil
-
+    symbol_market = (
+        "JP" if str(getattr(market_data, "market", "")).endswith("JP") else None
+    )
     if isinstance(universe, str):
         try:
             from backend.services.engine.strategy_lab.engine.data_provider import (
                 load_universe,
             )
 
-            syms = load_universe(universe)
+            if str(getattr(market_data, "market", "")).endswith("JP"):
+                from backend.shared.qlib_paths import resolve_qlib_provider_uri
+
+                syms = load_universe(universe, resolve_qlib_provider_uri("JP"))
+            else:
+                syms = load_universe(universe)
         except Exception:
             syms = []
         if syms:
-            return [StockCodeUtil.to_prefix(s) for s in syms]
+            return [_symbol_prefix(s, market=symbol_market) for s in syms]
         # 回退：本地回放行情全量（后缀式转前缀）
         try:
             bars = market_data.load_date(None, None)  # type: ignore[arg-type]
@@ -131,8 +159,10 @@ def _resolve_universe_symbols(
                     bars = market_data.load_date(_date(y, m, d), None)
             except Exception:
                 bars = {}
-        return [StockCodeUtil.to_prefix(s) for s in bars.keys()]
-    return [StockCodeUtil.to_prefix(str(s)) for s in (universe or [])]
+        return [_symbol_prefix(s, market=symbol_market) for s in bars.keys()]
+    return [
+        _symbol_prefix(str(s), market=symbol_market) for s in (universe or [])
+    ]
 
 
 def prepare_session(
@@ -208,6 +238,7 @@ def prepare_session(
             out = apply_pool_to_universe(
                 symbols, effective_pool,
                 tenant_id=tenant_id, user_id=user_id, strict=True,
+                **({"market": "JP"} if str(getattr(market_data, "market", "")).endswith("JP") else {}),
             )
         except ValueError as exc:
             raise ValueError(str(exc)) from exc
@@ -264,10 +295,20 @@ class ReplayDataProvider:
 
     def __init__(self, market_data: Any) -> None:
         self._md = market_data
+        self._symbol_market = (
+            "JP" if str(getattr(market_data, "market", "")).endswith("JP") else None
+        )
 
-    def _day_symbols(self, day: date) -> dict[str, Any]:
+    def _day_symbols(self, day: date, symbols=None) -> dict[str, Any]:
         try:
-            return self._md.load_date(day, None) or {}
+            requested = (
+                symbols if str(getattr(self._md, "market", "")).endswith("JP") else None
+            )
+            return self._md.load_date(day, requested) or {}
+        except ValueError:
+            if str(getattr(self._md, "market", "")).endswith("JP"):
+                raise
+            return {}
         except Exception:
             return {}
 
@@ -281,9 +322,7 @@ class ReplayDataProvider:
     def _series(
         self, symbol: str, n: int, fld: str, today: pd.Timestamp | None
     ) -> pd.Series:
-        from backend.shared.stock_utils import StockCodeUtil
-
-        suffix = StockCodeUtil.to_suffix(symbol)
+        suffix = _symbol_suffix(symbol, market=self._symbol_market)
         try:
             sessions = self._md._sessions()
         except Exception:
@@ -293,7 +332,7 @@ class ReplayDataProvider:
         vals: dict[pd.Timestamp, float] = {}
         for d_int in days:
             day = date(d_int // 10000, (d_int // 100) % 100, d_int % 100)
-            bar = self._day_symbols(day).get(suffix)
+            bar = self._day_symbols(day, [symbol]).get(suffix)
             if bar is None:
                 continue
             v = self._bar_field(bar, fld)
@@ -317,7 +356,11 @@ class ReplayDataProvider:
         if symbols:
             cols = {}
             for s in symbols:
-                cols[s] = self._series(s, n, field, today)
+                key = (
+                    _symbol_prefix(s, market="JP")
+                    if self._symbol_market == "JP" else s
+                )
+                cols[key] = self._series(s, n, field, today)
             return pd.DataFrame(cols)
         if symbol is None:
             return pd.Series(dtype=float)
@@ -346,18 +389,20 @@ class ReplayDataProvider:
     def snapshot(
         self, date: Any | None = None, symbols: Sequence[str] | None = None
     ) -> pd.DataFrame:
-        from backend.shared.stock_utils import StockCodeUtil
-
         if date is None:
             return pd.DataFrame()
         day = pd.Timestamp(date).date()
-        bars = self._day_symbols(day)
+        bars = self._day_symbols(day, symbols)
         rows = {}
         for s in symbols or []:
-            bar = bars.get(StockCodeUtil.to_suffix(s))
+            bar = bars.get(_symbol_suffix(s, market=self._symbol_market))
             if bar is None:
                 continue
-            rows[s] = {f: self._bar_field(bar, f) for f in self._OHLCV}
+            key = (
+                _symbol_prefix(s, market="JP")
+                if self._symbol_market == "JP" else s
+            )
+            rows[key] = {f: self._bar_field(bar, f) for f in self._OHLCV}
         if not rows:
             return pd.DataFrame()
         return pd.DataFrame(rows).T
@@ -368,12 +413,10 @@ class ReplayDataProvider:
         return self._series(symbol or "SH000001", n, "close", today)
 
     def is_tradable(self, symbol: str, today: pd.Timestamp | None = None) -> bool:
-        from backend.shared.stock_utils import StockCodeUtil
-
         if today is None:
             return True
-        bar = self._day_symbols(pd.Timestamp(today).date()).get(
-            StockCodeUtil.to_suffix(symbol)
+        bar = self._day_symbols(pd.Timestamp(today).date(), [symbol]).get(
+            _symbol_suffix(symbol, market=self._symbol_market)
         )
         if bar is None:
             return False
@@ -397,13 +440,13 @@ class ReplayDataProvider:
 # ---------------------------------------------------------------------------
 
 
-def _equity_now(account_data: dict[str, Any], bars: dict[str, Any]) -> float:
-    from backend.shared.stock_utils import StockCodeUtil
-
+def _equity_now(
+    account_data: dict[str, Any], bars: dict[str, Any], *, market: str | None = None
+) -> float:
     cash = float(account_data.get("cash") or 0.0)
     mv = 0.0
     for sym, pos in ((account_data.get("positions") or {}).items()):
-        bar = bars.get(StockCodeUtil.to_suffix(sym)) or bars.get(sym)
+        bar = bars.get(_symbol_suffix(sym, market=market)) or bars.get(sym)
         price = 0.0
         if bar is not None:
             try:
@@ -416,11 +459,11 @@ def _equity_now(account_data: dict[str, Any], bars: dict[str, Any]) -> float:
     return cash + mv
 
 
-def _qty_for_weight(weight: float, price: float, equity: float) -> int:
+def _qty_for_weight(weight: float, price: float, equity: float, lot_size: int = _LOT_SIZE) -> int:
     if price <= 0 or weight <= 0:
         return 0
     raw = int((equity * weight) // price)
-    return (raw // _LOT_SIZE) * _LOT_SIZE
+    return (raw // lot_size) * lot_size
 
 
 def intents_to_orders(
@@ -429,6 +472,7 @@ def intents_to_orders(
     account_data: dict[str, Any],
     bars: dict[str, Any],
     lot_size: int = _LOT_SIZE,
+    market: str | None = None,
 ) -> list[Any]:
     """OrderIntent → rebalance_calculator.Order（具体 qty + 开盘价）。
 
@@ -438,8 +482,8 @@ def intents_to_orders(
     from backend.services.simulation.services.rebalance_calculator import Order
     from backend.shared.stock_utils import StockCodeUtil
 
-    lot = max(1, int(lot_size))
-    equity = _equity_now(account_data, bars)
+    default_lot = max(1, int(lot_size))
+    equity = _equity_now(account_data, bars, market=market)
     positions = account_data.get("positions") or {}
     out: list[Any] = []
 
@@ -462,7 +506,7 @@ def intents_to_orders(
         if pos is None:
             for k, v in positions.items():
                 try:
-                    if StockCodeUtil.to_suffix(k) == suffix:
+                    if _symbol_suffix(k, market=market) == suffix:
                         return v
                 except Exception:
                     continue
@@ -476,7 +520,7 @@ def intents_to_orders(
             targets = []
             for t in getattr(o, "targets", None) or []:
                 try:
-                    targets.append(StockCodeUtil.to_suffix(str(t)))
+                    targets.append(_symbol_suffix(str(t), market=market))
                 except Exception:
                     continue
             if not targets:
@@ -484,7 +528,7 @@ def intents_to_orders(
             weight = 1.0 / len(targets)
             for sym in list(positions.keys()):
                 try:
-                    sfx = StockCodeUtil.to_suffix(sym)
+                    sfx = _symbol_suffix(sym, market=market)
                 except Exception:
                     continue
                 if sfx in targets:
@@ -498,6 +542,7 @@ def intents_to_orders(
                 if vol > 0 and px:
                     out.append(Order(symbol=sfx, side="SELL", quantity=vol, price=px, reason=reason or "rebalance"))
             for sfx in targets:
+                lot = max(1, int(bars[sfx].lot_size)) if StockCodeUtil.is_jp_symbol(sfx) and sfx in bars else default_lot
                 px = _price(sfx)
                 if not px:
                     continue
@@ -514,11 +559,14 @@ def intents_to_orders(
                         out.append(Order(symbol=sfx, side="BUY", quantity=qty, price=px, reason=reason or "rebalance"))
             continue
         try:
-            suffix = StockCodeUtil.to_suffix(str(getattr(o, "symbol", "") or ""))
+            suffix = _symbol_suffix(
+                str(getattr(o, "symbol", "") or ""), market=market
+            )
         except Exception:
             continue
         if not suffix:
             continue
+        lot = max(1, int(bars[suffix].lot_size)) if StockCodeUtil.is_jp_symbol(suffix) and suffix in bars else default_lot
         px = _price(suffix)
         if not px:
             continue
@@ -527,7 +575,7 @@ def intents_to_orders(
             if qty_raw is not None:
                 qty = (int(qty_raw) // lot) * lot
             else:
-                qty = _qty_for_weight(float(getattr(o, "weight", 0) or 0), px, equity)
+                qty = _qty_for_weight(float(getattr(o, "weight", 0) or 0), px, equity, lot)
                 qty = (qty // lot) * lot
             if qty > 0:
                 out.append(Order(symbol=suffix, side="BUY", quantity=int(qty), price=px, reason=reason))
@@ -550,7 +598,7 @@ def intents_to_orders(
                 out.append(Order(symbol=suffix, side="SELL", quantity=int(qty), price=px, reason=reason))
         elif side == "set_position":
             w = float(getattr(o, "weight", 0) or 0)
-            target = _qty_for_weight(w, px, equity)
+            target = _qty_for_weight(w, px, equity, lot)
             pos = _holding(suffix)
             try:
                 cur = int(float(pos.get("volume") or 0))
@@ -565,14 +613,18 @@ def intents_to_orders(
 
 
 def _enforce_sdk_risk(
-    ctx: Any, account_data: dict[str, Any], bars: dict[str, Any], today: pd.Timestamp
+    ctx: Any,
+    account_data: dict[str, Any],
+    bars: dict[str, Any],
+    today: pd.Timestamp,
+    *,
+    market: str | None = None,
 ) -> tuple[list[Any], bool]:
     """执行 ctx 注册的风险规则，返回 (强制卖单, 是否熔断后跳过用户单)。
 
     口径对齐 SimpleBroker._enforce_risk：收盘价触发；账户熔断后只出不进。
     """
     from backend.services.simulation.services.rebalance_calculator import Order
-    from backend.shared.stock_utils import StockCodeUtil
 
     rules = []
     try:
@@ -594,7 +646,7 @@ def _enforce_sdk_risk(
             acct_sl = val
         elif sym:
             try:
-                sfx = StockCodeUtil.to_suffix(str(sym))
+                sfx = _symbol_suffix(str(sym), market=market)
             except Exception:
                 continue
             if kind == "stop_loss":
@@ -626,11 +678,15 @@ def _enforce_sdk_risk(
             init_cash = float(getattr(ctx, "cash", 0) or 0)
         except (TypeError, ValueError):
             init_cash = 0.0
-        if init_cash > 0 and _equity_now(account_data, bars) / init_cash - 1 <= acct_sl:
+        if (
+            init_cash > 0
+            and _equity_now(account_data, bars, market=market) / init_cash - 1
+            <= acct_sl
+        ):
             halted = True
             for sym, pos in positions.items():
                 try:
-                    sfx = StockCodeUtil.to_suffix(sym)
+                    sfx = _symbol_suffix(sym, market=market)
                 except Exception:
                     continue
                 px = _close(sfx)
@@ -644,7 +700,7 @@ def _enforce_sdk_risk(
 
     for sym, pos in positions.items():
         try:
-            sfx = StockCodeUtil.to_suffix(sym)
+            sfx = _symbol_suffix(sym, market=market)
         except Exception:
             continue
         px = _close(sfx)
@@ -715,11 +771,13 @@ def run_code_day(
             hook_error = f"on_universe: {exc}"
             ctx.log(f"on_universe error @ {trade_date}: {exc}", level="warning")
     if compiled.on_bar is not None:
-        from backend.shared.stock_utils import StockCodeUtil
-
         for sym in compiled.symbols:
             try:
                 s = provider.history(symbol=sym, n=1, fields=["open", "high", "low", "close", "volume"], today=today)
+            except ValueError:
+                if str(getattr(market_data, "market", "")).endswith("JP"):
+                    raise
+                continue
             except Exception:
                 continue
             if s is None or len(s) == 0:
@@ -749,24 +807,33 @@ def run_code_day(
         intents = ctx._drain_orders()
     except Exception:
         intents = []
-    forced, halted = _enforce_sdk_risk(ctx, account_data, bars, today)
+    forced, halted = _enforce_sdk_risk(
+        ctx, account_data, bars, today, market=provider._symbol_market
+    )
     orders = list(forced)
     if not halted:
         try:
             orders.extend(
-                intents_to_orders(intents, account_data=account_data, bars=bars)
+                intents_to_orders(
+                    intents,
+                    account_data=account_data,
+                    bars=bars,
+                    market=provider._symbol_market,
+                )
             )
         except Exception as exc:
             logger.warning("回放 code 意图解析失败 session=%s date=%s: %s", sid, trade_date, exc)
     # 池外安全网：hook 里手写非池标的时直接丢弃（与 signals 模式严格语义对齐）
     if compiled.symbols:
         allowed = set(compiled.symbols)
-        from backend.shared.stock_utils import StockCodeUtil
 
         kept = []
         for o in orders:
             try:
-                if StockCodeUtil.to_prefix(o.symbol) in allowed:
+                prefix = _symbol_prefix(
+                    o.symbol, market=provider._symbol_market
+                )
+                if prefix in allowed:
                     kept.append(o)
                     continue
             except Exception:

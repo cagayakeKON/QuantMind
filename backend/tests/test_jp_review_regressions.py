@@ -132,11 +132,17 @@ async def test_activation_uses_japanese_published_holidays_without_china_calenda
     monkeypatch.setattr(
         model_registry_service,
         "resolve_effective_model",
-        AsyncMock(return_value=ResolvedModel(
-            effective_model_id="model-jp", model_source="user_default",
-            storage_path=str(native), model_file="", fallback_used=False,
-            fallback_reason="", status="ready",
-        )),
+        AsyncMock(
+            return_value=ResolvedModel(
+                effective_model_id="model-jp",
+                model_source="user_default",
+                storage_path=str(native),
+                model_file="",
+                fallback_used=False,
+                fallback_reason="",
+                status="ready",
+            )
+        ),
     )
     monkeypatch.setattr(activation, "datetime", FixedDateTime)
     monkeypatch.setattr(activation.xcals, "get_calendar", forbidden)
@@ -237,38 +243,3 @@ async def test_original_feature_catalog_accepts_jp_without_rewriting_other_marke
         ).read_text()
     )
     assert saved["categories"][0]["features"][0]["markets"] == ["JP", "CN"]
-
-
-def test_equity_worker_does_not_project_native_jpy_cache_into_cny_root():
-    from backend.services.simulation.services.equity_settlement_worker import (
-        SimulationEquitySettlementWorker,
-    )
-
-    values = {
-        "simulation:account:test:7": json.dumps({"market": "CN", "cash": 250000}),
-        "simulation:account:test:7:JP": json.dumps({"market": "JP", "cash": 30000}),
-    }
-    redis = SimpleNamespace(
-        client=SimpleNamespace(
-            scan_iter=lambda **kw: values.keys(), get=lambda key: values[key]
-        )
-    )
-    rows = SimulationEquitySettlementWorker(redis)._load_accounts()
-    assert (
-        len(rows) == 1
-        and rows[0]["market"] == "CN"
-        and rows[0]["account"]["cash"] == 250000
-    )
-
-
-def test_old_registered_fills_without_native_scope_require_audited_migration():
-    from backend.services.simulation.services.dated_account import (
-        require_market_ledger_scope,
-    )
-
-    with pytest.raises(ValueError, match="migration"):
-        require_market_ledger_scope(
-            {"metadata": {"state": {"fills": [{"order_id": "old"}]}}},
-            "sim:test:7",
-            "JP",
-        )

@@ -9,7 +9,7 @@ import pytest
 from backend.services.api import market_data_range as coverage
 from backend.services.api.routers import model_training as routes
 
-pytest_plugins = ["backend.tests.test_jp_model_backtest"]
+pytest_plugins = ["backend.tests.jp_standard_fixtures"]
 
 
 @pytest.mark.asyncio

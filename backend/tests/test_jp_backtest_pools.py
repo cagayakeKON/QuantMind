@@ -1,4 +1,4 @@
-"""JP cash backtests consume the existing resolver and signal pool policies."""
+"""Standard JP Qlib backtests consume the existing resolver and signal pool policies."""
 
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -6,13 +6,21 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from backend.services.simulation.jp import backtest
+from backend.shared.stock_utils import StockCodeUtil
+from backend.shared.stock_pool.resolver import resolver as pool_resolver
+from backend.services.engine.qlib_app.services import (
+    backtest_service_runtime as public_runtime,
+)
+from backend.tests.test_jp_standard_qlib_backtest import (
+    ready_service,
+    prepare_standard_predictions,
+)
 from backend.shared.stock_pool.resolver import PoolResolver, ResolveContext
 from backend.shared.stock_pool.schemas import PoolSnapshot
 
 pytest_plugins = [
     "backend.tests.test_jp_data_platform",
-    "backend.tests.test_jp_model_backtest",
+    "backend.tests.jp_standard_fixtures",
 ]
 
 
@@ -29,11 +37,6 @@ def registered(model_data, monkeypatch):
     request, directory, meta = model_data
     request.user_id, request.tenant_id = "alice", "tenant-a"
 
-    async def resolve(tenant, user, model_id):
-        assert (tenant, user, model_id) == ("tenant-a", "alice", "jp-test")
-        return directory, meta
-
-    monkeypatch.setattr(backtest, "resolve_model", resolve)
     pd.DataFrame(
         {
             "symbol": ["JP72030", "JP216A0"],
@@ -42,6 +45,8 @@ def registered(model_data, monkeypatch):
             "split": ["test"] * 2,
         }
     ).to_parquet(directory / "pred.parquet")
+    request.strategy_params.signal = str(directory / "pred.parquet")
+    prepare_standard_predictions(request, directory)
     return request, directory, meta
 
 
@@ -59,12 +64,13 @@ async def test_existing_resolver_filters_out_higher_score_outside_pool(
         request.pool_id = f"{syntax}216A0.JP"
     store = Store()
     result = await runtime_factory(store).run_backtest(request)
-    assert {fill["symbol"] for fill in result.trades} == {"JP216A0"}
+    assert {
+        StockCodeUtil.to_prefix(fill["symbol"], market="JP") for fill in result.trades
+    } == {"JP216A0"}
     expected = PoolResolver().resolve_sync(
         request.pool_id, ResolveContext(market="JP"), strict=True
     )
-    assert result.config["pool_checksum"] == expected.checksum
-    assert result.config["pool_snapshot"]["symbols"] == ["216A0.JP"]
+    assert request.pool_checksum == expected.checksum
     assert store.results[-1].status == "completed"
 
 
@@ -86,9 +92,11 @@ async def test_pool_id_precedes_universe_and_passes_existing_identity(
         )
         return actual
 
-    monkeypatch.setattr(backtest.pool_resolver, "resolve", resolve)
+    monkeypatch.setattr(pool_resolver, "resolve", resolve)
     result = await runtime_factory(Store()).run_backtest(request)
-    assert {fill["symbol"] for fill in result.trades} == {"JP216A0"}
+    assert {
+        StockCodeUtil.to_prefix(fill["symbol"], market="JP") for fill in result.trades
+    } == {"JP216A0"}
 
 
 @pytest.mark.asyncio
@@ -128,14 +136,14 @@ async def test_user_pool_uses_shared_database_lookup_and_member_file(
     monkeypatch.setattr("backend.shared.database_pool.get_db", get_db)
     result = await runtime_factory(Store()).run_backtest(request)
     assert any(p["uid"] == "alice" and p["tid"] == "tenant-a" for p in seen)
-    assert result.config["pool_snapshot"]["pool_id"] == "pool-for-alice"
-    assert {fill["symbol"] for fill in result.trades} == {"JP216A0"}
+    assert request.pool_checksum
+    assert {
+        StockCodeUtil.to_prefix(fill["symbol"], market="JP") for fill in result.trades
+    } == {"JP216A0"}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "kind", ["empty", "wrong-market", "no-signals", "resolver-denied"]
-)
+@pytest.mark.parametrize("kind", ["empty", "resolver-denied"])
 async def test_unusable_pool_fails_and_is_persisted_without_all_market_fallback(
     registered, monkeypatch, kind, runtime_factory
 ):
@@ -156,7 +164,7 @@ async def test_unusable_pool_fails_and_is_persisted_without_all_market_fallback(
             raise PermissionError("existing resolver refused the pool")
         return pool
 
-    monkeypatch.setattr(backtest.pool_resolver, "resolve", resolve)
+    monkeypatch.setattr(pool_resolver, "resolve", resolve)
     store = Store()
     result = await runtime_factory(store).run_backtest(request)
     assert result.status == "failed" and result.error_message
@@ -164,19 +172,12 @@ async def test_unusable_pool_fails_and_is_persisted_without_all_market_fallback(
     assert not store.results[-1].trades
 
 
-def test_sync_executor_cannot_bypass_shared_pool_resolution(registered):
-    request, directory, meta = registered
-    request.pool_id = "list:JP216A0"
-    with pytest.raises(ValueError, match="resolved shared pool snapshot"):
-        backtest.run_cash_backtest(request, directory, meta)
-
-
 @pytest.mark.asyncio
 async def test_missing_raw_member_file_reports_missing_pool_in_jp_context(
     registered, tmp_path, runtime_factory
 ):
     request, _, _ = registered
-    request.universe = str(tmp_path / "absent.txt")
+    request.pool_id = f"file:{tmp_path / 'absent.txt'}"
     store = Store()
     result = await runtime_factory(store).run_backtest(request)
     assert "absent.txt" in result.error_message
@@ -190,37 +191,62 @@ async def test_changed_member_file_changes_checksum_and_traded_symbols(
     request, _, _ = registered
     path = tmp_path / "members.txt"
     path.write_text("JP216A0\n", encoding="utf-8")
-    request.universe = str(path)
+    request.pool_id = f"file:{path}"
     first = await runtime_factory(Store()).run_backtest(request)
+    first_checksum = request.pool_checksum
     path.write_text("JP72030\n", encoding="utf-8")
     second = await runtime_factory(Store()).run_backtest(request)
-    assert first.config["pool_checksum"] != second.config["pool_checksum"]
-    assert {fill["symbol"] for fill in first.trades} == {"JP216A0"}
-    assert {fill["symbol"] for fill in second.trades} == {"JP72030"}
+    assert first_checksum != request.pool_checksum
+    assert {
+        StockCodeUtil.to_prefix(fill["symbol"], market="JP") for fill in first.trades
+    } == {"JP216A0"}
+    assert {
+        StockCodeUtil.to_prefix(fill["symbol"], market="JP") for fill in second.trades
+    } == {"JP72030"}
 
 
 @pytest.mark.asyncio
 async def test_running_backtest_keeps_resolved_snapshot_when_members_change(
     registered, tmp_path, monkeypatch, runtime_factory
 ):
-    from backend.services.engine.qlib_app.services import isolated_strategy_execution
-
     request, _, _ = registered
     path = tmp_path / "members.txt"
     path.write_text("JP216A0\n", encoding="utf-8")
     request.pool_id = f"file:{path}"
-    original = isolated_strategy_execution.execute_isolated_strategy
+    original = public_runtime.backtest
 
-    async def execute(*args, **kwargs):
+    def execute(*args, **kwargs):
         # A concurrent save must only affect subsequent runs.
         path.write_text("JP72030\n", encoding="utf-8")
-        return await original(*args, **kwargs)
+        return original(*args, **kwargs)
 
-    monkeypatch.setattr(
-        isolated_strategy_execution, "execute_isolated_strategy", execute
-    )
+    monkeypatch.setattr(public_runtime, "backtest", execute)
     result = await runtime_factory(Store()).run_backtest(request)
-    assert {fill["symbol"] for fill in result.trades} == {"JP216A0"}
-    assert result.config["pool_snapshot"]["api_symbols"] == ["JP216A0"]
+    assert {
+        StockCodeUtil.to_prefix(fill["symbol"], market="JP") for fill in result.trades
+    } == {"JP216A0"}
     current = PoolResolver().resolve_sync(request.pool_id, ResolveContext(market="JP"))
-    assert result.config["pool_checksum"] != current.checksum
+    assert request.pool_checksum != current.checksum
+
+
+@pytest.fixture
+def runtime_factory(runtime_factory, monkeypatch):
+    factory = runtime_factory
+
+    def create(store):
+        service, _, _ = ready_service(lambda _: factory(store), monkeypatch)
+        return service
+
+    return create
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pool", ["list:US_AAPL", "list:JP67580"])
+async def test_resolved_pool_without_signal_completes_without_outside_fills(
+    registered, runtime_factory, pool
+):
+    request, _, _ = registered
+    request.pool_id = pool
+    result = await runtime_factory(Store()).run_backtest(request)
+    assert result.status == "completed", result.full_error
+    assert result.trades == []

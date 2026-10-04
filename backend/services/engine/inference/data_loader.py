@@ -21,11 +21,42 @@ _DEFAULT_DATA_DIR = "/app/db/feature_snapshots"
 FORWARD_RETURN_COL = "fwd_return"
 
 
+def _is_jp_model(meta: dict) -> bool:
+    ctx = meta.get("context")
+    return isinstance(ctx, dict) and str(ctx.get("market") or "").upper() == "JP"
+
+
+def resolve_data_dir(data_dir: Path | str | None, meta: dict) -> Path:
+    """Pin the evaluation's JP publication; keep legacy market paths unchanged."""
+    if _is_jp_model(meta):
+        from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+
+        if data_dir is None:
+            from .script_runner import _resolve_market_factor_data_dir
+
+            data_dir = _resolve_market_factor_data_dir(meta)
+        return QuantJPDataHub(data_dir).data_dir
+    return Path(data_dir) if data_dir else Path(_DEFAULT_DATA_DIR)
+
+
 def _quantdb_reader(meta: dict, data_dir: Path):
     """Return the direct reader only for models explicitly bound to QuantDB.
 
     Old models deliberately remain on their immutable parquet snapshots.
     """
+    if _is_jp_model(meta):
+        if (
+            meta.get("data_source") != "quantdb_factors"
+            or meta.get("factor_source") != "l1_factors"
+        ):
+            raise ValueError("JP evaluation requires the published l1_factors source")
+        from backend.services.engine.data_platform.quantdb_factor_reader import (
+            QuantDBFactorReader,
+        )
+
+        # As in standard inference, data_dir is this run's selected publication,
+        # rather than the possibly obsolete training metadata.quantdb_dir.
+        return QuantDBFactorReader(data_dir, market="JP")
     if meta.get("data_source") != "quantdb_factors":
         return None
     from backend.services.engine.data_platform.quantdb_factor_reader import QuantDBFactorReader
@@ -121,8 +152,8 @@ def load_date_data(
     exclude_limit_moves: bool = False,
 ) -> pd.DataFrame | None:
     """Load feature data for a specific date. Returns None if no data available."""
-    data_dir = Path(data_dir) if data_dir else Path(_DEFAULT_DATA_DIR)
     meta = meta or {}
+    data_dir = resolve_data_dir(data_dir, meta)
 
     reader = _quantdb_reader(meta, data_dir)
     if reader is not None:
@@ -167,7 +198,26 @@ def load_date_data(
     day_df = day_df.drop_duplicates(subset=["symbol"], keep="last")
 
     before_filter = len(day_df)
-    day_df = filter_untradable_rows(day_df, exclude_limit_moves=exclude_limit_moves)
+    day_df = filter_untradable_rows(
+        day_df, exclude_limit_moves=exclude_limit_moves and not _is_jp_model(meta)
+    )
+    if _is_jp_model(meta) and exclude_limit_moves and not day_df.empty:
+        from datetime import date
+        from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+        from backend.shared.stock_utils import StockCodeUtil
+
+        day = date.fromisoformat(trade_date)
+        quotes = QuantJPDataHub(reader.data_dir).fetch_daily_kline_batch(
+            day_df["symbol"].tolist(), day, day, adjust="none"
+        )
+        flags = ["upper_limit_touched", "lower_limit_touched"]
+        if quotes.empty or not set(flags).issubset(quotes.columns):
+            raise ValueError("JP evaluation limit flags are unavailable")
+        touched = quotes[flags].fillna(False).any(axis=1)
+        excluded = quotes.loc[touched, "symbol"].map(
+            lambda symbol: StockCodeUtil.to_prefix(symbol, market="JP")
+        )
+        day_df = day_df.loc[~day_df["symbol"].isin(excluded)].copy()
     after_filter = len(day_df)
     if before_filter != after_filter:
         logger.info(
@@ -213,8 +263,8 @@ def load_forward_labels(
     """
     horizon = max(1, int(horizon))
     signal_lag_days = max(0, int(signal_lag_days))
-    data_dir = Path(data_dir) if data_dir else Path(_DEFAULT_DATA_DIR)
     meta = meta or {}
+    data_dir = resolve_data_dir(data_dir, meta)
 
     if not dates:
         return pd.DataFrame(columns=["symbol", "trade_date", FORWARD_RETURN_COL])
@@ -223,6 +273,46 @@ def load_forward_labels(
     if reader is not None:
         source = str(meta.get("factor_source") or "l1_l2_factors")
         try:
+            if _is_jp_model(meta):
+                from backend.services.engine.data_platform.quantjp_hub import (
+                    QuantJPDataHub,
+                )
+                from backend.services.engine.data_platform.jp_labels import (
+                    forward_price_labels,
+                    last_label_session,
+                )
+
+                sessions = QuantJPDataHub(reader.data_dir).fetch_calendar().trade_date
+                if sessions.empty:
+                    raise ValueError("JP evaluation cash calendar is unavailable")
+                # Dates can be sparse samples: bound by the final signal date,
+                # never by the number of sampled dates or per-symbol row shifts.
+                end = last_label_session(max(dates), sessions, horizon, signal_lag_days)
+                if end is None:
+                    end = pd.to_datetime(sessions).max()
+                available = reader.available_dates(source, start=min(dates))
+                if not available:
+                    return pd.DataFrame(
+                        columns=["symbol", "trade_date", FORWARD_RETURN_COL]
+                    )
+                # The cash calendar can extend beyond the published factors.
+                # Read existing prices; exact missing exits remain NaN instead
+                # of making a valid earlier signal fail the readiness check.
+                end = min(str(end)[:10], available[-1])
+                frame = reader.read_range(
+                    source, features=[], start=min(dates), end=end,
+                )
+                frame[FORWARD_RETURN_COL] = forward_price_labels(
+                    frame, sessions, horizon, signal_lag_days,
+                    deal_price=str(meta["context"].get("deal_price") or "open"),
+                )
+                frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.strftime(
+                    "%Y-%m-%d"
+                )
+                return frame.loc[
+                    frame["trade_date"].isin(dates),
+                    ["symbol", "trade_date", FORWARD_RETURN_COL],
+                ].dropna(subset=[FORWARD_RETURN_COL])
             # Include enough trailing dates for a valid forward return window.
             available = reader.available_dates(source, start=min(dates))
             if not available:
@@ -371,9 +461,17 @@ def preprocess(
 
     X_df = df[feature_cols].copy()
 
-    for col, val in fill_values.items():
-        if col in X_df.columns:
-            X_df[col] = X_df[col].fillna(val)
+    prep = meta.get("preprocessing")
+    if _is_jp_model(meta) and isinstance(prep, dict) and prep.get("enabled"):
+        # Standard JP inference uses the training-configured cross section.
+        # Legacy evaluation continues to ignore this config for other markets.
+        from .templates.inference_parquet import _cross_sectional_preprocess_inline
+
+        X_df = _cross_sectional_preprocess_inline(X_df, meta)
+    else:
+        for col, val in fill_values.items():
+            if col in X_df.columns:
+                X_df[col] = X_df[col].fillna(val)
     X_df = X_df.fillna(0.0)
 
     symbols = df["symbol"].tolist()
@@ -387,16 +485,27 @@ def get_available_dates(
     meta: dict | None = None,
 ) -> list[str]:
     """Get list of available trading dates from parquet data."""
-    data_dir = Path(data_dir) if data_dir else Path(_DEFAULT_DATA_DIR)
     meta = meta or {}
+    data_dir = resolve_data_dir(data_dir, meta)
 
     reader = _quantdb_reader(meta, data_dir)
     if reader is not None:
         try:
-            return reader.available_dates(
+            dates = reader.available_dates(
                 str(meta.get("factor_source") or "l1_l2_factors"),
                 start=start_date, end=end_date,
             )
+            if _is_jp_model(meta):
+                from backend.services.engine.data_platform.quantjp_hub import (
+                    QuantJPDataHub,
+                )
+
+                calendar = QuantJPDataHub(reader.data_dir).fetch_calendar()
+                sessions = set(
+                    pd.to_datetime(calendar.trade_date).dt.strftime("%Y-%m-%d")
+                )
+                dates = [day for day in dates if day in sessions]
+            return dates
         except Exception as exc:
             logger.error("读取 QuantDB 交易日失败: %s", exc)
             return []

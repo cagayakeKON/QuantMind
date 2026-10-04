@@ -104,23 +104,36 @@ class HubTerminalSource:
             trade_date = str(pd.Timestamp(prices.trade_date.max()).date())
             close = prices.set_index("symbol")["close"]
             frame["close"] = frame.Symbol.map(close)
-            days = self.hub._partition_dates(
-                "1_kline_data/daily_unadjusted", end=date.fromisoformat(trade_date)
-            )
-            if len(days) >= 2:
-                previous_day = date.fromisoformat(
-                    f"{days[-2][:4]}-{days[-2][4:6]}-{days[-2][6:]}"
+            previous_day = None
+            if self.market == "JP":
+                calendar = self.hub.fetch_calendar(end=date.fromisoformat(trade_date))
+                if not calendar.empty:
+                    sessions = pd.DatetimeIndex(calendar.trade_date).normalize()
+                    sessions = sessions.unique().sort_values()
+                    current = pd.Timestamp(trade_date)
+                    if current in sessions and len(sessions) >= 2:
+                        previous_day = sessions[-2].date()
+            else:
+                days = self.hub._partition_dates(
+                    "1_kline_data/daily_unadjusted", end=date.fromisoformat(trade_date)
                 )
-                previous = self.hub._normalize_kline(
+                if len(days) >= 2:
+                    previous_day = date.fromisoformat(
+                        f"{days[-2][:4]}-{days[-2][4:6]}-{days[-2][6:]}"
+                    )
+            if previous_day is not None:
+                previous_frame = self.hub._normalize_kline(
                     self.hub._read(
                         "1_kline_data/daily_unadjusted", previous_day, previous_day
                     )
-                ).set_index("symbol")["close"]
-                prior = prices.symbol.map(previous) * prices.adj_factor
-                change = ((prices.close / prior.where(prior.gt(0))) - 1) * 100
-                frame["pct_change"] = frame.Symbol.map(
-                    pd.Series(change.to_numpy(), index=prices.symbol)
                 )
+                if not previous_frame.empty or self.market != "JP":
+                    previous = previous_frame.set_index("symbol")["close"]
+                    prior = prices.symbol.map(previous) * prices.adj_factor
+                    change = ((prices.close / prior.where(prior.gt(0))) - 1) * 100
+                    frame["pct_change"] = frame.Symbol.map(
+                        pd.Series(change.to_numpy(), index=prices.symbol)
+                    )
         for name in (
             "Zsz",
             "Ltsz",

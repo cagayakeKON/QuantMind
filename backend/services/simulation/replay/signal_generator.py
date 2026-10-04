@@ -157,7 +157,7 @@ def _get_pred_day_frame(model_dir: Path, data_day: date) -> pd.DataFrame | None:
 
 async def _apply_session_pool_filter(
     signals: list, pool_ref: str, tenant_id: str, user_id: str, session_id: Any,
-    *, market: str | None = None,
+    market: str | None = None,
 ) -> list:
     """按会话股票池裁剪信号（严格语义：空池/零命中返回空）。"""
     from backend.shared.stock_pool.resolver import (
@@ -165,38 +165,23 @@ async def _apply_session_pool_filter(
         resolver as pool_resolver,
     )
 
-    context = (
-        ResolveContext(tenant_id=tenant_id, user_id=user_id)
-        if market is None
-        else ResolveContext(tenant_id=tenant_id, user_id=user_id, market=market)
-    )
     try:
         snapshot = await asyncio.to_thread(
             pool_resolver.resolve_sync,
             pool_ref,
-            context,
-            strict=market is not None,
+            ResolveContext(tenant_id=tenant_id, user_id=user_id, market=market),
+            strict=False,
         )
     except Exception as exc:
-        if market is not None:
-            raise
         logger.warning("回放池解析异常 session=%s pool=%s: %s", session_id, pool_ref, exc)
         return []
-    if market is not None and snapshot.market != market:
-        raise ValueError("Replay stock pool belongs to a different market")
     if snapshot.unfiltered:
         return signals
     allowed = set()
     for s in snapshot.api_symbols or []:
         try:
-            allowed.add(
-                StockCodeUtil.to_prefix(str(s))
-                if market is None
-                else StockCodeUtil.to_prefix(str(s), market=market)
-            )
+            allowed.add(StockCodeUtil.to_prefix(str(s)))
         except Exception:
-            if market is not None:
-                raise
             continue
     if not allowed:
         logger.warning("回放池为空 session=%s pool=%s", session_id, pool_ref)
@@ -204,16 +189,9 @@ async def _apply_session_pool_filter(
     kept = []
     for sig in signals:
         try:
-            code = (
-                StockCodeUtil.to_prefix(str(sig.symbol))
-                if market is None
-                else StockCodeUtil.to_prefix(str(sig.symbol), market=market)
-            )
-            if code in allowed:
+            if StockCodeUtil.to_prefix(str(sig.symbol)) in allowed:
                 kept.append(sig)
         except Exception:
-            if market is not None:
-                raise
             continue
     logger.info(
         "回放池过滤 session=%s pool=%s kept=%d dropped=%d",
@@ -264,46 +242,37 @@ class ReplaySignalLoader:
             return []
 
         params = row.strategy_params or {}
-        from backend.services.simulation.services.market_execution_data import (
-            read_registered_replay_signal_input,
-        )
-
-        registered_input = await read_registered_replay_signal_input(row, trade_date)
-        if registered_input is not None:
-            model_dir = registered_input.model_dir
-            pred_file = registered_input.prediction_file
-            data_day = registered_input.data_day
-            day_df = registered_input.frame
+        dir_str = str(params.get("_model_dir") or "").strip()
+        if dir_str:
+            model_dir = Path(dir_str)
         else:
-            dir_str = str(params.get("_model_dir") or "").strip()
-            if dir_str:
-                model_dir = Path(dir_str)
-            else:
-                # 旧会话未固化模型目录：只能按 model_id 回退生产目录
-                try:
-                    model_dir = _resolve_model_dir(row.model_id)
-                except FileNotFoundError as exc:
-                    logger.warning(
-                        "回放信号: 会话 %s 无法定位模型目录: %s", session_id, exc
-                    )
-                    return []
-
-            pred_file = _find_pred_parquet(model_dir)
-            if pred_file is None:
+            # 旧会话未固化模型目录：只能按 model_id 回退生产目录
+            try:
+                model_dir = _resolve_model_dir(row.model_id)
+            except FileNotFoundError as exc:
                 logger.warning(
-                    "回放信号: 模型目录缺少 pred.parquet: %s", model_dir
+                    "回放信号: 会话 %s 无法定位模型目录: %s", session_id, exc
                 )
                 return []
 
-            # T+1 偏移：trade_date 生效的信号来自上一交易日（数据日）的分数
-            sessions = await asyncio.to_thread(get_local_market_data()._sessions)
-            td_int = int(trade_date.strftime("%Y%m%d"))
-            before = [d for d in sessions if d < td_int]
-            if not before:
-                return []
-            data_day = _dt_int_to_date(before[-1])
+        pred_file = _find_pred_parquet(model_dir)
+        if pred_file is None:
+            logger.warning(
+                "回放信号: 模型目录缺少 pred.parquet: %s", model_dir
+            )
+            return []
 
-            day_df = _get_pred_day_frame(model_dir, data_day)
+        # T+1 偏移：trade_date 生效的信号来自上一交易日（数据日）的分数
+        sessions = await asyncio.to_thread(
+            get_local_market_data(params.get("market"))._sessions
+        )
+        td_int = int(trade_date.strftime("%Y%m%d"))
+        before = [d for d in sessions if d < td_int]
+        if not before:
+            return []
+        data_day = _dt_int_to_date(before[-1])
+
+        day_df = _get_pred_day_frame(model_dir, data_day)
         if day_df is None or day_df.empty:
             logger.warning(
                 "回放信号: %s 在数据日 %s 无模型分数（%s）",
@@ -337,7 +306,7 @@ class ReplaySignalLoader:
         if pool_ref:
             result = await _apply_session_pool_filter(
                 result, pool_ref, row.tenant_id, str(row.user_id), session_id,
-                **({"market": registered_input.market} if registered_input is not None else {}),
+                market="JP" if params.get("market") == "JP" else None,
             )
         return result
 

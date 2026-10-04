@@ -179,54 +179,15 @@ async def run_simulation_cycle_for_active(
     strategy_id: str,
     live_trade_config: dict[str, Any] | None = None,
     run_id: str | None = None,
-    execution_context=None,
-    scheduled_trade_date: date | None = None,
-    active_runtime_id: str | None = None,
 ) -> dict[str, Any]:
     """托管模拟盘唯一执行入口：RebalanceCalculator + ashare_matcher。"""
     from backend.services.simulation.engine import simulation_engine
 
     cfg = _normalize_live_trade_config(live_trade_config)
-    if execution_context is None and registered_schedule_provider(cfg.get("market")):
-        # Calendar eligibility does not enable the ordinary Lua cash path.
-        # The dated cash adapter must join this engine before orders can run.
-        return {
-            "task_id": run_id,
-            "status": "skipped",
-            "error": "registered_market_dated_execution_unavailable",
-            "signal_count": 0,
-            "order_count": 0,
-            "filled_count": 0,
-        }
     params_override: dict[str, Any] = {}
     if cfg.get("pool_id"):
         params_override["pool_id"] = cfg["pool_id"]
-    cycle_context = None
-    if execution_context is not None:
-        from .hosted_cycle_context import prepare_hosted_cycle_context
-
-        try:
-            cycle_context = await prepare_hosted_cycle_context(
-                execution_context, tenant_id=tenant_id, user_id=user_id,
-                strategy_id=strategy_id, config=cfg,
-                scheduled_trade_date=scheduled_trade_date,
-                **({"active_runtime_id": active_runtime_id, "cycle_run_id": run_id}
-                   if active_runtime_id is not None else {}),
-            )
-        except Exception as error:
-            return {
-                "task_id": run_id, "status": "skipped",
-                "error": f"registered_market_dated_execution_unavailable: {error}"[:300],
-                "signal_count": 0, "order_count": 0, "filled_count": 0,
-                **({
-                    "runtime_execution_context": error.runtime_inputs,
-                    "execution_context": error.provenance,
-                    "runtime_context_reconciliation": True,
-                } if getattr(error, "runtime_inputs", None) is not None else {}),
-            }
-        signal_run_id, gate_error = cycle_context.signal_run_id, None
-    else:
-        signal_run_id, gate_error = await _resolve_hosted_signal_run_id(tenant_id, user_id)
+    signal_run_id, gate_error = await _resolve_hosted_signal_run_id(tenant_id, user_id)
     if not signal_run_id:
         # 拿不到可用批次时按严格模式不下单；strict=0 可退回旧行为（仅告警）。
         strict = os.getenv(
@@ -264,17 +225,8 @@ async def run_simulation_cycle_for_active(
         pool_id=cfg.get("pool_id"),
         signal_run_id=signal_run_id,
         max_orders=int(cfg.get("max_orders_per_cycle") or 0) or None,
-        **({"cycle_context": cycle_context} if cycle_context is not None else {}),
     )
-    result = report_to_hosted_result(report)
-    if cycle_context is not None:
-        from backend.services.live_trading.services.manual_execution_context import (
-            saved_manual_inputs,
-        )
-
-        result["execution_context"] = cycle_context.provenance()
-        result["runtime_execution_context"] = saved_manual_inputs(cycle_context)
-    return result
+    return report_to_hosted_result(report)
 
 
 def _parse_started_at(value: Any, *, context=None) -> date | None:
@@ -677,6 +629,11 @@ class SimulationHostedScheduler:
             return False
         if not isinstance(active_data, dict):
             return False
+        from backend.services.simulation.services.legacy_jp_state import is_legacy_jp_runtime
+
+        if is_legacy_jp_runtime(active_data):
+            logger.warning("Native-JPY scheduled runtime is retained read-only: %s", key)
+            return False
         if str(active_data.get("mode") or "").upper() != "SIMULATION":
             return False
 
@@ -775,17 +732,8 @@ class SimulationHostedScheduler:
                 strategy_id=strategy_id,
                 live_trade_config=live_trade_config,
                 run_id=task_id,
-                **({
-                    "execution_context": active_data["execution_context"],
-                    "scheduled_trade_date": date.fromisoformat(decision.trade_date),
-                    "active_runtime_id": active_data.get("run_id"),
-                } if active_data.get("execution_context") is not None else {}),
             )
             if result.get("status") == "skipped":
-                if result.get("runtime_context_reconciliation"):
-                    from .hosted_runtime_context import publish_hosted_runtime_context
-
-                    publish_hosted_runtime_context(self.redis.client, key, active_data, result)
                 # 没有可用信号批次：本轮不建仓，作业标记为 skipped 而非失败。
                 # 必须释放分布式锁：锁 key 按 (trade_date, phase) 粒度、TTL 36h，
                 # 不释放会挡住同一窗口内后续轮询（30s 一轮/窗口 90s），信号迟到
@@ -825,10 +773,6 @@ class SimulationHostedScheduler:
                 result.get("status"),
                 result.get("filled_count"),
             )
-            if active_data.get("execution_context") is not None:
-                from .hosted_runtime_context import publish_hosted_runtime_context
-
-                publish_hosted_runtime_context(self.redis.client, key, active_data, result)
             await SimulationRebalanceJobService.mark_finished(
                 task_id,
                 status="succeeded",

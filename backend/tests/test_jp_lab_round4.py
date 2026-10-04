@@ -8,15 +8,22 @@ import duckdb
 import pandas as pd
 import pytest
 
-from backend.tests.test_jp_share_basis_review import (
-    native as native_fixture,
-    snapshot as snapshot_fixture,
-    publish,
-    DAYS,
-)
+from backend.services.engine.data_platform.jquants_import import import_jquants_snapshot
+from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+pytest_plugins = ["backend.tests.test_jp_data_platform"]
+DAYS = [date(2026, 9, day) for day in (28, 29, 30)]
 
-native = native_fixture
-snapshot = snapshot_fixture
+@pytest.fixture
+def native(snapshot, tmp_path, monkeypatch):
+    root = tmp_path / "quantjp"
+    monkeypatch.setenv("QM_QUANTJP_DATA_DIR", str(root))
+    return snapshot, root
+
+def publish(native):
+    source, root = native
+    published = import_jquants_snapshot(source, root)
+    return SimpleNamespace(data_version=published["version"], hub=QuantJPDataHub(root))
+
 from backend.services.engine.strategy_lab.engine.loop import run_backtest
 from backend.services.engine.strategy_lab.runner.worker import (
     _resolve_provider,
@@ -62,11 +69,9 @@ def test_full_weight_reserves_known_commission_slippage_and_fills(provider, slip
 
 
 def test_position_holding_days_counts_sessions_not_calendar_days(native):
-    from backend.services.engine.strategy_lab.engine.dated_broker import DatedLabBroker
-    from backend.services.engine.strategy_lab.engine.local_provider import (
-        bind_registered_context,
-    )
-
+    from backend.services.engine.strategy_lab.engine.broker import SimpleBroker
+    from backend.services.engine.strategy_lab.engine.local_provider import bind_registered_context
+    from backend.services.engine.strategy_lab.sdk.context import OrderIntent
     source, _ = native
     with duckdb.connect(str(source)) as conn:
         conn.execute("DELETE FROM research.calendar WHERE Date='2026-09-29'")
@@ -76,24 +81,14 @@ def test_position_holding_days_counts_sessions_not_calendar_days(native):
     ctx = Context()
     bind_registered_context(ctx, provider)
     ctx.commission = ctx.slippage = 0
-    broker = DatedLabBroker(ctx, provider, 100000)
-    broker.executor.execute_day(
-        DAYS[0],
-        [
-            {
-                "symbol": "JP72030",
-                "quantity": 100,
-                "side": "BUY",
-                "signal_date": "2026-09-25",
-                "order_id": "first",
-            }
-        ],
-    )
-    broker.prepare_day(pd.Timestamp(DAYS[2]))
+    broker = SimpleBroker(ctx, provider, 100000)
+    ctx._attach(data_provider=provider, broker=broker, cash=100000)
+    broker.process_day(pd.Timestamp(DAYS[0]), [OrderIntent(symbol="JP72030", side="buy", qty=100)])
+    broker.process_day(pd.Timestamp(DAYS[2]), [])
     assert ctx.position("JP72030").holding_days == 1
 
 
-def test_raw_event_and_history_match_position_cost_qfq_is_explicit(
+def test_adjusted_event_and_history_match_position_cost_raw_is_explicit(
     provider, monkeypatch
 ):
     original = provider.hub.fetch_daily_kline
@@ -122,7 +117,7 @@ def test_raw_event_and_history_match_position_cost_qfq_is_explicit(
                     bar.close,
                     ctx.position(bar.symbol).avg_cost,
                     ctx.history(bar.symbol, n=1).iloc[-1],
-                    ctx.history(bar.symbol, n=1, adjust="qfq").iloc[-1],
+                    ctx.history(bar.symbol, n=1, adjust="raw").iloc[-1],
                 )
             )
             assert not bar.close < ctx.position(bar.symbol).avg_cost * 0.9
@@ -132,7 +127,7 @@ def test_raw_event_and_history_match_position_cost_qfq_is_explicit(
         provider=provider,
         user_globals={"setup": setup, "on_bar": on_bar},
     )
-    assert seen and all(row == (100, 100, 100, 20) for row in seen)
+    assert seen and all(row == (100, 100, 100, 100) for row in seen)
 
 
 def test_registered_all_defaults_and_translator_keep_full_jp_configuration(provider):
@@ -158,6 +153,8 @@ def on_universe(ctx, date, snapshot):
     assert result.config["end"] == "2026-09-30"
     template = translate_sdk_to_template(code, run_id="native", provider=provider)
     assert template.config["market"] == "JP" and template.config["benchmark"] == "TOPIX"
+    assert template.config["event_price_basis"] == result.config["event_price_basis"] == "adjusted"
+    assert template.config["history_price_basis"] == "adjusted"
     assert template.config["universe"] == "all" and template.config["cash"] == 100000
     assert template.config["start"] and template.config["end"] == result.config["end"]
     assert not template.needs_review
@@ -193,7 +190,7 @@ def test_auxiliary_context_keeps_main_publication_when_current_changes(
             config={
                 "market": "JP",
                 "data_version": saved,
-                "execution_model": "dated_cash",
+                "execution_model": "simple",
                 "run_params": {"period": 5},
                 "stock_pool": "list:JP72030",
             },
@@ -209,7 +206,7 @@ def test_auxiliary_context_keeps_main_publication_when_current_changes(
         )
 
 
-def test_auxiliary_real_subruns_use_registered_cash_and_date_overrides(
+def test_auxiliary_real_subruns_use_original_broker_and_date_overrides(
     provider, monkeypatch
 ):
     from backend.services.engine.strategy_lab.overfit import runner
@@ -331,7 +328,7 @@ def test_watch_and_daily_scan_keep_main_publication_and_params(provider, monkeyp
 
     config = {
         "market": "JP",
-        "execution_model": "dated_cash",
+        "execution_model": "simple",
         "data_version": provider.reader.data_version,
         "run_params": {"period": 5},
         "stock_pool": "list:JP72030",
@@ -343,7 +340,7 @@ def test_watch_and_daily_scan_keep_main_publication_and_params(provider, monkeyp
     )
     stored = []
     monkeypatch.setattr(routers, "add_watch", lambda **kwargs: stored.append(kwargs))
-    code = "def setup(ctx):\n    ctx.universe='all'\n    ctx.cash=100000\n    assert ctx.param('period',default=20)==5\ndef on_bar(ctx,bar):\n    if bar.date.date().isoformat()=='2026-09-29':\n        ctx.buy(bar.symbol,qty=100)\n"
+    code = "def setup(ctx):\n    ctx.universe='all'\n    ctx.cash=100000\n    assert ctx.param('period',default=20)==5\ndef on_bar(ctx,bar):\n    if bar.date.date().isoformat()=='2026-09-30':\n        ctx.buy(bar.symbol,qty=100)\n"
     app = FastAPI()
     app.include_router(routers.router)
     response = TestClient(app).post(
@@ -362,7 +359,7 @@ def test_watch_and_daily_scan_keep_main_publication_and_params(provider, monkeyp
     }
     assert stored[0]["params"] == {"period": 5}
     monkeypatch.setattr(daily_scan, "list_watch", lambda: stored)
-    from backend.tests.test_jp_sync_watch_review import RecordingRedis
+    from backend.tests.jp_standard_fixtures import RecordingRedis
     redis = RecordingRedis()
     monkeypatch.setattr(
         daily_scan,
@@ -399,7 +396,7 @@ def test_watch_and_daily_scan_keep_main_publication_and_params(provider, monkeyp
     assert scan["signals"][0]["market"] == "JP"
     assert scan["signals"][0]["data_version"] == provider.reader.data_version
     assert scan["signals"][0]["date"] == "2026-09-30"
-    assert scan["signals"][0]["execution_date_mode"] == "published_daily_delayed"
+    assert scan["signals"][0]["execution_date_mode"] == "published_daily_close"
 
 
 def test_original_provider_context_and_translator_defaults_stay_cn():

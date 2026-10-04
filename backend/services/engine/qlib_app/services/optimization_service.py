@@ -20,7 +20,7 @@ from backend.services.engine.qlib_app.schemas.backtest import (
 from backend.services.engine.qlib_app.services.backtest_service import (
     QlibBacktestService,
 )
-from backend.services.engine.qlib_app.services.backtest_execution import (
+from backend.services.engine.qlib_app.services.market_backtest_config import (
     prepare_market_batch_request,
 )
 from backend.services.engine.qlib_app.utils.structured_logger import (

@@ -25,10 +25,6 @@ from backend.services.simulation.services.order_service import SimOrderService
 from backend.services.simulation.services.simulation_manager import (
     SimulationAccountManager,
 )
-from backend.services.simulation.services.dated_submission import (
-    execute_dated_submission,
-    prepare_dated_submission,
-)
 
 
 @dataclass
@@ -45,19 +41,11 @@ class SimulationSubmissionOutcome:
 
 
 class SimulationOrderSubmissionService:
-    def __init__(
-        self, db: AsyncSession, manager: SimulationAccountManager,
-        *, execution_context=None,
-    ):
+    def __init__(self, db: AsyncSession, manager: SimulationAccountManager):
         self.db = db
         self.manager = manager
         self.order_service = SimOrderService(db)
-        self.execution_context = execution_context
-        self.engine = (
-            SimulationExecutionEngine(db, manager, execution_context=execution_context)
-            if execution_context is not None
-            else SimulationExecutionEngine(db, manager)
-        )
+        self.engine = SimulationExecutionEngine(db, manager)
 
     async def submit_and_fill(
         self,
@@ -155,15 +143,6 @@ class SimulationOrderSubmissionService:
             if existing_order is not None:
                 return await self._build_duplicate_outcome(existing_order)
 
-        dated_bar = None
-        if self.execution_context is not None:
-            dated_bar = await prepare_dated_submission(
-                self.engine, tenant_id=tenant_id, user_id=user_id, symbol=symbol,
-                order_type=order_type, price=price, trade_action=trade_action,
-                position_side=position_side, is_margin_trade=is_margin_trade,
-                time_in_force=time_in_force, expires_at=expires_at,
-            )
-
         order = await self.order_service.create_order(
             tenant_id,
             user_id,
@@ -197,16 +176,7 @@ class SimulationOrderSubmissionService:
                 message="Order expired before execution",
             )
 
-        if self.execution_context is not None:
-            from types import SimpleNamespace
-
-            session_decision = SimpleNamespace(
-                can_execute=True,
-                target_trade_date=self.execution_context.trade_date,
-                final_state=None, retryable=False, message="dated_daily_open",
-            )
-        else:
-            session_decision = await self.engine.assess_execution_window(order)
+        session_decision = await self.engine.assess_execution_window(order)
         if session_decision.target_trade_date is not None:
             order.trading_session_date = session_decision.target_trade_date
         if not session_decision.can_execute:
@@ -240,19 +210,10 @@ class SimulationOrderSubmissionService:
 
         order.status = OrderStatus.SUBMITTED
         order.submitted_at = order.submitted_at or datetime.now(timezone.utc)
-        projection = await self.order_service.sync_order_projection(order)
-        if self.execution_context is not None:
-            if projection is None:
-                raise ValueError("Registered submission order projection is unavailable")
-            projection.trading_session_date = self.execution_context.trade_date
+        await self.order_service.sync_order_projection(order)
         await self.db.commit()
 
-        if self.execution_context is not None:
-            execution_result = await execute_dated_submission(
-                self.engine, order, dated_bar,
-            )
-        else:
-            execution_result = await self.engine.execute_order(order)
+        execution_result = await self.engine.execute_order(order)
         if not execution_result.success:
             if str(execution_result.message or "") == "Order expired before execution":
                 await self.engine.mark_expired(order, execution_result.message)

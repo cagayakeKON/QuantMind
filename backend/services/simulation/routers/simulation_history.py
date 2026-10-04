@@ -26,7 +26,6 @@ def _require_user_id(raw_user_id: str, tenant_id: str = "default") -> int:
 
 @router.get("/trades", response_model=list[SimTradeResponse])
 async def list_trades(
-    market: str | None = Query(default=None),
     portfolio_id: int | None = Query(default=None),
     symbol: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=1000),
@@ -44,7 +43,6 @@ async def list_trades(
         symbol=symbol,
         limit=limit,
         offset=offset,
-        market=market,
     )
     # 批量 enrich symbol_name，避免前端 N+1 调用 /stocks/{symbol}
     # trades 可能是 ORM 对象或缓存的 dict，统一处理
@@ -80,7 +78,6 @@ async def get_trade(
 
 @router.get("/trades/stats/summary", response_model=SimTradeStatsResponse)
 async def get_trade_stats(
-    market: str | None = Query(default=None),
     portfolio_id: int | None = Query(default=None),
     auth: AuthContext = Depends(get_auth_context),
     db: AsyncSession = Depends(get_read_db),
@@ -88,10 +85,7 @@ async def get_trade_stats(
 ):
     user_id = _require_user_id(auth.user_id, auth.tenant_id)
     service = SimTradeService(db, redis)
-    try:
-        stats = await service.get_stats(auth.tenant_id, user_id, portfolio_id=portfolio_id, market=market)
-    except (ValueError, NotImplementedError) as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    stats = await service.get_stats(auth.tenant_id, user_id, portfolio_id=portfolio_id)
     logger.info(
         "simulation trade stats ready: tenant_id=%s user_id=%s portfolio_id=%s total_trades=%s daily_points=%s",
         auth.tenant_id,

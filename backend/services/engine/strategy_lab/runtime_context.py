@@ -16,12 +16,12 @@ def auxiliary_context(
         if (
             result is not None
             and str(options.get("market") or "").upper() == "JP"
-            and config.get("execution_model") != "dated_cash"
+            and not config.get("data_version")
         ):
             raise ValueError(
                 "The source Lab run does not declare a registered Japanese publication"
             )
-        if config.get("execution_model") == "dated_cash":
+        if config.get("market") == "JP" and config.get("data_version"):
             if options.get("market") not in (None, config["market"]):
                 raise ValueError("Lab auxiliary market differs from its source run")
             if options.get("data_version") not in (None, config["data_version"]):

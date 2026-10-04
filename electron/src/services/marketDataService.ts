@@ -1,7 +1,8 @@
 // 市场数据服务API接口 - 增强版股票搜索
 import axios from 'axios';
 import store from '../store';
-import { normalizeStockCode } from '../utils/portfolioUtils';
+import { normalizeStockCode, stockMarketFromCode } from '../utils/portfolioUtils';
+import { getMarketConfig } from '../config/marketConfig';
 import type { AppMarket } from '../store/slices/uiSlice';
 
 export interface StockSnapshotContext {
@@ -142,7 +143,7 @@ class MarketDataService {
   }
 
   // 增强版股票搜索 - 优先匹配本地缓存
-  async searchStocks(keyword: string, limit: number = 10): Promise<SearchResult> {
+  async searchStocks(keyword: string, limit: number = 10, market?: AppMarket): Promise<SearchResult> {
     console.log('增强版股票搜索:', { keyword, limit });
 
     if (!keyword?.trim()) {
@@ -158,7 +159,7 @@ class MarketDataService {
       const response = await apiClient.get('/api/v1/stocks/search', {
         params: {
           q: keyword.trim(),
-          market: store.getState().ui.currentMarket,
+          market: market ?? store.getState().ui.currentMarket,
           keyword: keyword.trim(),
           limit: Math.min(Math.max(limit, 1), 100), // 限制在1-100之间
           offset: 0,
@@ -240,14 +241,19 @@ class MarketDataService {
       };
     }
 
+    const selectedMarket = store.getState().ui.currentMarket;
+    let detailMarket: AppMarket = selectedMarket;
+
     try {
       if (snapshotContext && (!snapshotContext.asof || !snapshotContext.data_version)) {
         return {success: false, message: '日期股票资料需要日期及已发布版本'};
       }
       const normalized = snapshotContext ? normalizeStockCode(code, snapshotContext.market) : this.normalizeStockSymbol(code);
+      const normalizedPrefix = normalizeStockCode(normalized);
+      detailMarket = getMarketConfig('JP').stockCodePattern?.test(normalizedPrefix) ? 'JP' : selectedMarket === 'JP' ? stockMarketFromCode(normalizedPrefix) : selectedMarket;
       const normalizedCode = encodeURIComponent(normalized);
       const response = await apiClient.get(`/api/v1/stocks/${normalizedCode}`, {
-        params: snapshotContext ? {...snapshotContext} : {market: store.getState().ui.currentMarket},
+        params: snapshotContext ? {...snapshotContext} : {market: detailMarket},
       });
       const raw = response.data || {};
       const payload = (raw?.data && typeof raw.data === 'object') ? raw.data : raw;
@@ -282,7 +288,9 @@ class MarketDataService {
       }
 
       if (snapshotContext) return {success: false, message: `股票 ${code} 在所选日期没有名称资料`};
-      const searchResp = await this.searchStocks(code.trim(), 10);
+      const searchResp = detailMarket !== selectedMarket
+        ? await this.searchStocks(code.trim(), 10, detailMarket)
+        : await this.searchStocks(code.trim(), 10);
       const exact = (searchResp.data || []).find((item) => {
         const symbol = String(item.symbol || '').toUpperCase();
         const itemCode = String(item.code || '').toUpperCase();
@@ -312,7 +320,9 @@ class MarketDataService {
       console.error('获取股票详情失败:', error);
       if (snapshotContext) return {success: false, message: '日期股票资料不可用'};
       try {
-        const searchResp = await this.searchStocks(code.trim(), 10);
+        const searchResp = detailMarket !== selectedMarket
+          ? await this.searchStocks(code.trim(), 10, detailMarket)
+          : await this.searchStocks(code.trim(), 10);
         const exact = (searchResp.data || []).find((item) => {
           const symbol = String(item.symbol || '').toUpperCase();
           const itemCode = String(item.code || '').toUpperCase();
@@ -546,7 +556,10 @@ class MarketDataService {
 
   // 自动补全/规范化股票代码格式 (转换为 600000.SH 格式)
   normalizeStockSymbol(input: string): string {
-    if (store.getState().ui.currentMarket === 'JP') return normalizeStockCode(input, 'JP');
+    const normalized = normalizeStockCode(input);
+    if (getMarketConfig('JP').stockCodePattern?.test(normalized)) return normalized;
+    // Undated shared holdings retain bare HK codes. Japanese aliases require
+    // explicit JP symbols or the dated request's explicit market context.
     const cleaned = input.trim().toUpperCase();
 
     // 1. 如果包含点且格式正确 (000001.SZ), 直接返回

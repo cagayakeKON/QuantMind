@@ -396,25 +396,6 @@ async def analyze_style_attribution(
         if not result:
             raise ValueError(f"回测结果不存在: {request.backtest_id}")
 
-        feature_loader = None
-        context_config = getattr(result, "config", None)
-        context_config = context_config if isinstance(context_config, dict) else {}
-        market = getattr(result, "market", None) or context_config.get("market")
-        provider = LOCAL_MARKET_PROVIDERS.get(market) if isinstance(market, str) else None
-        if provider and provider.style_feature_loader_factory:
-            result = await persistence.get_result(
-                request.backtest_id,
-                tenant_id=request.tenant_id,
-                include_fields=[
-                    "style_attribution", "positions", "config", "backtest_id",
-                    "market", "data_version", "advanced_stats",
-                ],
-            )
-            if not result:
-                raise ValueError(f"回测结果不存在: {request.backtest_id}")
-            module, function = provider.style_feature_loader_factory.rsplit(".", 1)
-            feature_loader = getattr(import_module(module), function)(result)
-
         # 优先使用已缓存的风格归因结果
         cached = result.style_attribution
         if cached and isinstance(cached, dict) and cached.get("portfolio"):
@@ -443,6 +424,26 @@ async def analyze_style_attribution(
         positions = result.positions or []
         if not positions:
             return StyleAttributionResponse(factors=[], data_available=False)
+
+        feature_loader = None
+        context_config = getattr(result, "config", None)
+        context_config = context_config if isinstance(context_config, dict) else {}
+        market = getattr(result, "market", None) or context_config.get("market")
+        provider = LOCAL_MARKET_PROVIDERS.get(market) if isinstance(market, str) else None
+        if provider and provider.style_feature_loader_factory:
+            result = await persistence.get_result(
+                request.backtest_id,
+                tenant_id=request.tenant_id,
+                include_fields=[
+                    "style_attribution", "positions", "config", "backtest_id",
+                    "market", "data_version", "advanced_stats",
+                ],
+            )
+            if not result:
+                raise ValueError(f"回测结果不存在: {request.backtest_id}")
+            module, function = provider.style_feature_loader_factory.rsplit(".", 1)
+            feature_loader = getattr(import_module(module), function)(result)
+
 
         config = result.config or {}
         start_date = config.get("start_date", "")

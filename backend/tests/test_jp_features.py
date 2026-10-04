@@ -9,6 +9,7 @@ import pytest
 from backend.services.engine.data_platform.jp_features import build_jp_features
 from backend.services.engine.data_platform.jp_labels import (
     forward_open_labels,
+    forward_price_labels,
     last_label_session,
 )
 from backend.services.engine.data_platform.jquants_import import import_jquants_snapshot
@@ -148,8 +149,9 @@ def test_long_label_horizon_reads_exact_exit_session_beyond_calendar_padding():
 
 
 @pytest.mark.parametrize("mode", ["return", "classification"])
+@pytest.mark.parametrize("deal_price", ["open", "close"])
 def test_actual_training_loader_uses_jp_opens_and_canonical_pool(
-    snapshot, tmp_path, monkeypatch, mode
+    snapshot, tmp_path, monkeypatch, mode, deal_price
 ):
     root = tmp_path / "jp"
     import_jquants_snapshot(snapshot, root)
@@ -159,6 +161,8 @@ def test_actual_training_loader_uses_jp_opens_and_canonical_pool(
             final = pd.to_datetime(frame["date"]).eq(pd.Timestamp("2026-09-30"))
             frame.loc[final & frame["symbol"].eq("72030.JP"), "open"] = 54
             frame.loc[final & frame["symbol"].eq("216A0.JP"), "open"] = 36
+            frame.loc[final & frame["symbol"].eq("72030.JP"), "close"] = 1
+            frame.loc[final & frame["symbol"].eq("216A0.JP"), "close"] = 100
             save(index, frame, names)
 
         fake_evaluator(hub, cache, batch_size, workers, start, end, change)
@@ -177,14 +181,15 @@ def test_actual_training_loader_uses_jp_opens_and_canonical_pool(
         "market": "JP",
         "factor_source": "l1_factors",
         "target_mode": mode,
+        "deal_price": deal_price,
     }
     result, names = loader.load_data(**args, pool_symbols=["7203.T", "JP216A0"])
     assert names == ["feature_1"]
     assert set(result.symbol) == {"JP72030", "JP216A0"}
     assert result.trade_date.eq(pd.Timestamp("2026-09-28")).all()
     labels = result.set_index("symbol").label
-    assert labels["JP72030"] == (1 if mode == "classification" else 0.5)
-    assert labels["JP216A0"] == 0
+    assert labels["JP72030"] == ((1 if mode == "classification" else 0.5) if deal_price == "open" else 0)
+    assert labels["JP216A0"] == (0 if deal_price == "open" else 1 if mode == "classification" else 0.5)
     with pytest.raises(ValueError, match="pool has no observations"):
         loader.load_data(**args, pool_symbols=["JP99990"])
 
@@ -274,3 +279,18 @@ def test_saved_sync_updates_features_before_cache_and_reports_failure(
     assert calls == (
         ["prices", "features"] if feature_failure else ["prices", "features", "cache"]
     )
+
+
+@pytest.mark.parametrize("deal_price", ["open", "close"])
+def test_selected_jp_price_labels_keep_exact_sessions_and_suspension(deal_price):
+    days = pd.to_datetime(["2026-09-18", "2026-09-24", "2026-09-25"])
+    frame = pd.DataFrame({"symbol": ["JP72030"] * 3, "trade_date": days,
+                          "open": [10, 20, 30], "close": [20, 30, 60], "volume": [100] * 3})
+    labels = forward_price_labels(frame, days, 1, deal_price=deal_price)
+    assert labels.iloc[0] == (0.5 if deal_price == "open" else 1.0)
+    assert labels.iloc[1:].isna().all()
+    frame.loc[2, "volume"] = 0
+    assert forward_price_labels(frame, days, 1, deal_price=deal_price).isna().all()
+    frame.loc[2, "volume"] = 100
+    frame.loc[2, deal_price] = float("nan")
+    assert forward_price_labels(frame, days, 1, deal_price=deal_price).isna().all()

@@ -152,7 +152,7 @@ async def test_public_date_range_is_pinned_to_actual_execution_not_new_raw(
 ):
     from backend.services.simulation.jp.data import open_execution_data
     from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestRequest
-    from backend.services.engine.qlib_app.services.backtest_execution import (
+    from backend.services.engine.qlib_app.services.market_backtest_config import (
         prepare_market_batch_request,
     )
 
@@ -223,7 +223,7 @@ async def test_alpha_admin_prepares_real_japan_adapter_and_reports_parquet_publi
         )
         assert result.status_code == 200
         payload = result.json()
-        assert payload["success"] and payload["data"]["status"] == "completed"
+        assert payload["success"] and payload["data"]["status"] == "completed", payload
         assert payload["data"]["data_version"] == version
         assert "不包含在线行情同步" in payload["data"]["message"]
         state = (await client.get("/alpha-agent-markets")).json()["data"]["markets"][0]

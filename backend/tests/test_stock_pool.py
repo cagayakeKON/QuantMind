@@ -1012,7 +1012,7 @@ class TestP3SimulationAndLiveBridge:
         # 池为空/零命中 → 返回空列表（实盘不下单），不退化成全市场
         assert "拒绝下单" in src
         # 三个调用点都要带上池
-        assert src.count("pool_id=_resolve_pool_id_from_prepared(prepared)") == 4
+        assert src.count("pool_id=_resolve_pool_id_from_prepared(prepared)") == 3
 
     def test_live_pool_resolution_priority(self):
         """live_trade_config.pool_id 优先，其次 request_payload.pool_id。"""

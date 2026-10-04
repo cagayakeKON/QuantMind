@@ -9,17 +9,12 @@ from qlib.data import D
 
 from backend.services.engine.data_platform.jquants_import import import_jquants_snapshot
 from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
-from backend.services.engine.qlib_app.services.market_strategy_context import (
-    MarketStrategyContext,
-    StrategyContextSpec,
-)
-from backend.services.simulation.jp import backtest, feature_snapshot
 from backend.services.simulation.jp.feature_snapshot import JPFeatureSnapshotReader
 from backend.services.simulation.jp.rules import RuleDataMissing
 from backend.shared.fundamental_aligner import FundamentalAligner
 from backend.tests.test_fundamental_aligner_features_daily import _FakeHub
 
-pytest_plugins = ["backend.tests.test_jp_model_backtest"]
+pytest_plugins = ["backend.tests.jp_standard_fixtures"]
 
 
 def add_valuations(snapshot):
@@ -143,102 +138,69 @@ def test_optional_reader_preserves_existing_comparator(
     assert default.filter_instruments("2026-09-28", symbols, constraint) == expected
 
 
-def test_context_clips_reader_date_and_records_swallowed_errors(monkeypatch):
-    calls = []
-
-    def read(day, symbols, columns):
-        calls.append(day)
-        raise RuleDataMissing("missing test feature")
-
-    monkeypatch.setattr(feature_snapshot, "create_reader", lambda spec: read)
-    context = object.__new__(MarketStrategyContext)
-    context.spec = StrategyContextSpec(
-        "unused",
-        "cn",
-        "fixture",
-        "unused",
-        feature_snapshot_reader="backend.services.simulation.jp.feature_snapshot.create_reader",
+def test_original_recording_strategy_accepts_publication_bound_fundamental_aligner(
+    valuation_reader,
+):
+    from backend.services.engine.qlib_app.utils.recording_strategy import (
+        RedisRecordingStrategy,
     )
-    context.errors = []
-    context.advance("2026-09-28", "2026-09-29")
-    aligner = context.fundamental_aligner()
-    with pytest.raises(RuleDataMissing):
-        aligner.filter_instruments("2026-09-29", ["JP216A0"], {"pe_ttm_max": 20})
-    assert calls == [pd.Timestamp("2026-09-28")]
-    with pytest.raises(ValueError, match="missing test feature"):
-        context.assert_reads_succeeded()
+
+    strategy = RedisRecordingStrategy(
+        signal=pd.Series(
+            [1.0],
+            index=pd.MultiIndex.from_tuples(
+                [(pd.Timestamp("2026-09-28"), "jp_216a0")],
+                names=["datetime", "instrument"],
+            ),
+        ),
+        topk=5,
+        n_drop=1,
+        f_pe_ttm_max=20,
+    )
+    strategy._market_fundamental_aligner = FundamentalAligner(
+        snapshot_loader=valuation_reader
+    )
+    scores = pd.Series({"jp_72030": 0.9, "jp_216a0": 0.8})
+    actual = strategy.apply_fundamental_filter(scores, pd.Timestamp("2026-09-28"))
+    assert actual.index.tolist() == ["jp_216a0"]
+    assert actual.iloc[0] == 0.8
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["config", "instance", "missing"])
-async def test_public_strategy_filter_in_real_child(
-    model_data, snapshot, tmp_path, monkeypatch, runtime_factory, mode
+@pytest.mark.parametrize("missing", [False, True])
+async def test_standard_runtime_binds_jp_fundamental_reader(
+    model_data, snapshot, tmp_path, monkeypatch, runtime_factory, missing
 ):
-    request, directory, meta = model_data
+    from backend.tests.test_jp_standard_qlib_backtest import (
+        ready_service,
+        prepare_standard_predictions,
+    )
+
+    request, model, _ = model_data
     add_valuations(snapshot)
-    root = tmp_path / "filtered-strategy"
-    publication = import_jquants_snapshot(snapshot, root)
+    root = tmp_path / "filtered"
+    request.jp_data_version = import_jquants_snapshot(snapshot, root)["version"]
     monkeypatch.setenv("QM_QUANTJP_DATA_DIR", str(root))
-    meta = {**meta, "jp_data_version": publication["version"]}
+    request.strategy_params.signal = str(model / "pred.parquet")
     pd.DataFrame(
         {
-            "symbol": ["JP72030", "JP216A0"],
-            "trade_date": pd.to_datetime(["2026-09-28"] * 2),
-            "pred": [0.9, 0.8],
-            "split": ["test"] * 2,
+            "symbol": ["JP72030", "JP216A0"] * 2,
+            "trade_date": pd.to_datetime(["2026-09-28"] * 2 + ["2026-09-29"] * 2),
+            "pred": [0.9, 0.8] * 2,
+            "split": ["test"] * 4,
         }
-    ).to_parquet(directory / "pred.parquet")
+    ).to_parquet(model / "pred.parquet")
     request.strategy_type = "CustomStrategy"
-    field = "f_net_profit_ttm_min" if mode == "missing" else "f_pe_ttm_max"
-    request.strategy_content = f"""
-STRATEGY_CONFIG = {{
-    'class': 'RedisRecordingStrategy',
-    'module_path': 'backend.services.engine.qlib_app.utils.recording_strategy',
-    'kwargs': {{'signal': '<PRED>', 'topk': 5, 'n_drop': 1,
-                '{field}': 20, 'f_total_mv_min': 2000000000}}
-}}
-"""
-    if mode == "instance":
-        request.strategy_content = """
-import pandas as pd
-from qlib.backtest.signal import Signal
-from backend.services.engine.qlib_app.utils.recording_strategy import RedisRecordingStrategy
-class OwnSignal(Signal):
-    def get_signal(self, start_time=None, end_time=None):
-        return pd.Series({'jp_72030': 0.9, 'jp_216a0': 0.8})
-def get_strategy_instance():
-    return RedisRecordingStrategy(signal=OwnSignal(), topk=5, n_drop=1,
-                                  f_pe_ttm_max=20, f_total_mv_min=2000000000)
-"""
-    original_provider = D._provider
-
-    async def resolve(*args):
-        return directory, meta
-
-    monkeypatch.setattr(backtest, "resolve_model", resolve)
-    saved = []
-
-    async def save(**kwargs):
-        saved.append(kwargs["status"])
-
-    result = await runtime_factory(SimpleNamespace(save_run=save)).run_backtest(request)
-    if mode == "missing":
-        assert result.status == "failed"
-        assert "net_profit_ttm" in result.error_message
-        assert saved == ["running", "failed"]
+    field = "f_net_profit_ttm_min" if missing else "f_pe_ttm_max"
+    request.strategy_content = (
+        "STRATEGY_CONFIG = {'class':'RedisRecordingStrategy','module_path':'backend.services.engine.qlib_app.utils.recording_strategy','kwargs':{'signal':'<PRED>','topk':5,'n_drop':1,'%s':20}}"
+        % field
+    )
+    service, store, _ = ready_service(runtime_factory, monkeypatch)
+    result = await service.run_backtest(request)
+    if missing:
+        assert result.status == "failed" and "net_profit_ttm" in result.error_message
     else:
-        assert result.status == "completed", result.error_message
-        assert result.config["strategy_decision_class"] == "RedisRecordingStrategy"
-        assert [(row["symbol"], row["quantity"]) for row in result.trades] == [
-            ("JP216A0", 1800)
-        ]
-        assert float(result.trades[0]["price"]) == 50
-        assert result.trades[0]["commission"] == 0
-        assert result.trades[0]["settlement_date"] == "2026-10-01"
-        assert (
-            sum(float(f["amount"]) for f in result.advanced_stats["cash_funds"])
-            == 10000
-        )
-        assert result.equity_curve[-1]["value"] == 100000
-        assert saved == ["running", "completed"]
-    assert D._provider is original_provider
+        assert result.status == "completed", result.full_error
+        assert {row["symbol"] for row in result.trades} == {"jp_216a0"}
+    assert [row["status"] for row in store.saved] == ["running", result.status]

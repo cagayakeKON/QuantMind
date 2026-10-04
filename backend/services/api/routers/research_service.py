@@ -3330,11 +3330,11 @@ async def predict_single_stock(
 
     # 7. 多模型共识（真实当日各模型分数）
     if market.upper() == "JP":
-        # Labels start at the next open; the as-of close cannot anchor a
-        # tradable price forecast before that entry price is known.
+        # Labels start at the next configured entry price (open or close).
+        # The as-of close cannot anchor that future entry before it is known.
         forecast_curve = []
         quantile_prediction = None
-        forecast_warning = "日股模型预测下一现金交易日开盘后的收益；当前收盘价不能作为开盘入场价，仅展示真实模型分数。"
+        forecast_warning = "日股模型预测下一现金交易日约定入场价之后的收益；当前收盘价不能代替该入场价，仅展示真实模型分数。"
     consensus = []
     for r in consensus_rows:
         fs = float(r["fusion_score"] or 0.0)

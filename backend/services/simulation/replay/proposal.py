@@ -11,23 +11,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any
 
 from backend.services.simulation.services.local_market_data import DailyBar
-
-
-class ReplayConfirmationRules(Protocol):
-    """Optional registered-market facts for one disposable confirmation scope."""
-
-    required_errors: tuple[type[ValueError], ...]
-
-    def symbol(self, code: str) -> str: ...
-
-    def quantity(self, symbol: str, side: str, quantity: int) -> int: ...
-
-    def validate_order(
-        self, symbol: str, side: str, quantity: int, proposal: dict
-    ) -> str | None: ...
+from backend.shared.stock_utils import StockCodeUtil
 
 
 def resolve_stop_fill_price(bar: DailyBar, stop_price: float) -> float:
@@ -40,6 +27,18 @@ def resolve_stop_fill_price(bar: DailyBar, stop_price: float) -> float:
     price = min(stop_price, bar.open) if bar.open > 0 else stop_price
     if bar.limit_down > 0:
         price = max(price, bar.limit_down)
+    if StockCodeUtil.is_jp_symbol(bar.symbol) and bar.price_tick > 0:
+        from decimal import Decimal
+        from backend.services.simulation.jp.rules import round_price
+
+        price = float(
+            round_price(
+                Decimal(str(price)),
+                "SELL",
+                bar.trade_date,
+                {"scale_category": bar.tick_category},
+            )
+        )
     return round(price, 4)
 
 
@@ -133,8 +132,6 @@ def validate_confirmed(
     proposals: list[dict[str, Any]],
     account_data: dict[str, Any],
     lot_size: int = 100,
-    *,
-    rules: ReplayConfirmationRules | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """服务端复校验用户确认清单，返回 (accepted, rejected)。
 
@@ -144,30 +141,13 @@ def validate_confirmed(
     - 买入向下取整到整手；卖出允许零头（清仓）
     - 卖出不超可卖量；买入累计不超可用现金（按提案顺序）
     - 止损笔强制执行，用户剔除也加回
-
-    可选 rules 只提供已注册市场的代码/单位与资金校验；在一次确认的
-    账户副本中预演，不落库。涉及本地数据读取的调用方应放在线程执行。
     """
-    if rules is not None:
-        proposals = [dict(p, symbol=rules.symbol(p["symbol"])) for p in proposals]
     by_key = {(p["symbol"], p["side"]): p for p in proposals}
     confirmed_map: dict[tuple[str, str], int] = {}
     rejected: list[dict[str, Any]] = []
 
     for c in confirmed:
         sym = str(c.get("symbol") or "").upper()
-        if rules is not None:
-            try:
-                sym = rules.symbol(sym)
-            except ValueError:
-                rejected.append(
-                    {
-                        "symbol": sym,
-                        "side": str(c.get("side") or "").upper(),
-                        "reason": "INVALID_SYMBOL",
-                    }
-                )
-                continue
         side = str(c.get("side") or "").upper()
         key = (sym, side)
         p = by_key.get(key)
@@ -193,16 +173,13 @@ def validate_confirmed(
             )
             continue
         # 买入必须整手；卖出允许零头以便清仓
-        if rules is not None:
-            try:
-                qty = rules.quantity(sym, side, qty)
-            except rules.required_errors:
-                raise
-            except ValueError as error:
-                rejected.append({"symbol": sym, "side": side, "reason": str(error)})
-                continue
-        elif side == "BUY" and lot_size > 0:
-            qty = (qty // lot_size) * lot_size
+        unit = (
+            int(p.get("trading_unit") or lot_size)
+            if StockCodeUtil.is_jp_symbol(sym)
+            else lot_size
+        )
+        if side == "BUY" and unit > 0:
+            qty = (qty // unit) * unit
             if qty <= 0:
                 rejected.append(
                     {"symbol": sym, "side": side, "reason": "BELOW_LOT_SIZE"}
@@ -228,12 +205,7 @@ def validate_confirmed(
         sym, side = key
         px = float(p["est_price"])
 
-        if rules is not None:
-            reason = rules.validate_order(sym, side, qty, p)
-            if reason:
-                rejected.append({"symbol": sym, "side": side, "reason": reason})
-                continue
-        elif side == "SELL":
+        if side == "SELL":
             pos = positions.get(sym) or {}
             avail = pos.get("available_volume")
             cap = float(pos.get("volume", 0)) if avail is None else float(avail)

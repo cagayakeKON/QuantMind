@@ -182,14 +182,7 @@ class SimulationFundSnapshotService:
         # 同一用户跨市场账户（CN/HK/US/...）合并为一条用户级快照：
         # 资产字段累加，盈亏在合并后的总资产上计算（与台账口径一致）。
         grouped: dict[tuple[str, str], dict[str, Decimal]] = {}
-        from backend.services.simulation.services.account_context import (
-            registered_account_input_adapter,
-        )
-
         for key in keys:
-            # Native currency caches must not enter the legacy CNY aggregate.
-            if registered_account_input_adapter(str(key).rsplit(":", 1)[-1]):
-                continue
             parsed = _parse_account_key(str(key))
             if not parsed:
                 continue
@@ -201,8 +194,15 @@ class SimulationFundSnapshotService:
                 account = json.loads(raw)
             except Exception:
                 continue
+            from backend.services.simulation.services.legacy_jp_state import (
+                is_legacy_jp_native,
+            )
 
-            if registered_account_input_adapter(str(account.get("market") or "")):
+            if is_legacy_jp_native(account):
+                logger.warning(
+                    "Native-JPY cache excluded from base-currency fund aggregation: %s",
+                    key,
+                )
                 continue
 
             bucket = grouped.setdefault(
@@ -225,6 +225,21 @@ class SimulationFundSnapshotService:
 
         rows: list[dict[str, object]] = []
         for (tenant_id, user_id), bucket in grouped.items():
+            from backend.services.simulation.services.legacy_jp_state import (
+                LegacyJPNativeState,
+                require_standard_account,
+            )
+
+            async with get_session(read_only=True) as metadata_session:
+                try:
+                    await require_standard_account(metadata_session, tenant_id, user_id)
+                except LegacyJPNativeState:
+                    logger.warning(
+                        "Native-JPY ledger excluded from fund snapshot: tenant=%s user=%s",
+                        tenant_id,
+                        user_id,
+                    )
+                    continue
             row = {
                 "tenant_id": tenant_id,
                 "user_id": user_id,

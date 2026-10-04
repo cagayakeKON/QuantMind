@@ -1,7 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeStockCode, toSuffixCode } from '../portfolioUtils';
+import { normalizeStockCode, stockMarketFromCode, toSuffixCode } from '../portfolioUtils';
 
 describe('Japanese security codes', () => {
+  it.each([
+    ['JP72030', 'JP'], ['7203.T', 'JP'], ['600036.SH', 'CN'],
+    ['00700.HK', 'HK'], ['JPM', 'US'], ['JPX', 'US'], ['JPST', 'US'],
+    ['BTCUSDT', 'CRYPTO'], ['CL.FUT', 'FUTURES'],
+  ])('identifies the actual holding market for %s', (code, market) => {
+    expect(stockMarketFromCode(code)).toBe(market);
+  });
   it.each(['JP72030', '72030.JP', '7203.T', 'jp_72030'])('normalizes explicit %s', (code) => {
     expect(normalizeStockCode(code)).toBe('JP72030');
     expect(toSuffixCode(code)).toBe('72030.JP');

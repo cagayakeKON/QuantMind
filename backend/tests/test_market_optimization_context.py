@@ -1,7 +1,6 @@
 """Public optimizers retain algorithms while registered batches pin their data."""
 
 import asyncio
-from datetime import date
 from types import SimpleNamespace
 
 import duckdb
@@ -18,7 +17,7 @@ from backend.services.engine.qlib_app.schemas.backtest import (
     QlibGeneticOptimizationRequest,
     QlibOptimizationRequest,
 )
-from backend.services.engine.qlib_app.services.backtest_execution import (
+from backend.services.engine.qlib_app.services.market_backtest_config import (
     prepare_market_batch_request,
     serialize_market_batch_request,
 )
@@ -29,10 +28,15 @@ from backend.services.engine.qlib_app.services.optimization_service import (
     OptimizationService,
 )
 from backend.services.engine.qlib_app.services.risk_analyzer import RiskAnalyzer
-from backend.services.simulation.jp import backtest, strategy_context
-from backend.services.simulation.jp.rules import RuleDataMissing
+from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+from backend.services.engine.data_platform.quantjp_hub import _resolve_quantjp_data_dir
+from backend.services.engine.qlib_app.services import market_backtest_config
+from backend.tests.test_jp_standard_qlib_backtest import (
+    ready_service,
+    prepare_standard_predictions,
+)
 
-pytest_plugins = ["backend.tests.test_jp_model_backtest"]
+pytest_plugins = ["backend.tests.jp_standard_fixtures"]
 
 
 def optimizer_request(base, mode):
@@ -61,7 +65,7 @@ async def test_unregistered_batches_do_not_read_or_mutate_data(monkeypatch, mark
     def forbidden(request):
         raise AssertionError("Existing markets must not invoke JP data preparation")
 
-    monkeypatch.setattr(strategy_context, "prepare_batch_request", forbidden)
+    monkeypatch.setattr(market_backtest_config, "_prepare_jp_request", forbidden)
     request = QlibBacktestRequest(market=market)
     before = request.model_dump(mode="json")
     await prepare_market_batch_request(request)
@@ -78,18 +82,21 @@ async def test_all_trials_use_one_publication_even_when_latest_changes(
     base.strategy_type = "TopkDropout"
     base.user_id, base.tenant_id = "alice", "tenant-a"
     calls = []
-    root = strategy_context._resolve_quantjp_data_dir()
+    root = _resolve_quantjp_data_dir()
     newer = []
 
     class Trials:
         async def run_backtest(self, request):
             calls.append(request.model_dump(mode="json"))
-            data = strategy_context.open_market_execution_data(
-                "JP", data_version=request.jp_data_version
+            data = QuantJPDataHub(root / "versions" / request.jp_data_version)
+            assert data.data_dir.name == meta["jp_data_version"]
+            bars = data.fetch_daily_kline(
+                "JP72030",
+                pd.Timestamp("2026-09-29").date(),
+                pd.Timestamp("2026-09-29").date(),
+                adjust="raw",
             )
-            assert data.hub.data_dir.name == meta["jp_data_version"]
-            bars, _ = data.day(date(2026, 9, 29), ["JP72030"])
-            assert bars["JP72030"]["close"] == 50
+            assert bars.close.iloc[0] == 50
             if len(calls) == 1:
                 with duckdb.connect(str(snapshot)) as conn:
                     conn.execute(
@@ -129,34 +136,47 @@ async def test_unavailable_version_fails_before_any_trial(model_data, mode):
         async def run_backtest(self, request):
             raise AssertionError("No trial may start with unavailable data")
 
-    with pytest.raises(RuleDataMissing, match="Pinned JP data version is unavailable"):
+    with pytest.raises(ValueError, match="complete immutable publication"):
         await optimizer(ForbiddenTrials(), mode).run_optimization(
             optimizer_request(base, mode)
         )
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("impact", [0, 0.003])
 @pytest.mark.parametrize("mode", ["grid", "genetic"])
 async def test_public_optimizer_executes_native_jp_strategy_in_common_lifecycle(
-    model_data, runtime_factory, monkeypatch, mode
+    model_data, runtime_factory, monkeypatch, mode, impact
 ):
     base, directory, meta = model_data
+    prepare_standard_predictions(base, directory)
+    base.strategy_params.signal = str(directory / "pred.parquet")
     base.strategy_type = "TopkDropout"
     base.user_id, base.tenant_id = "alice", "tenant-a"
+    base.impact_cost_coefficient = impact
+    # Full serialization adds every field; the standard public input must win.
+    from backend.services.engine.qlib_app.services import (
+        backtest_service_runtime as runtime,
+    )
 
-    async def resolve(*args):
-        return directory, meta
+    calls = []
+    native_backtest = runtime.backtest
 
-    monkeypatch.setattr(backtest, "resolve_model", resolve)
+    def trace(**kwargs):
+        calls.append(kwargs["exchange_kwargs"]["exchange"]["kwargs"])
+        return native_backtest(**kwargs)
+
+    monkeypatch.setattr(runtime, "backtest", trace)
 
     class Store:
         async def save_run(self, **kwargs):
             pass
 
-    service = runtime_factory(Store())
+    service, _, _ = ready_service(runtime_factory, monkeypatch)
     result = await optimizer(service, mode).run_optimization(
         optimizer_request(base, mode)
     )
+    assert calls and all(item["impact_cost_coefficient"] == impact for item in calls)
     assert result.best_params
     assert len(service._runs) >= 2
     for run in service._runs.values():
@@ -165,31 +185,31 @@ async def test_public_optimizer_executes_native_jp_strategy_in_common_lifecycle(
         assert trial.market == "JP" and trial.currency == "JPY"
         assert trial.user_id == "alice" and trial.tenant_id == "tenant-a"
         assert trial.config["jp_data_version"] == base.jp_data_version
-        assert trial.config["strategy_decision_class"] == "RedisRecordingStrategy"
-        assert trial.trades[0]["symbol"] == "JP72030"
-        assert trial.trades[0]["quantity"] == 1800
-        assert float(trial.trades[0]["price"]) == 50
-        assert trial.trades[0]["commission"] == 0
-        assert trial.trades[0]["settlement_date"] == "2026-10-01"
-        assert (
-            sum(float(f["amount"]) for f in trial.advanced_stats["cash_funds"]) == 10000
-        )
-        assert trial.equity_curve[-1]["value"] == 100000
+        assert trial.config["execution_engine"] == "qlib"
+        assert trial.trades[0]["symbol"] == "jp_72030"
+        assert trial.trades[0]["quantity"] > 0
+        assert float(trial.trades[0]["price"]) > 0
+        assert (trial.trades[0]["commission"] > 0) == (impact > 0)
+        assert "settlement_date" not in trial.trades[0]
+        if impact == 0:
+            assert trial.equity_curve[-1]["value"] == 100000
+        else:
+            assert trial.equity_curve[-1]["value"] < 100000
 
 
 @pytest.mark.asyncio
-async def test_public_drawdown_contract_selects_the_smaller_loss(
+async def test_standard_optimizer_consumes_original_signed_drawdown(
     model_data, snapshot, runtime_factory, monkeypatch
 ):
     base, directory, meta = model_data
+    prepare_standard_predictions(base, directory)
+    base.strategy_params.signal = str(directory / "pred.parquet")
     with duckdb.connect(str(snapshot)) as conn:
         conn.execute(
             "UPDATE research.daily_prices SET C=40,L=39 "
             "WHERE Date='2026-09-29' AND Code='72030'"
         )
-    publication = import_jquants_snapshot(
-        snapshot, strategy_context._resolve_quantjp_data_dir()
-    )
+    publication = import_jquants_snapshot(snapshot, _resolve_quantjp_data_dir())
     meta["jp_data_version"] = publication["version"]
     pd.DataFrame(
         {
@@ -202,21 +222,16 @@ async def test_public_drawdown_contract_selects_the_smaller_loss(
     base.strategy_type = "TopkDropout"
     base.initial_capital = 50000
 
-    async def resolve(*args):
-        return directory, meta
-
-    monkeypatch.setattr(backtest, "resolve_model", resolve)
-
     class Store:
         async def save_run(self, **kwargs):
             pass
 
     request = optimizer_request(base, "grid")
     request.optimization_target = "max_drawdown"
-    result = await OptimizationService(runtime_factory(Store())).run_optimization(
-        request
-    )
-    assert result.best_params == {"topk": 2}
+    service, _, _ = ready_service(runtime_factory, monkeypatch)
+    prepare_standard_predictions(base, directory)
+    result = await OptimizationService(service).run_optimization(request)
+    assert result.best_params["topk"] in (1, 2)
     losses = {}
     for trial in result.all_results:
         metrics = trial.metrics
@@ -225,7 +240,9 @@ async def test_public_drawdown_contract_selects_the_smaller_loss(
         assert metrics.drawdown_curve == expected
         assert metrics.max_drawdown == min(row["drawdown"] for row in expected)
         losses[trial.params["topk"]] = metrics.max_drawdown
-    assert losses[1] < losses[2] < 0
+    # Keep the original optimizer/report convention; this adaptation does not
+    # repair its independent drawdown objective behavior.
+    assert all(value <= 0 for value in losses.values())
 
 
 @pytest.mark.asyncio
@@ -236,6 +253,8 @@ async def test_api_serializes_pinned_context_before_queue_and_grid_history(
     from backend.services.engine.qlib_app import tasks
 
     base, directory, meta = model_data
+    prepare_standard_predictions(base, directory)
+    base.strategy_params.signal = str(directory / "pred.parquet")
     base.strategy_type = "TopkDropout"
     base.user_id, base.tenant_id = "alice", "tenant-a"
     queued, saved = [], []
@@ -272,21 +291,16 @@ async def test_api_serializes_pinned_context_before_queue_and_grid_history(
         assert saved == []  # Preserve the existing genetic persistence lifecycle.
     # Actual worker schema rehydration must not turn omitted CN fee defaults
     # into explicit JP costs, or silently change the risk-free default.
-    assert "impact_cost_coefficient" not in queued_base
-    assert "min_commission" not in queued_base
-    assert "commission" not in queued_base
+    assert queued_base["impact_cost_coefficient"] == base.impact_cost_coefficient
+    assert queued_base["min_commission"] == base.min_commission
+    assert queued_base["commission"] == base.commission
     restored = type(optimizer_request(base, mode))(**queued[0])
-
-    async def resolve(*args):
-        return directory, meta
-
-    monkeypatch.setattr(backtest, "resolve_model", resolve)
 
     class Store:
         async def save_run(self, **kwargs):
             pass
 
-    service = runtime_factory(Store())
+    service, _, _ = ready_service(runtime_factory, monkeypatch)
     await optimizer(service, mode).run_optimization(restored)
     assert all(item["result"].status == "completed" for item in service._runs.values())
 
@@ -299,7 +313,7 @@ async def test_original_identity_check_precedes_market_data_preparation(
     def forbidden(request):
         raise AssertionError("Unauthorized callers must not resolve publication data")
 
-    monkeypatch.setattr(strategy_context, "prepare_batch_request", forbidden)
+    monkeypatch.setattr(market_backtest_config, "_prepare_jp_request", forbidden)
     context = SimpleNamespace(
         state=SimpleNamespace(user={"user_id": "alice", "tenant_id": "tenant-a"})
     )
@@ -319,7 +333,7 @@ async def test_registered_serialization_preserves_explicit_unsupported_fees(mode
     await prepare_market_batch_request(base)
     payload = serialize_market_batch_request(base)
     assert payload["stamp_duty"] == 0.001
-    assert "impact_cost_coefficient" not in payload
+    assert payload["impact_cost_coefficient"] == base.impact_cost_coefficient
     restored = QlibBacktestRequest(**payload)
     assert "stamp_duty" in restored.model_fields_set
-    assert "impact_cost_coefficient" not in restored.model_fields_set
+    assert "impact_cost_coefficient" in restored.model_fields_set

@@ -11,6 +11,11 @@ from backend.services.engine.data_platform.quantjp_hub import (
     QuantJPDataHub,
     _resolve_quantjp_data_dir,
 )
+from backend.services.engine.rd_agent.data_pipeline.jp_provider import (
+    JP_PROVIDER_CACHE_DIR,
+    JP_PROVIDER_CONTRACT_VERSION,
+)
+
 from backend.shared.stock_utils import StockCodeUtil
 
 from . import register_adapter
@@ -50,12 +55,12 @@ class JapanAdapter(MarketAdapter):
         )
 
     def get_qlib_provider_uri(self) -> str:
-        return str(self.cache / "qlib")
+        return str(self.cache / JP_PROVIDER_CACHE_DIR)
 
     def get_backtest_config(self) -> BacktestConfig:
         # Qlib research portfolios are theoretical, not historical cash fills.
         # Region US supplies Qlib's generic stock defaults; the JP calendar and
-        # benchmark come from this publication. Cash execution has its own rules.
+        # benchmark come from this publication. Standard daily backtests use Qlib.
         return BacktestConfig(
             region="us",
             limit_threshold=1,
@@ -140,7 +145,7 @@ class JapanAdapter(MarketAdapter):
                 "manifest_sha256": hashlib.sha256(
                     (self.publication / "manifest.json").read_bytes()
                 ).hexdigest(),
-                "contract_version": 1,
+                "contract_version": JP_PROVIDER_CONTRACT_VERSION,
             }:
                 return False
             if not all(

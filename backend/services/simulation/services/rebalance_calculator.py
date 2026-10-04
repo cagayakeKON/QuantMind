@@ -6,7 +6,6 @@ Rebalance Calculator - 调仓计算器
 
 import logging
 import math
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
@@ -67,6 +66,7 @@ class Quote:
     is_limit_down: bool = False
     is_suspended: bool = False
     pre_close: float | None = None
+    lot_size: int | None = None
 
 
 @dataclass
@@ -97,10 +97,6 @@ class RebalanceCalculator:
     4. 计算目标持仓金额 → 目标股数
     5. 计算买卖指令（先卖后买）
     """
-
-    def __init__(self, *, trading_unit: Callable[[str], int] | None = None):
-        # A dated market adapter may supply units without changing legacy defaults.
-        self._trading_unit = trading_unit
 
     def calculate(
         self,
@@ -314,7 +310,7 @@ class RebalanceCalculator:
                 quote = quotes.get(s.symbol)
                 if not quote or quote.current_price <= 0:
                     continue
-                lot = self._lot_for(s.symbol, strategy)
+                lot = self._lot_for(s.symbol, strategy, quote)
                 qty = int(per_value / quote.current_price // lot) * lot
                 if qty > 0:
                     target[s.symbol] = qty
@@ -459,7 +455,7 @@ class RebalanceCalculator:
             # 计算目标股数（向下取整到整手）
             raw_quantity = target_value / quote.current_price
             lot_quantity = self._floor_to_lot(
-                raw_quantity, self._lot_for(sig.symbol, strategy)
+                raw_quantity, self._lot_for(sig.symbol, strategy, quote)
             )
 
             if lot_quantity > 0:
@@ -503,13 +499,13 @@ class RebalanceCalculator:
                 out[sym] += share
         return out
 
-    def _lot_for(self, symbol: str, strategy: StrategyConfig) -> int:
+    @staticmethod
+    def _lot_for(symbol: str, strategy: StrategyConfig, quote: Quote | None = None) -> int:
         """CN 按板块手数（科创板 200），其它市场用策略默认 lot_size。"""
-        if self._trading_unit is not None:
-            unit = self._trading_unit(symbol)
-            if isinstance(unit, bool) or not isinstance(unit, int) or unit <= 0:
-                raise ValueError("Market adapter must supply a positive trading unit")
-            return unit
+        from backend.shared.stock_utils import StockCodeUtil
+
+        if StockCodeUtil.is_jp_symbol(symbol) and quote and quote.lot_size:
+            return max(1, int(quote.lot_size))
         return max(1, int(lot_size_for_symbol(symbol) or strategy.lot_size or 100))
 
     def _floor_to_lot(self, quantity: float, lot_size: int = 100) -> int:

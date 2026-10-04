@@ -48,9 +48,9 @@ class _Holding:
     holding_days: int = 0
     reason: str = ""
 
-    def sellable_qty(self, today: pd.Timestamp) -> int:
+    def sellable_qty(self, today: pd.Timestamp, t_plus_1: bool = True) -> int:
         """Qty that can be sold today (T+1: not bought today)."""
-        return sum(l.qty for l in self.lots if l.bought_on < today)
+        return sum(l.qty for l in self.lots if not t_plus_1 or l.bought_on < today)
 
     def market_value(self) -> float:
         return self.total_qty * self.last_price
@@ -67,6 +67,9 @@ class SimpleBroker:
     ) -> None:
         self._ctx = ctx
         self._provider = provider
+        rules = getattr(provider, "trading_rules", None)
+        self._t_plus_1 = getattr(rules, "t_plus_1", True)
+        self._lot_size = getattr(rules, "lot_size", LOT_SIZE)
         self._cash: float = float(cash)
         self._holdings: dict[str, _Holding] = {}
         self._trades: list[TradeRecord] = []
@@ -116,12 +119,18 @@ class SimpleBroker:
     # ------------------------------------------------------------------
     # Order resolution
     # ------------------------------------------------------------------
-    def _qty_for_weight(self, weight: float, price: float, equity: float) -> int:
+    def _trading_unit(self, symbol: str, today: pd.Timestamp) -> int:
+        resolver = getattr(self._provider, "trading_unit", None)
+        return resolver(symbol, today) if resolver else self._lot_size
+
+    def _qty_for_weight(
+        self, weight: float, price: float, equity: float, lot_size: int = LOT_SIZE
+    ) -> int:
         if price <= 0 or weight <= 0:
             return 0
         target_value = equity * weight
         raw_qty = int(target_value // price)
-        return (raw_qty // LOT_SIZE) * LOT_SIZE
+        return (raw_qty // lot_size) * lot_size
 
     def _execute_buy(
         self,
@@ -141,7 +150,8 @@ class SimpleBroker:
         if cost > self._cash + 1e-6:
             # Cap qty downward to lot multiple that fits
             max_qty = int(self._cash // (slipped * (1 + self._ctx.commission)))
-            qty = (max_qty // LOT_SIZE) * LOT_SIZE
+            lot_size = self._trading_unit(symbol, today)
+            qty = (max_qty // lot_size) * lot_size
             if qty <= 0:
                 return
             gross = slipped * qty
@@ -178,7 +188,7 @@ class SimpleBroker:
         h = self._holdings.get(symbol)
         if h is None or h.total_qty <= 0 or qty <= 0 or price <= 0:
             return
-        sellable = h.sellable_qty(today)
+        sellable = h.sellable_qty(today, self._t_plus_1)
         qty = min(qty, sellable)
         if qty <= 0:
             return
@@ -193,7 +203,7 @@ class SimpleBroker:
         cost_basis_consumed = 0.0
         new_lots: list[_Lot] = []
         for lot in h.lots:
-            if remaining <= 0 or lot.bought_on >= today:
+            if remaining <= 0 or (self._t_plus_1 and lot.bought_on >= today):
                 new_lots.append(lot)
                 continue
             take = min(lot.qty, remaining)
@@ -252,7 +262,7 @@ class SimpleBroker:
                 for sym in list(self._holdings.keys()):
                     if sym not in o.targets:
                         h = self._holdings[sym]
-                        sellable = h.sellable_qty(today)
+                        sellable = h.sellable_qty(today, self._t_plus_1)
                         if sellable > 0:
                             price = self._close(sym, today)
                             if price is not None:
@@ -261,6 +271,7 @@ class SimpleBroker:
                                 )
                 # Then buy missing targets
                 for sym in o.targets:
+                    lot_size = self._trading_unit(sym, today)
                     price = self._close(sym, today)
                     if price is None:
                         continue
@@ -268,9 +279,9 @@ class SimpleBroker:
                     cur_value = cur.market_value() if cur else 0.0
                     target_value = equity * weight
                     delta = target_value - cur_value
-                    if delta > price * LOT_SIZE:
+                    if delta > price * lot_size:
                         raw_qty = int(delta // price)
-                        qty = (raw_qty // LOT_SIZE) * LOT_SIZE
+                        qty = (raw_qty // lot_size) * lot_size
                         if qty > 0:
                             resolved.append(
                                 ("buy", sym, qty, price, o.reason or "rebalance", dict(o.detail))
@@ -280,7 +291,9 @@ class SimpleBroker:
                 price = self._close(o.symbol, today)
                 if price is None:
                     continue
-                target_qty = self._qty_for_weight(o.weight or 0.0, price, equity)
+                target_qty = self._qty_for_weight(
+                    o.weight or 0.0, price, equity, self._trading_unit(o.symbol, today)
+                )
                 cur_qty = self._holdings[o.symbol].total_qty if o.symbol in self._holdings else 0
                 delta = target_qty - cur_qty
                 if delta > 0:
@@ -289,13 +302,14 @@ class SimpleBroker:
                     resolved.append(("sell", o.symbol, -delta, price, o.reason, dict(o.detail)))
                 continue
             if o.side == "buy":
+                lot_size = self._trading_unit(o.symbol, today)
                 price = self._close(o.symbol, today)
                 if price is None:
                     continue
                 if o.qty is not None:
-                    qty = (int(o.qty) // LOT_SIZE) * LOT_SIZE
+                    qty = (int(o.qty) // lot_size) * lot_size
                 else:
-                    qty = self._qty_for_weight(o.weight or 0.0, price, equity)
+                    qty = self._qty_for_weight(o.weight or 0.0, price, equity, lot_size)
                 if qty > 0:
                     resolved.append(("buy", o.symbol, qty, price, o.reason, dict(o.detail)))
                 continue
@@ -307,13 +321,14 @@ class SimpleBroker:
                 if h is None:
                     continue
                 if o.all:
-                    qty = h.sellable_qty(today)
+                    qty = h.sellable_qty(today, self._t_plus_1)
                 elif o.qty is not None:
-                    qty = min(int(o.qty), h.sellable_qty(today))
+                    qty = min(int(o.qty), h.sellable_qty(today, self._t_plus_1))
                 elif o.weight is not None:
                     qty = int(h.total_qty * o.weight)
-                    qty = (qty // LOT_SIZE) * LOT_SIZE
-                    qty = min(qty, h.sellable_qty(today))
+                    lot_size = self._trading_unit(o.symbol, today)
+                    qty = (qty // lot_size) * lot_size
+                    qty = min(qty, h.sellable_qty(today, self._t_plus_1))
                 else:
                     qty = 0
                 if qty > 0:
@@ -358,7 +373,7 @@ class SimpleBroker:
             if ret <= self._account_stop_loss:
                 self._account_halted = True
                 for sym, h in list(self._holdings.items()):
-                    sellable = h.sellable_qty(today)
+                    sellable = h.sellable_qty(today, self._t_plus_1)
                     if sellable <= 0:
                         continue
                     price = self._close(sym, today)
@@ -371,7 +386,7 @@ class SimpleBroker:
                 return forced
 
         for sym, h in list(self._holdings.items()):
-            sellable = h.sellable_qty(today)
+            sellable = h.sellable_qty(today, self._t_plus_1)
             if sellable <= 0:
                 continue
             price = self._close(sym, today)

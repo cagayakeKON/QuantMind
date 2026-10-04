@@ -35,7 +35,7 @@ def default_models_database():
 
 
 @pytest.mark.skipif(os.getenv("QM_JP_TEST_PG") != "1", reason="PG audit is opt-in")
-def test_default_model_scan_includes_only_ready_native_market_defaults(
+def test_default_model_scan_uses_only_the_standard_sql_default_in_every_market(
     monkeypatch, default_models_database
 ):
     from backend.services.engine.inference.gap_backfill import list_default_models
@@ -51,7 +51,8 @@ def test_default_model_scan_includes_only_ready_native_market_defaults(
         )
         records = [
             ("CN", True, False, "ready", "cn", "7", "/cn"),
-            ("JP", False, True, "ready", "jp", "7", "/jp"),
+            ("JP", True, False, "ready", "jp", "7", "/jp"),
+            ("JP", False, True, "ready", "jp_stale_metadata", "7", "/jp"),
             ("JP", False, False, "ready", "jp_not_default", "7", "/jp"),
             ("US", False, True, "ready", "us_metadata", "7", "/us"),
             ("JP", False, True, "archived", "jp_archived", "7", "/jp"),

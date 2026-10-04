@@ -1,7 +1,6 @@
 import React from 'react';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DatedExecutionContext } from '../../../../../../types/liveTrading';
 
 const mocks = vi.hoisted(() => ({ status: vi.fn(), precheck: vi.fn(), orders: vi.fn(), model: vi.fn(), run: vi.fn(), strategies: vi.fn() }));
 import { useRuntimeOverview } from '../useRuntimeOverview';
@@ -10,12 +9,21 @@ import { realTradingService } from '../../../../../../services/realTradingServic
 import { modelTrainingService } from '../../../../../../services/modelTrainingService';
 import { strategyManagementService } from '../../../../../../services/strategyManagementService';
 
-const context: DatedExecutionContext = { market: 'JP', trade_date: '2026-09-30', data_version: 'v1', commission_rate: '0', slippage_bps: '5' };
 const precheck = { passed: true, items: [], checked_at: 'now' };
 
-describe('existing runtime overview with optional dated inputs', () => {
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+describe('shared runtime overview market requests', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     vi.spyOn(realTradingService, 'getStatus').mockImplementation(mocks.status);
     vi.spyOn(realTradingService, 'getTradingPrecheck').mockImplementation(mocks.precheck);
     vi.spyOn(realTradingService, 'getOrders').mockImplementation(mocks.orders);
@@ -50,79 +58,136 @@ describe('existing runtime overview with optional dated inputs', () => {
     expect(mocks.precheck).toHaveBeenCalledWith('REAL');
   });
 
-  it('polls JP runtime identity while passing dated inputs only to explicit precheck', async () => {
-    const { result } = renderHook(() => useRuntimeOverview('tenant', '7', 'simulation', 'JP', true, context, true));
-    await waitFor(() => expect(result.current.ready.precheck).toBe(true));
-    expect(mocks.status).toHaveBeenCalledWith('7', 'simulation', 'tenant', 'JP');
-    expect(mocks.precheck).toHaveBeenCalledWith('SIMULATION', context);
-    expect(mocks.orders).toHaveBeenCalledWith('7', undefined, 'simulation', { limit: 10, offset: 0 });
-    expect(result.current.recentOrders[0].symbol).toBe('SH600036');
+  it('uses JP market only for standard precheck while retaining the original runtime identity', async () => {
+    const { result } = renderHook(() => useRuntimeOverview('tenant', '7', 'simulation', 'JP', true));
+    await waitFor(() => expect(result.current.ready).toEqual({ status: true, precheck: true, model: true }));
+    expect(mocks.status).toHaveBeenCalledWith('7', 'simulation', 'tenant');
+    expect(mocks.precheck).toHaveBeenCalledWith('SIMULATION', 'JP');
     expect(mocks.model).toHaveBeenCalledWith('JP');
+    expect(mocks.run).toHaveBeenCalledWith('default-model');
+    mocks.status.mockResolvedValueOnce({ status: 'running', mode: 'SIMULATION' });
+    await act(async () => { result.current.refresh(); });
+    await waitFor(() => expect(result.current.status?.status).toBe('running'));
+    mocks.status.mockResolvedValueOnce({ status: 'stopped', mode: 'SIMULATION' });
+    await act(async () => { result.current.refresh(); });
+    await waitFor(() => expect(result.current.status?.status).toBe('stopped'));
+    expect(mocks.status.mock.calls.every(args => args.length === 3)).toBe(true);
   });
 
-  it.each([undefined, { ...context, market: 'CN' }])('can discover JP runtime but does not precheck unavailable or mismatched inputs', async (inputs) => {
-    const { result } = renderHook(() => useRuntimeOverview('tenant', '7', 'simulation', 'JP', true, inputs, true));
-    await waitFor(() => expect(result.current.ready.model).toBe(true));
-    expect(mocks.status).toHaveBeenCalledWith('7', 'simulation', 'tenant', 'JP');
-    expect(mocks.precheck).not.toHaveBeenCalled();
-    expect(result.current.precheck).toBeNull();
-  });
-
-  it('rejects dated real-mode probes', async () => {
-    const { result } = renderHook(() => useRuntimeOverview('tenant', '7', 'real', 'JP', true, context, true));
-    await waitFor(() => expect(result.current.ready.model).toBe(true));
-    expect(mocks.status).not.toHaveBeenCalled();
-    expect(mocks.precheck).not.toHaveBeenCalled();
-  });
-
-  it('ignores the old date response and immediately loads the latest date after the original request lock is released', async () => {
-    let finishStatus!: (value: unknown) => void;
-    let finishPrecheck!: (value: unknown) => void;
-    mocks.status.mockImplementationOnce(() => new Promise(resolve => { finishStatus = resolve; }));
-    mocks.precheck.mockImplementationOnce(() => new Promise(resolve => { finishPrecheck = resolve; }));
-    const { result, rerender } = renderHook(({ inputs }) => useRuntimeOverview('tenant', '7', 'simulation', 'JP', true, inputs, true), { initialProps: { inputs: context } });
-    await waitFor(() => expect(mocks.precheck).toHaveBeenCalledOnce());
-    const changed = { ...context, trade_date: '2026-09-29', data_version: 'v2', slippage_bps: '8' };
-    rerender({ inputs: changed });
-    await act(async () => { finishStatus({ status: 'running', stale: true }); finishPrecheck({ ...precheck, stale: true }); });
-    await waitFor(() => expect(mocks.precheck).toHaveBeenCalledTimes(2));
-    expect(mocks.precheck.mock.lastCall).toEqual(['SIMULATION', changed]);
-    expect(mocks.status.mock.lastCall).toEqual(['7', 'simulation', 'tenant', 'JP']);
-    expect(result.current.status).toEqual({ status: 'stopped' });
-    expect(result.current.precheck).toEqual(precheck);
-  });
-
-  it('does not reload a stale request after the dated console unmounts', async () => {
-    let finish!: (value: unknown) => void;
-    mocks.precheck.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
-    const { unmount } = renderHook(() => useRuntimeOverview('tenant', '7', 'simulation', 'JP', true, context, true));
-    await waitFor(() => expect(mocks.precheck).toHaveBeenCalledOnce());
-    unmount();
-    await act(async () => { finish(precheck); });
-    expect(mocks.precheck).toHaveBeenCalledOnce();
-  });
-
-  it('loads dated inputs through the application StrictMode effect replay', async () => {
-    const { result } = renderHook(() => useRuntimeOverview('tenant', '7', 'simulation', 'JP', true, context, true), {
+  it('uses the shared JP polling hook in StrictMode', async () => {
+    const { result } = renderHook(() => useRuntimeOverview('tenant', '7', 'simulation', 'JP', true), {
       wrapper: ({ children }) => <React.StrictMode>{children}</React.StrictMode>,
     });
-    await waitFor(() => expect(result.current.ready).toEqual({ status: true, precheck: true, model: true }));
-    expect(mocks.precheck).toHaveBeenCalledWith('SIMULATION', context);
+    await waitFor(() => expect(result.current.ready.precheck).toBe(true));
+    expect(mocks.precheck).toHaveBeenCalledWith('SIMULATION', 'JP');
+  });
+
+  it.each([['CN', 'JP'], ['JP', 'CN']])('isolates a pending %s precheck when switching to %s', async (from, to) => {
+    const oldRequest = deferred<typeof precheck>();
+    const currentRequest = deferred<typeof precheck>();
+    mocks.precheck.mockImplementationOnce(() => oldRequest.promise).mockImplementationOnce(() => currentRequest.promise);
+    const { result, rerender } = renderHook(({ market }) => useRuntimeOverview('tenant', '7', 'simulation', market, true), {
+      initialProps: { market: from },
+    });
+    await waitFor(() => expect(mocks.precheck).toHaveBeenCalledTimes(1));
+    rerender({ market: to });
+    await waitFor(() => expect(mocks.precheck).toHaveBeenCalledTimes(2));
+    expect(mocks.precheck.mock.calls).toEqual(from === 'JP'
+      ? [['SIMULATION', 'JP'], ['SIMULATION']]
+      : [['SIMULATION'], ['SIMULATION', 'JP']]);
+    await act(async () => { oldRequest.resolve({ ...precheck, checked_at: 'old' }); });
+    expect(result.current.precheck).toBeNull();
+    expect(result.current.ready.precheck).toBe(false);
+    await act(async () => { result.current.refresh(); });
+    expect(mocks.precheck).toHaveBeenCalledTimes(2);
+    const current = { ...precheck, checked_at: 'current' };
+    await act(async () => { currentRequest.resolve(current); });
+    expect(result.current.precheck).toEqual(current);
+    expect(result.current.ready.precheck).toBe(true);
+  });
+
+  it.each(['resolve', 'reject'] as const)('ignores old JP %s and finally after JP→CN→JP', async (settle) => {
+    const oldJP = deferred<typeof precheck>();
+    const oldCN = deferred<typeof precheck>();
+    const currentJP = deferred<typeof precheck>();
+    mocks.precheck.mockImplementationOnce(() => oldJP.promise)
+      .mockImplementationOnce(() => oldCN.promise)
+      .mockImplementationOnce(() => currentJP.promise);
+    const { result, rerender } = renderHook(({ market }) => useRuntimeOverview('tenant', '7', 'simulation', market, true), {
+      initialProps: { market: 'JP' },
+    });
+    await waitFor(() => expect(mocks.precheck).toHaveBeenCalledTimes(1));
+    rerender({ market: 'CN' });
+    await waitFor(() => expect(mocks.precheck).toHaveBeenCalledTimes(2));
+    rerender({ market: 'JP' });
+    await waitFor(() => expect(mocks.precheck).toHaveBeenCalledTimes(3));
+    expect(mocks.precheck.mock.calls).toEqual([['SIMULATION', 'JP'], ['SIMULATION'], ['SIMULATION', 'JP']]);
+    await act(async () => {
+      if (settle === 'resolve') oldJP.resolve({ ...precheck, checked_at: 'old JP' });
+      else oldJP.reject(new Error('old JP request failed'));
+      oldCN.resolve({ ...precheck, checked_at: 'old CN' });
+    });
+    expect(result.current.precheck).toBeNull();
+    expect(result.current.ready.precheck).toBe(false);
+    await act(async () => { result.current.refresh(); });
+    expect(mocks.precheck).toHaveBeenCalledTimes(3);
+    const current = { ...precheck, checked_at: 'current JP' };
+    await act(async () => { currentJP.resolve(current); });
+    expect(result.current.precheck).toEqual(current);
+    expect(result.current.ready.precheck).toBe(true);
+    await act(async () => { result.current.refresh(); });
+    expect(mocks.precheck).toHaveBeenCalledTimes(4);
+  });
+
+  it('clears a completed CN precheck immediately when switching to JP', async () => {
+    const currentJP = deferred<typeof precheck>();
+    const completed = { ...precheck, checked_at: 'completed CN' };
+    mocks.precheck.mockResolvedValueOnce(completed).mockImplementationOnce(() => currentJP.promise);
+    const { result, rerender } = renderHook(({ market }) => useRuntimeOverview('tenant', '7', 'simulation', market, true), {
+      initialProps: { market: 'CN' },
+    });
+    await waitFor(() => expect(result.current.precheck).toEqual(completed));
+    rerender({ market: 'JP' });
+    expect(result.current.precheck).toBeNull();
+    expect(result.current.ready.precheck).toBe(false);
+    await waitFor(() => expect(mocks.precheck).toHaveBeenCalledTimes(2));
+    await act(async () => { currentJP.resolve(precheck); });
     expect(result.current.precheck).toEqual(precheck);
   });
 
-  it('discovers the next hosted day while the form still holds the startup inputs', async () => {
-    const next = {...context, trade_date: '2026-10-01', data_version: 'v2'};
-    let active = context;
-    mocks.status.mockImplementation(async (...args) => {
-      if (args[4]) throw new Error('409 stale execution context');
-      return {status: 'running', execution_context: active};
+  it.each(['HK', 'US'])('retains the original pending CN→%s shared precheck and lock', async (market) => {
+    const sharedRequest = deferred<typeof precheck>();
+    mocks.precheck.mockImplementationOnce(() => sharedRequest.promise);
+    const { result, rerender } = renderHook(({ market: selectedMarket }) => useRuntimeOverview('tenant', '7', 'simulation', selectedMarket, true), {
+      initialProps: { market: 'CN' },
     });
-    const {result} = renderHook(() => useRuntimeOverview('tenant', '7', 'simulation', 'JP', true, context, true));
-    await waitFor(() => expect(result.current.status?.execution_context).toEqual(context));
-    active = next;
-    await act(async () => {result.current.refresh();});
-    await waitFor(() => expect(result.current.status?.execution_context).toEqual(next));
-    expect(mocks.status.mock.calls.every(args => args.length === 4 && args[3] === 'JP')).toBe(true);
+    await waitFor(() => expect(mocks.precheck).toHaveBeenCalledTimes(1));
+    rerender({ market });
+    await act(async () => { result.current.refresh(); });
+    expect(mocks.precheck.mock.calls).toEqual([['SIMULATION']]);
+    const shared = { ...precheck, checked_at: 'shared CN' };
+    await act(async () => { sharedRequest.resolve(shared); });
+    expect(result.current.precheck).toEqual(shared);
+    expect(result.current.ready.precheck).toBe(true);
+  });
+
+  it('retains same-scope deduplication under StrictMode while allowing a JP boundary request', async () => {
+    const oldJP = deferred<typeof precheck>();
+    const currentCN = deferred<typeof precheck>();
+    mocks.precheck.mockImplementationOnce(() => oldJP.promise).mockImplementationOnce(() => currentCN.promise);
+    const { result, rerender } = renderHook(({ market }) => useRuntimeOverview('tenant', '7', 'simulation', market, true), {
+      initialProps: { market: 'JP' },
+      wrapper: ({ children }) => <React.StrictMode>{children}</React.StrictMode>,
+    });
+    await waitFor(() => expect(mocks.precheck).toHaveBeenCalledTimes(1));
+    await act(async () => { result.current.refresh(); });
+    expect(mocks.precheck).toHaveBeenCalledTimes(1);
+    rerender({ market: 'CN' });
+    await waitFor(() => expect(mocks.precheck).toHaveBeenCalledTimes(2));
+    await act(async () => { oldJP.resolve(precheck); });
+    expect(result.current.ready.precheck).toBe(false);
+    await act(async () => { currentCN.resolve(precheck); });
+    expect(result.current.precheck).toEqual(precheck);
+    expect(result.current.ready.precheck).toBe(true);
   });
 });

@@ -9,7 +9,6 @@ import type {
     UserModelRecord,
 } from '../../../../../services/modelTrainingService';
 import type { StrategyFile } from '../../../../../types/backtest/strategy';
-import type { DatedExecutionContext } from '../../../../../types/liveTrading';
 import { buildInputNodes, deriveRunState } from '../topologyTypes';
 import type { RunState, TopologyNode } from '../topologyTypes';
 import { sortTradingStrategies } from '../../../utils/sortTradingStrategies';
@@ -57,8 +56,6 @@ export function useRuntimeOverview(
     tradingMode: ConsoleTradingMode,
     market: string,
     enabled: boolean,
-    executionContext?: DatedExecutionContext,
-    requiresExecutionInputs = false,
 ): RuntimeOverview {
     const [status, setStatus] = useState<RealTradingStatus | null>(null);
     const [precheck, setPrecheck] = useState<TradingPrecheckResult | null>(null);
@@ -76,18 +73,11 @@ export function useRuntimeOverview(
     const statusRef = useRef<RealTradingStatus | null>(null);
     const modelIdRef = useRef<string>('');
     const marketRef = useRef(market);
-    const fetchingRef = useRef({ status: false, precheck: false, model: false, orders: false });
+    const fetchingRef = useRef({ status: false, model: false, orders: false });
+    const precheckIsJP = market === 'JP';
+    const precheckScopeRef = useRef({ isJP: precheckIsJP, fetching: false });
     const readyRef = useRef<SectionReady>({ status: false, precheck: false, model: false });
     const strategiesFetchingRef = useRef(false);
-    // Only explicit dated inputs extend the original controller requests.
-    const executionScope = requiresExecutionInputs || executionContext
-        ? JSON.stringify([tenantId, userId, tradingMode, market, executionContext]) : '';
-    const mountedRef = useRef(true);
-    const scopeRef = useRef(executionScope);
-    scopeRef.current = executionScope;
-    const datedReady = !executionScope || (tradingMode === 'simulation' && executionContext?.market === market);
-    const statusReady = market === 'JP' && tradingMode === 'simulation' || datedReady;
-    const loadersRef = useRef({ status: () => {}, precheck: () => {} });
     statusRef.current = status;
     marketRef.current = market;
 
@@ -97,64 +87,50 @@ export function useRuntimeOverview(
         setReady(readyRef.current);
     };
 
+    // 仅跨 JP 边界切换请求范围；其它市场继续共享原无 market 参数的 precheck。
+    useEffect(() => {
+        if (precheckScopeRef.current.isJP === precheckIsJP) return;
+        precheckScopeRef.current = { isJP: precheckIsJP, fetching: false };
+        setPrecheck(null);
+        readyRef.current = { ...readyRef.current, precheck: false };
+        setReady(readyRef.current);
+    }, [precheckIsJP]);
+
     const loadStatus = useCallback(async () => {
-        if (!statusReady) return;
         if (fetchingRef.current.status) return;
         fetchingRef.current.status = true;
         try {
             const { realTradingService } = await import('../../../../../services/realTradingService');
-            const data = market === 'JP' && tradingMode === 'simulation'
-                ? await realTradingService.getStatus(userId, tradingMode, tenantId, market)
-                : executionContext
-                ? await realTradingService.getStatus(userId, tradingMode, tenantId, market, executionContext)
-                : await realTradingService.getStatus(userId, tradingMode, tenantId);
-            if (scopeRef.current !== executionScope || (executionScope && !mountedRef.current)) return;
+            const data = await realTradingService.getStatus(userId, tradingMode, tenantId);
             setStatus(data);
             setLastUpdatedAt(new Date().toISOString());
         } catch (e) {
-            if ((!executionScope || mountedRef.current) && scopeRef.current === executionScope) console.warn('[TopologyConsole] status failed', e);
+            console.warn('[TopologyConsole] status failed', e);
         } finally {
             fetchingRef.current.status = false;
-            if (!executionScope || mountedRef.current) {
-                if (scopeRef.current === executionScope) markReady('status');
-                else loadersRef.current.status();
-            }
+            markReady('status');
         }
-    }, [tenantId, userId, tradingMode, executionScope, statusReady]);
+    }, [tenantId, userId, tradingMode]);
 
     const loadPrecheck = useCallback(async () => {
-        if (!datedReady) return;
-        if (fetchingRef.current.precheck) return;
-        fetchingRef.current.precheck = true;
+        const scope = precheckScopeRef.current;
+        if (scope.fetching) return;
+        scope.fetching = true;
         try {
             const { realTradingService } = await import('../../../../../services/realTradingService');
-            const data = executionContext
-                ? await realTradingService.getTradingPrecheck(toDeployMode(tradingMode), executionContext)
+            const data = scope.isJP
+                ? await realTradingService.getTradingPrecheck(toDeployMode(tradingMode), 'JP')
                 : await realTradingService.getTradingPrecheck(toDeployMode(tradingMode));
-            if (scopeRef.current !== executionScope || (executionScope && !mountedRef.current)) return;
-            setPrecheck(data);
+            if (precheckScopeRef.current === scope) setPrecheck(data);
         } catch (e) {
-            if ((!executionScope || mountedRef.current) && scopeRef.current === executionScope) console.warn('[TopologyConsole] precheck failed', e);
+            if (precheckScopeRef.current === scope) console.warn('[TopologyConsole] precheck failed', e);
         } finally {
-            fetchingRef.current.precheck = false;
-            if (!executionScope || mountedRef.current) {
-                if (scopeRef.current === executionScope) markReady('precheck');
-                else loadersRef.current.precheck();
+            if (precheckScopeRef.current === scope) {
+                scope.fetching = false;
+                markReady('precheck');
             }
         }
-    }, [tradingMode, executionScope, datedReady]);
-    loadersRef.current = { status: () => { void loadStatus(); }, precheck: () => { void loadPrecheck(); } };
-
-    useEffect(() => {
-        if (!executionScope) return;
-        setStatus(null);
-        setPrecheck(null);
-    }, [executionScope]);
-
-    useEffect(() => {
-        mountedRef.current = true;
-        return () => { mountedRef.current = false; };
-    }, []);
+    }, [tradingMode, precheckIsJP]);
 
     const loadModelChain = useCallback(async () => {
         if (fetchingRef.current.model) return;

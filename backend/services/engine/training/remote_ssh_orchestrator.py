@@ -411,6 +411,8 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                         progress=6,
                     )
                 except Exception as exc:  # noqa: BLE001
+                    if probe_market == "JP":
+                        raise RuntimeError(f"JP node data probe failed: {exc}") from exc
                     self._window = None
                     logger.warning("[%s] 节点数据探针失败: %s", run_id, exc)
                     self._log(
@@ -421,11 +423,10 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
 
             config = self._build_config_yaml(run_id, payload)
             direct_source = str(config["data"].get("factor_source") or "")
-            # 远程节点（AutoDL）目前仅支持 A 股 QuantDB 直读：非 CN 市场的
-            # 6_ml_datasets 数据不在同步清单内，硬走会把本地 CN 目录误当
-            # 目标市场数据源（静默用错数据）。显式拒绝而非兜底。
+            # CN uses its existing SDK sync; JP reads the explicitly configured
+            # published node dataset. Other markets retain their snapshot path.
             market = str((config.get("context") or {}).get("market") or "CN").upper()
-            if direct_source and market != "CN":
+            if direct_source and market not in {"CN", "JP"}:
                 raise RuntimeError(
                     f"远程节点暂不支持 {market} 市场 QuantDB 直读训练，"
                     "请选择本地 Docker 节点，或取消数据源直读（快照路径）"
@@ -436,6 +437,19 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                 config["data"]["quantdb_dir"] = (
                     self.quantdb_dir if self.exec_mode == "native_python" else "/tmp/quantdb"
                 )
+                if market == "JP":
+                    selected = Path(self._window.data_dir)
+                    relative = selected.relative_to(
+                        Path(self._window.data_root or self.quantdb_dir)
+                    )
+                    config["data"]["quantdb_dir"] = (
+                        str(selected) if self.exec_mode == "native_python"
+                        else str(Path("/tmp/quantdb") / relative)
+                    )
+                    config["data"]["factor_coverage"]["jp_data_version"] = (
+                        self._window.data_version
+                    )
+                    await self._deploy_native_backend(run_id, market="JP")
             config["callback"]["url"] = self._callback_url(run_id)
 
             # 2. 确保远端工作目录结构
@@ -448,7 +462,9 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             # /data/quantdb and its SDK state, so no raw parquet is copied from
             # the coordinator.  Operators may override the command for a custom
             # SDK installation with TRAINING_AUTODL_QUANTDB_SYNC_CMD.
-            if direct_source:
+            if direct_source and market == "JP":
+                self._log(run_id, "[DATA] Using the node's published JP dataset", progress=15)
+            elif direct_source:
                 if self.exec_mode == "native_python":
                     # 免 docker：同步脚本要 import backend.shared.runtime_secrets，
                     # 必须先推 backend_min，再跑 quantdb_daily_sync.py。
@@ -610,7 +626,10 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             else:
                 self._log(run_id, "[SYSTEM] 在 AutoDL 启动训练容器...", progress=20)
                 container_name = f"qm-train-{run_id}"
-                docker_cmd = self._build_docker_run_cmd(container_name, direct_source=direct_source)
+                docker_cmd = self._build_docker_run_cmd(
+                    container_name, direct_source=direct_source,
+                    **({"market": "JP"} if market == "JP" else {}),
+                )
                 code, out, err = await self._ssh_exec(docker_cmd, timeout=120)
                 if code != 0:
                     raise RuntimeError(f"远端 docker run 失败: {err or out}")
@@ -682,7 +701,10 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         数据直读所需 backend 子树在 dist 模式下已由 _deploy_native_backend 推送。
         """
         # native 直读需要 loading.py 的 backend...quantdb_factor_reader 可 import
-        await self._deploy_native_backend(run_id)
+        await self._deploy_native_backend(
+            run_id,
+            **({"market": "JP"} if config.get("context", {}).get("market") == "JP" else {}),
+        )
 
         # PYTHONPATH 需同时在 work_dir（训练包）与 backend_min（backend.* 子树）上
         py_path = f"{self.work_dir}:{self.work_dir}/backend_min"
@@ -721,7 +743,9 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             raise RuntimeError(f"远端原生训练未返回 pid: {err or out}")
         return pid, log_path
 
-    async def _deploy_native_backend(self, run_id: str, *, log: bool = True) -> None:
+    async def _deploy_native_backend(
+        self, run_id: str, *, log: bool = True, market: str = "CN"
+    ) -> None:
         """把免 docker 直读所需的 backend 最小子树 rsync 到远端 {work_dir}/backend_min/。
 
         仅训练数据路径上硬性 import 的一小撮文件（含 reader/hub 及其 import 链），
@@ -742,6 +766,12 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             "services/engine/data_platform/quantdb_factor_reader.py",
             "services/engine/data_platform/quantdb_hub.py",
         ]
+        if market == "JP":
+            req_entries += [
+                "services/engine/data_platform/quantjp_hub.py",
+                "services/engine/data_platform/jp_labels.py",
+                "services/engine/inference/prediction_provenance.py",
+            ]
         # 复制到本地临时目录再 rsync（保持 backend 包结构）
         import tempfile
         import shutil
@@ -765,7 +795,7 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         for pkg in ["backend", "backend/shared", "backend/shared/training",
                     "backend/shared/stock_pool",
                     "backend/services", "backend/services/engine",
-                    "backend/services/engine/data_platform"]:
+                    "backend/services/engine/data_platform", "backend/services/engine/inference"]:
             init_file = dest_root.parent / pkg / "__init__.py"
             init_file.parent.mkdir(parents=True, exist_ok=True)
             init_file.write_text("", encoding="utf-8")
@@ -786,7 +816,9 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         只做 SSH 读取，**绝不触发数据同步**；缓存由
         ``window_probe.probe_data_window()`` 统一负责。
         """
-        await self._deploy_native_backend("probe", log=False)
+        await self._deploy_native_backend(
+            "probe", log=False, **({"market": "JP"} if market == "JP" else {})
+        )
         python = self.native_python or "/root/miniconda3/bin/python"
         remote_code = "\n".join(
             [
@@ -795,15 +827,34 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                 "from backend.services.engine.data_platform.quantdb_factor_reader "
                 "import QuantDBFactorReader",
                 f'r = QuantDBFactorReader("{self.quantdb_dir}", market="{market}")',
+                *([
+                    "from pathlib import Path",
+                    "manifest = json.loads((r.data_dir / 'manifest.json').read_text())",
+                    "assert manifest.get('market') == 'JP', 'JP publication manifest required'",
+                    "from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub",
+                    "assert not QuantJPDataHub(r.data_dir).fetch_calendar().empty, 'JP calendar is unavailable'",
+                ] if market == "JP" else []),
                 f'st = r.describe("{source}")',
                 f'dates = r.available_dates("{source}")',
                 f'cols = sorted(r.factor_columns("{source}"))',
                 'print("QM_PROFILE=" + json.dumps({"ready": bool(st.ready), '
                 '"min_date": st.min_date, "max_date": st.max_date, '
                 '"schema_hash": st.schema_hash, "columns": cols, '
-                '"trading_dates": dates, "reason": st.reason}))',
+                '"trading_dates": dates, "reason": st.reason'
+                + (f', "data_dir": str(r.data_dir), "data_version": r.data_dir.name, "data_root": str(Path({self.quantdb_dir!r}).resolve())' if market == "JP" else '')
+                + '}))',
             ]
         )
+        if market == "JP":
+            import textwrap
+
+            remote_code = (
+                "import json\ntry:\n" + textwrap.indent(remote_code, "    ")
+                + "\nexcept Exception as exc:\n"
+                + '    print("QM_PROFILE=" + json.dumps({"ready": False, '
+                '"min_date": None, "max_date": None, "columns": [], '
+                '"trading_dates": [], "reason": str(exc)}))'
+            )
         cmd = (
             f"PYTHONUNBUFFERED=1 PYTHONPATH={self.work_dir}:{self.work_dir}/backend_min "
             f"{python} - <<'QM_PROFILE_EOF'\n{remote_code}\nQM_PROFILE_EOF"
@@ -1139,6 +1190,23 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         context = payload.get("context", {}) if isinstance(payload.get("context"), dict) else {}
         features = payload.get("features", []) or []
 
+        if str(context.get("market") or "CN").upper() == "JP":
+            if payload.get("factor_source") != "l1_factors":
+                raise RuntimeError("JP training requires the published l1_factors dataset")
+            if (
+                not self._window or not self._window.ready
+                or not self._window.trading_dates or not self._window.data_dir
+                or not self._window.data_version
+            ):
+                raise RuntimeError("JP node published factor data is not ready")
+            missing = [
+                f for f in features
+                if (payload.get("factor_field_sources") or {}).get(f, f)
+                not in self._window.columns
+            ]
+            if missing:
+                raise RuntimeError(f"JP node factor fields are unavailable: {', '.join(missing)}")
+
         config: dict[str, Any] = {
             "run_id": run_id,
             "job_name": payload.get("job_name", "unnamed"),
@@ -1185,7 +1253,10 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
                 "benchmark": context.get("benchmark", "SH000300"),
                 "commission_rate": context.get("commission_rate", 0.00025),
                 "slippage": context.get("slippage", 0.0005),
-                "deal_price": context.get("deal_price", "close"),
+                "deal_price": context.get(
+                    "deal_price",
+                    "open" if str(context.get("market")).upper() == "JP" else "close",
+                ),
                 "market": context.get("market", "CN"),
                 "industry_as_feature": context.get("industry_as_feature", False),
             },
@@ -1327,7 +1398,9 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             return ""
         return f"http://{self.master_host}:8000/api/v1/models/training-runs/{run_id}/complete"
 
-    def _build_docker_run_cmd(self, container_name: str, *, direct_source: str = "") -> str:
+    def _build_docker_run_cmd(
+        self, container_name: str, *, direct_source: str = "", market: str = "CN"
+    ) -> str:
         """构造远端 docker run 命令字符串。
 
         train.py 与 inference 模板已 rsync 到工作目录并挂载覆盖镜像内置版，
@@ -1355,11 +1428,21 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
             f"|| python -m pip install -q --disable-pip-version-check {pkg} || exit 1"
             for pkg in _bootstrap_pkgs
         ) if _bootstrap_pkgs else "true"
+        jp_mounts = ""
+        if market == "JP":
+            for rel in (
+                "shared/stock_utils.py", "shared/training/schemas.py",
+                "services/engine/data_platform/quantjp_hub.py",
+                "services/engine/data_platform/jp_labels.py",
+                "services/engine/inference/prediction_provenance.py",
+            ):
+                jp_mounts += f"-v {self.work_dir}/backend_min/backend/{rel}:/app/backend/{rel}:ro "
         return (
             f"docker run -d --name {container_name} "
             f"{gpus_flag}"
             f"-v {self.work_dir}:/workspace "
             f"{data_mount}"
+            f"{jp_mounts}"
             f"-v {self.work_dir}/train.py:/app/train.py:ro "
             f"-v {self.work_dir}/preprocessing.py:/app/preprocessing.py:ro "
             f"-v {self.work_dir}/parallel_utils.py:/app/parallel_utils.py:ro "

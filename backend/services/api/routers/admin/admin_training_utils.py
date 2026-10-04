@@ -349,7 +349,9 @@ def _normalize_payload(payload: dict[str, Any], allowed_features: list[str]) -> 
     context = req.context
     if context.get("market") == "JP":
         from backend.services.engine.data_platform.jp_labels import label_formula
-        req.label_formula = label_formula(target_horizon_days, target_mode)
+        req.label_formula = label_formula(
+            target_horizon_days, target_mode, context.get("deal_price") or "open"
+        )
     explain = normalize_explain(payload.get("explain"))
 
     normalized: dict[str, Any] = {
@@ -590,8 +592,7 @@ async def _apply_window_probe(payload: dict[str, Any], market: str) -> dict[str,
     - 未显式指定 valid/test 时，用**节点探针窗口的交易日序列**把 val_ratio 换算
       成三段绝对日期写回 payload（随后由 _normalize_payload 做 gap 校验）。
 
-    探针失败（SSH 不通/节点数据不可读）不阻断训练：返回原 payload，由编排器
-    退回中心日历兜底并记日志。
+    JP 远程节点必须读到自身的发布数据；其他市场保留探针失败时的原有兜底。
     """
     from backend.services.engine.training import window_probe as wp
 
@@ -609,7 +610,21 @@ async def _apply_window_probe(payload: dict[str, Any], market: str) -> dict[str,
             "window probe failed (node=%s source=%s market=%s): %s",
             node_id, source, market, exc,
         )
+        if market == "JP" and node_id != "local":
+            raise HTTPException(
+                status_code=422,
+                detail=f"Training node {node_id} JP data probe failed: {exc}",
+            ) from exc
         return payload
+
+    if market == "JP" and node_id != "local" and (
+        not node_window.ready or not node_window.trading_dates
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Training node {node_id} JP data is not ready: "
+            f"{node_window.reason or 'no published factor dates'}",
+        )
 
     report: dict[str, Any] = {
         "node_id": node_id,
@@ -878,14 +893,8 @@ async def submit_training_job(
     context = context_raw if isinstance(context_raw, dict) else {}
     benchmark_hint = str(context.get("benchmark") or "SH000300").strip()
     market = _resolve_market(context.get("market"), benchmark_hint)
-    if market == "JP" and (str(payload.get("node_id") or "local").strip() or "local") != "local":
-        raise HTTPException(
-            status_code=422,
-            detail="JP training supports the local node only; remote JP datasets are not adapted",
-        )
     payload, allowed_features = await _resolve_quantdb_factor_payload(payload, market)
-    # 探针模式：窗口与切分来自数据本身（本地直读 / 远程 SSH 探针），
-    # 与因子目录的草稿·发布状态无关；远程节点成段缺数据在此拦截。
+    # 窗口与切分来自本地直读 / 远程 SSH 探针，节点成段缺数据在此拦截。
     payload = await _apply_window_probe(payload, market)
     normalized_payload = _normalize_payload(payload, allowed_features)
     run_id = f"train_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}"

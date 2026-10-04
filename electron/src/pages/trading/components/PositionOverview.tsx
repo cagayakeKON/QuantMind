@@ -3,13 +3,15 @@ import { ChevronLeft, ChevronRight, Minus, PieChart as PieChartIcon, TrendingDow
 import { PieChart as RechartsPieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts';
 
 import { NormalizedHolding, PositionSummary } from '../utils/positionMetrics';
+import { normalizeStockCode } from '../../../utils/portfolioUtils';
+import { getMarketConfig } from '../../../config/marketConfig';
 
 interface PositionOverviewProps {
     holdings: NormalizedHolding[];
     summary: PositionSummary;
     variant?: 'full' | 'compact';
     className?: string;
-    currency?: string;
+    quoteCurrency?: string;
 }
 
 const FULL_LEFT_RATIO = 'w-[30%]';
@@ -24,9 +26,15 @@ const formatAmount = (val: number) => {
     return `¥${val.toFixed(2)}`;
 };
 
-const PositionOverview: React.FC<PositionOverviewProps> = ({ holdings, summary, variant = 'full', className, currency }) => {
-    const moneyPrefix = currency ? `${currency} ` : '¥';
-    const displayAmount = currency ? (value: number) => `${currency} ${Math.abs(value) >= 10000 ? `${(value / 10000).toFixed(2)}万` : value.toFixed(2)}` : formatAmount;
+const formatQuote = (code: string, value: number, currency?: string) => {
+    // The account contains holdings from every market. Its selected page must
+    // not relabel another holding's quotation as Japanese yen.
+    const isJapanese = getMarketConfig('JP').stockCodePattern?.test(normalizeStockCode(code));
+    const label = isJapanese ? 'JPY ' : currency && currency !== 'JPY' ? `${currency} ` : '¥';
+    return `${label}${value.toFixed(2)}`;
+};
+
+const PositionOverview: React.FC<PositionOverviewProps> = ({ holdings, summary, variant = 'full', className, quoteCurrency }) => {
     const [currentPage, setCurrentPage] = useState(1);
     const itemsPerPage = 10;
     const compact = variant === 'compact';
@@ -83,7 +91,7 @@ const PositionOverview: React.FC<PositionOverviewProps> = ({ holdings, summary, 
                                     ))}
                                 </Pie>
                                 <Tooltip
-                                    formatter={(value: number) => `${moneyPrefix}${(value / 10000).toFixed(2)}万`}
+                                    formatter={(value: number) => `¥${(value / 10000).toFixed(2)}万`}
                                     contentStyle={{
                                         backgroundColor: '#fff',
                                         borderColor: '#e5e7eb',
@@ -111,7 +119,7 @@ const PositionOverview: React.FC<PositionOverviewProps> = ({ holdings, summary, 
                             <div className="text-center">
                                 <div className="text-xs text-gray-400 font-medium">总资产</div>
                                 <div className={`${compact ? 'text-lg' : 'text-xl'} font-bold text-gray-800`}>
-                                    {moneyPrefix}{((totalAsset || positionValue + cashValue) / 10000).toFixed(2)}万
+                                    ¥{((totalAsset || positionValue + cashValue) / 10000).toFixed(2)}万
                                 </div>
                             </div>
                         </div>
@@ -166,23 +174,23 @@ const PositionOverview: React.FC<PositionOverviewProps> = ({ holdings, summary, 
                                         </td>
                                         {!compact && (
                                             <td className="px-3 py-1.5 text-center text-sm text-gray-700">
-                                                {moneyPrefix}{holding.cost.toFixed(2)}
+                                                {formatQuote(holding.code, holding.cost, quoteCurrency)}
                                             </td>
                                         )}
                                         {!compact && (
                                             <td className="px-3 py-1.5 text-center text-sm font-semibold text-gray-900">
-                                                {moneyPrefix}{holding.current.toFixed(2)}
+                                                {formatQuote(holding.code, holding.current, quoteCurrency)}
                                             </td>
                                         )}
                                         <td className="px-3 py-1.5 text-center text-sm font-bold text-gray-900">
-                                            {displayAmount(holding.value)}
+                                            {formatAmount(holding.value)}
                                         </td>
                                         {!compact && (
                                             <td className={`px-3 py-1.5 text-center text-sm font-bold flex items-center justify-center gap-1 ${
                                                 holding.profit > 0 ? 'text-red-500' : holding.profit < 0 ? 'text-emerald-500' : 'text-black'
                                             }`}>
                                                 {holding.profit > 0 ? <TrendingUp size={14} /> : holding.profit < 0 ? <TrendingDown size={14} /> : <Minus size={14} />}
-                                                {holding.profit > 0 ? '+' : ''}{displayAmount(holding.profit)}
+                                                {holding.profit > 0 ? '+' : ''}{formatAmount(holding.profit)}
                                             </td>
                                         )}
                                         <td className={`px-3 py-1.5 text-center text-sm font-semibold ${

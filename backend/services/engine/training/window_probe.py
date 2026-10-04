@@ -57,6 +57,9 @@ class DataWindow:
     schema_hash: str = ""
     reason: str | None = None
     probed_at: str = ""
+    data_dir: str | None = None
+    data_version: str | None = None
+    data_root: str | None = None
 
     def dates_in(self, start: str | None = None, end: str | None = None) -> list[str]:
         return [
@@ -191,6 +194,9 @@ async def _probe_remote(node_id: str, source: str, market: str) -> DataWindow:
         schema_hash=str(profile.get("schema_hash") or ""),
         reason=profile.get("reason"),
         probed_at=str(profile.get("probed_at") or _now_iso()),
+        data_dir=profile.get("data_dir"),
+        data_version=profile.get("data_version"),
+        data_root=profile.get("data_root"),
     )
 
 
@@ -215,8 +221,6 @@ async def probe_data_window(
     node = str(node_id or "local").strip() or "local"
     kind = "local" if node == "local" else "remote"
     market = str(market or "CN").upper()
-    if market == "JP" and kind == "remote":
-        raise ValueError("JP training supports the local node only")
     key = (kind, node, source, market)
     if not force:
         cached = _cache_get(key)

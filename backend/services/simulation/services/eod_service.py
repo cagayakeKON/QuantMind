@@ -204,6 +204,13 @@ async def _execute_eod(trade_date: date) -> bool:
             # P0-6：total计入Redis侧short_proceeds，与盘中equity口径对齐。
             failed_accounts = 0
             for account in accounts:
+                from backend.services.simulation.services.legacy_jp_state import LegacyJPNativeState, require_standard_account
+
+                try:
+                    await require_standard_account(session, account.tenant_id, account.user_id)
+                except LegacyJPNativeState:
+                    logger.warning("Native-JPY ledger excluded from EOD: %s", account.account_id)
+                    continue
                 try:
                     projection = await projection_svc.load_projection(
                         tenant_id=account.tenant_id,

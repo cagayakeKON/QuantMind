@@ -373,23 +373,13 @@ async def run_trading_readiness_precheck(
     user_id: str,
     tenant_id: str,
     market: str = "CN",
-    execution_context=None,
 ) -> dict[str, Any]:
     normalized_mode = str(mode or "REAL").strip().upper()
     if normalized_mode not in {"REAL", "SHADOW", "SIMULATION"}:
         raise ValueError(f"unsupported trading mode: {mode}")
-
-    dated_inputs = None
-    if execution_context is not None:
-        from backend.services.live_trading.services.hosted_readiness_inputs import (
-            parse_hosted_readiness_inputs,
-        )
-
-        dated_inputs = parse_hosted_readiness_inputs(
-            execution_context,
-            mode=normalized_mode,
-            market=market,
-        )
+    jp_market = str(market or "CN").upper() == "JP"
+    if jp_market and normalized_mode != "SIMULATION":
+        raise ValueError("JP supports simulation only")
 
     if normalized_mode == "SIMULATION":
         # 模拟盘精简自检：只保留决定能否启动/自动成交的 5 项。
@@ -437,19 +427,11 @@ async def run_trading_readiness_precheck(
             default_model = await model_registry_service.get_default_model(
                 tenant_id=tenant_id,
                 user_id=user_id,
-                **(
-                    {"market": dated_inputs.market}
-                    if dated_inputs is not None else {}
-                ),
             )
-            if not default_model:
+            if not default_model and not jp_market:
                 try:
                     candidates = await model_registry_service.list_models(
-                        tenant_id=tenant_id, user_id=user_id, include_archived=False,
-                        **(
-                            {"market": dated_inputs.market}
-                            if dated_inputs is not None else {}
-                        ),
+                        tenant_id=tenant_id, user_id=user_id, include_archived=False
                     )
                     avail = [
                         m
@@ -469,6 +451,11 @@ async def run_trading_readiness_precheck(
                 except Exception:
                     pass
             model_configured = bool(default_model)
+            if jp_market and default_model:
+                metadata = default_model.get("metadata_json") or {}
+                if isinstance(metadata, str):
+                    metadata = json.loads(metadata)
+                model_configured = str(metadata.get("market") or "CN").upper() == "JP"
             checks.append(
                 _build_check(
                     "default_model_configured",
@@ -477,6 +464,7 @@ async def run_trading_readiness_precheck(
                     (
                         f"默认模型已配置 (model_id={default_model.get('model_id')})"
                         if model_configured
+                        else "请先在模型管理中设置当前市场的默认模型" if jp_market
                         else "未配置默认模型，请先在模型管理中设置默认模型"
                     ),
                 )
@@ -527,12 +515,16 @@ async def run_trading_readiness_precheck(
                 check_stream_series_freshness,
             )
 
-            if dated_inputs is not None:
-                from backend.services.live_trading.services.hosted_readiness_inputs import (
-                    check_hosted_dated_quotes,
-                )
+            if jp_market:
+                from backend.services.simulation.services.local_market_data import get_local_market_data
 
-                res = await check_hosted_dated_quotes(dated_inputs)
+                def check_jp_daily():
+                    data = get_local_market_data("JP")
+                    latest = data.latest_trade_date()
+                    ready = latest is not None and bool(data.load_date(latest))
+                    return {"ok": ready, "message": f"JP 本地日线 {latest}" if ready else "JP 本地日线不可用"}
+
+                res = await asyncio.to_thread(check_jp_daily)
             else:
                 res = await asyncio.to_thread(
                     check_stream_series_freshness,
@@ -540,13 +532,13 @@ async def run_trading_readiness_precheck(
                     allow_quantdb_fallback=False,
                     market=market,
                 )
-            is_trading_hours = _is_cn_trading_hours() if dated_inputs is None else False
+            is_trading_hours = False if jp_market else _is_cn_trading_hours()
             if res.get("ok"):
                 quote_ok = True
                 quote_detail = str(res.get("message") or "远程行情新鲜")
-            elif dated_inputs is not None:
+            elif jp_market:
                 quote_ok = False
-                quote_detail = f"[阻断] {res.get('message') or '日期开盘行情不可用'}"
+                quote_detail = f"[阻断] {res.get('message') or 'JP 本地日线不可用'}"
             elif is_trading_hours:
                 quote_ok = False
                 quote_detail = (
@@ -568,15 +560,15 @@ async def run_trading_readiness_precheck(
                 )
             )
         except Exception as exc:
-            is_trading_hours = _is_cn_trading_hours() if dated_inputs is None else False
+            is_trading_hours = jp_market or _is_cn_trading_hours()
             checks.append(
                 _build_check(
                     "stream_series_freshness",
                     "行情就绪",
-                    not is_trading_hours and dated_inputs is None,
+                    not is_trading_hours,
                     (
                         f"[阻断] quote_probe_error={exc}"
-                        if is_trading_hours or dated_inputs is not None
+                        if is_trading_hours
                         else f"[WARNING] quote_probe_error={exc}"
                     ),
                 )
@@ -590,10 +582,6 @@ async def run_trading_readiness_precheck(
                 tenant_id=tenant_id,
                 user_id=user_id,
                 mode=normalized_mode,
-                **(
-                    {"execution_context": dated_inputs}
-                    if dated_inputs is not None else {}
-                ),
             )
         except Exception as exc:
             signal_readiness = {

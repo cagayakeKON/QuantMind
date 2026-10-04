@@ -7,7 +7,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
-from types import SimpleNamespace
 
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +16,6 @@ from backend.services.simulation.models.cash_ledger import SimulationCashLedger
 from backend.services.simulation.models.position_lot import SimulationPositionLot
 from backend.shared.simulation_margin_math import margin_trade_deltas
 from backend.shared.simulation_position_keys import build_position_key
-from backend.services.simulation.services.market_rules import infer_market
 
 
 @dataclass
@@ -25,15 +23,6 @@ class CashLedgerEntry:
     event_type: str
     amount: float
     note: str | None = None
-
-
-@dataclass(frozen=True)
-class MarketLedgerScope:
-    """Native-currency ledger under the owner root, without root FX projection."""
-
-    account_id: str
-    currency: str
-    after_snapshot: dict[str, Any]
 
 
 def _naive_utc(value: datetime | None) -> datetime:
@@ -147,7 +136,6 @@ class SimulationLedgerService:
         order: Any,
         trade: Any,
         account_snapshot: dict[str, Any] | None,
-        market_scope: MarketLedgerScope | None = None,
     ) -> None:
         tenant_id = str(getattr(order, "tenant_id", None) or "default").strip() or "default"
         user_id = str(getattr(order, "user_id", None) or "").strip()
@@ -155,26 +143,12 @@ class SimulationLedgerService:
             return
         account_id = self.build_account_id(tenant_id, user_id)
         before_snapshot = dict(account_snapshot or {})
-        account = await self._ensure_account(
-            account_id=account_id, tenant_id=tenant_id, user_id=user_id,
-            account_snapshot={} if market_scope else before_snapshot,
+        account = await self._ensure_account(account_id=account_id, tenant_id=tenant_id, user_id=user_id, account_snapshot=before_snapshot)
+        after_snapshot = self.apply_trade_to_account_snapshot(
+            trade=trade,
+            account_snapshot=before_snapshot,
+            order=order,
         )
-        after_snapshot = (
-            market_scope.after_snapshot if market_scope
-            else self.apply_trade_to_account_snapshot(
-                trade=trade, account_snapshot=before_snapshot, order=order,
-            )
-        )
-        if market_scope is not None:
-            expected_scope = f"{account_id}:{infer_market(order.symbol).value}"
-            if market_scope.account_id != expected_scope:
-                raise ValueError(
-                    "Market ledger scope differs from the order owner/market"
-                )
-            account_id = market_scope.account_id
-            account = SimpleNamespace(
-                account_id=account_id, cash=after_snapshot["cash"]
-            )
 
         cash_entries = self.build_cash_entries(
             side=getattr(order.side, "value", order.side),
@@ -191,7 +165,6 @@ class SimulationLedgerService:
             trade_time=_naive_utc(getattr(trade, "executed_at", None)),
             entries=cash_entries,
             ending_balance=float(after_snapshot.get("cash") or account.cash or 0.0),
-            currency=market_scope.currency if market_scope else "CNY",
         )
 
         await self._apply_position_lots(
@@ -202,8 +175,7 @@ class SimulationLedgerService:
             trade=trade,
         )
 
-        if market_scope is None:
-            self._sync_account_projection(account, after_snapshot)
+        self._sync_account_projection(account, after_snapshot)
 
     async def _ensure_account(
         self,
@@ -250,7 +222,6 @@ class SimulationLedgerService:
         trade_time: datetime,
         entries: list[CashLedgerEntry],
         ending_balance: float,
-        currency: str = "CNY",
     ) -> None:
         running_balance = float(ending_balance or 0.0) - sum(
             float(entry.amount or 0.0) for entry in entries
@@ -270,7 +241,6 @@ class SimulationLedgerService:
                     trade_date=trade_time,
                     occurred_at=trade_time,
                     note=entry.note,
-                    currency=currency,
                 )
             )
 

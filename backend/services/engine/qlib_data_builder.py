@@ -702,7 +702,7 @@ class QlibDataBuilder:
                     f"""
                     SELECT symbol, CAST(time AS DATE) d,
                            open, high, low, close, volume, amount,
-                           {factors}
+                           {factors}, upper_limit_touched, lower_limit_touched
                     FROM read_parquet('{kline_glob}', hive_partitioning=1)
                     ORDER BY symbol, d
                     """
@@ -773,6 +773,11 @@ class QlibDataBuilder:
                     for field in ("open", "high", "low", "close", "volume", "amount")
                 }
                 if is_jp:
+                    # Native Qlib Exchange limit expressions; missing/zero volume
+                    # remains non-tradable, without a previous-quote fill fallback.
+                    unavailable = group["volume"].isna() | (group["volume"] <= 0)
+                    cols["jp_limit_buy"] = (group["upper_limit_touched"] | unavailable).astype(float).values
+                    cols["jp_limit_sell"] = (group["lower_limit_touched"] | unavailable).astype(float).values
                     # amount is raw JPY, volume is split-adjusted. Rights do not
                     # alter volume, so price and volume factors must be separate.
                     with np.errstate(invalid="ignore", divide="ignore"):

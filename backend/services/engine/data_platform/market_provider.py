@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import importlib
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -16,16 +17,9 @@ class LocalMarketProvider:
     position_info_loader: str | None = None
     style_feature_loader_factory: str | None = None
     backtest_result_adapter: str | None = None
-    execution_data_factory: str | None = None
-    replay_signal_input_loader: str | None = None
-    replay_cash_rules_factory: str | None = None
-    replay_session_input_preparer: str | None = None
     strategy_template_market: str | None = None
     hosted_schedule_factory: str | None = None
-    simulation_cycle_input_preparer: str | None = None
-    simulation_account_input_adapter: str | None = None
     fundamental_snapshot_reader_factory: str | None = None
-    dated_strategy_input_factory: str | None = None
     stock_pool_input_factory: str | None = None
     strategy_lab_provider_factory: str | None = None
     trading_agents_router: str | None = None
@@ -48,18 +42,15 @@ class LocalMarketProvider:
         return self.open(data_version)
 
     def open(self, data_version: str | None = None):
-        if data_version is not None:
-            if not data_version or not self.execution_data_factory:
-                raise ValueError("A published stock snapshot version is required")
-            module, factory = self.execution_data_factory.rsplit(".", 1)
-            reader = getattr(importlib.import_module(module), factory)(data_version)
-            hub = reader.hub
-            if hub.data_dir.name != data_version:
-                raise ValueError(
-                    "Stock snapshot publication does not match its version"
-                )
-            return hub
         cls = getattr(importlib.import_module(self.module), self.hub_class)
+        if data_version is not None:
+            if not data_version:
+                raise ValueError("A published stock snapshot version is required")
+            root = Path(cls()._publication_root).resolve() / "versions"
+            selected = (root / data_version).resolve()
+            if not selected.is_relative_to(root) or not (selected / "manifest.json").is_file():
+                raise ValueError("Pinned stock snapshot version is unavailable")
+            return cls(selected)
         return cls(cls().data_dir)  # One immutable publication per request.
 
 
@@ -89,18 +80,10 @@ LOCAL_MARKET_PROVIDERS = {
         benchmark_price_loader="backend.services.simulation.jp.analysis_data.read_benchmark_prices",
         position_info_loader="backend.services.simulation.jp.analysis_data.read_position_info",
         style_feature_loader_factory="backend.services.simulation.jp.analysis_data.create_style_feature_loader",
-        backtest_result_adapter="backend.services.simulation.jp.analysis_data.public_legacy_result_view",
-        execution_data_factory="backend.services.simulation.jp.data.open_execution_data",
         raw_hub_factory="backend.services.engine.data_platform.jp_publication.open_raw_hub",
-        replay_signal_input_loader="backend.services.simulation.jp.replay_data.read_signal_input",
-        replay_cash_rules_factory="backend.services.simulation.jp.replay_cash_rules.open_cash_rules",
-        replay_session_input_preparer="backend.services.simulation.jp.replay_data.prepare_session_inputs",
         strategy_template_market="japan",
         hosted_schedule_factory="backend.services.simulation.jp.schedule.open_schedule_context",
-        simulation_cycle_input_preparer="backend.services.simulation.jp.cycle_data.prepare_cycle_inputs",
-        simulation_account_input_adapter="backend.services.simulation.jp.account_data.open_account_input_adapter",
         fundamental_snapshot_reader_factory="backend.services.simulation.jp.feature_snapshot.create_reader",
-        dated_strategy_input_factory="backend.services.simulation.jp.strategy_snapshot.open_backtest_inputs",
         native_api_symbol_pattern=r"^JP[0-9][A-Z0-9]{3}[0-9]$",
         trading_agents_router="backend.services.simulation.jp.research_data.route_tool",
         strategy_lab_provider_factory="backend.services.simulation.jp.lab_data.open_lab_provider",

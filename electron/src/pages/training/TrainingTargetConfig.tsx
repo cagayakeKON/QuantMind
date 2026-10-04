@@ -6,6 +6,7 @@ import { Dayjs } from 'dayjs';
 import dayjs from 'dayjs';
 import {
   TrainingTarget,
+  DealPrice,
   TimePeriodMap,
   TargetMode,
   SplitKey,
@@ -23,6 +24,7 @@ const { RangePicker } = DatePicker;
 
 interface TrainingTargetConfigProps {
   market?: string;
+  dealPrice?: DealPrice;
   target: TrainingTarget;
   timePeriods: TimePeriodMap;
   onTargetChange: (target: TrainingTarget) => void;
@@ -51,6 +53,7 @@ const SectionHeader: React.FC<{ title: string; desc: string; icon?: React.ReactN
 
 export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
   market,
+  dealPrice,
   target,
   timePeriods,
   onTargetChange,
@@ -59,7 +62,7 @@ export const TrainingTargetConfig: React.FC<TrainingTargetConfigProps> = ({
   factorFilter,
   onFactorFilterChange,
 }) => {
-  const labelFormula = buildLabelFormula(target, market);
+  const labelFormula = buildLabelFormula(target, market, dealPrice);
   const effectiveTradeDate = buildEffectiveTradeDate(target, timePeriods.test[0], market);
 
   const trainDays = daysBetween(timePeriods.train);

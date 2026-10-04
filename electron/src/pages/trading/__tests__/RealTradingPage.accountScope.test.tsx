@@ -28,7 +28,7 @@ function deferred<T>() {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.market = 'CN';
-  mocks.account.mockResolvedValue({ total_asset: 300, cash: 300, currency: 'JPY' });
+  mocks.account.mockResolvedValue({ total_asset: 300, cash: 300, currency: 'CNY' });
   mocks.status.mockResolvedValue({ status: 'stopped', execution_config: { stock_pool_code: 'new-scope' }, live_trade_config: { account_id: 'new-scope' } });
 });
 afterEach(cleanup);

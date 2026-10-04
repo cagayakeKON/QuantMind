@@ -22,13 +22,15 @@ router = APIRouter()
 # 策略生成的市场上下文：LLM 生成/修改策略时按所选市场适配数据与规则口径
 STRATEGY_MARKET_CONTEXT: dict[str, str] = {
     "JP": (
-        "日本普通股现金日线市场，货币 JPY，基准 TOPIX 价格指数。"
+        "日本普通股日线市场，行情货币 JPY，基准 TOPIX 价格指数。"
         "API/策略代码使用 JP72030；数据层使用 72030.JP；Qlib 使用 jp_72030，"
-        "必须经 StockCodeUtil 转换。公开回测入口 market='JP'，deal_price='open'，"
-        "signal_lag_days=1，use_vectorized=False，复用平台日期现金执行器。"
-        "信号来自前一已发布交易日；交易单位、tick、涨跌停、拆合股和结算按执行日期处理。"
-        "不注入 A 股印花税、最低佣金或融券池；佣金/滑点使用 JP 参数。"
-        "仅支持现金多头，做空、杠杆、实盘券商、分钟及盘中订单不支持。"
+        "必须经 StockCodeUtil 转换。公开回测入口 market='JP'，报价按公共 deal_price 配置，"
+        "use_vectorized=False，复用原 Qlib 策略、Exchange 和 Position。"
+        "回测使用复权价格及普通数值因子；日本交易单位和涨跌停通过市场规则接入。"
+        "不注入 A 股印花税或融券池；费用使用公共 commission、min_commission 和 impact_cost_coefficient。"
+        "不要生成日期现金执行器、独立结算台账或资金来源协议；模拟盘沿用原账户 base_currency 口径，没有自动换汇。"
+        "日频回测沿用原策略的多空及杠杆配置；模拟交易为现金多头，"
+        "实盘券商、分钟及盘中订单未接入。"
         "2018-10-01 前缺少逐股票历史交易单位资料时必须阻断。"
     ),
     "CN": (

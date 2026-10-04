@@ -17,110 +17,53 @@ import PositionMonitor from '../PositionMonitor';
 function account(market = 'JP'): AccountInfo {
   return {
     total_asset: 100000, cash: 80000, market_value: 20000,
-    execution_context: {market, trade_date: '2026-09-29', data_version: 'v1', commission_rate: '0', slippage_bps: '5'},
+    base_currency: 'CNY',
     positions: [{symbol: market === 'JP' ? 'JP72030' : 'SH600036', name: '已有账户名称', volume: 100, price: 200, cost_price: 190, market_value: 20000}],
   } as AccountInfo;
 }
 
-describe('original position view with optional dated valuation', () => {
+describe('shared position view with Japanese holdings', () => {
   beforeEach(() => {vi.clearAllMocks(); mocks.market = 'JP'; mocks.names.mockResolvedValue([]);});
-  it('uses the committed dated checkpoint, original calculations and currency without latest quotes or profiles', () => {
-    const saved = account();
+  it.each(['JP', 'CN', 'HK', 'US', 'FUTURES', 'CRYPTO'])('keeps common names, user currency and quote overlay in %s', async market => {
+    mocks.market = market;
+    const saved = account(market === 'JP' ? 'JP' : 'CN');
+    const symbol = market === 'JP' ? 'JP72030' : 'SH600036';
     const before = structuredClone(saved);
-    render(<PositionMonitor userId="7" isActive accountInfo={saved} />);
-    expect(screen.getByLabelText('持仓估值来源')).toHaveTextContent('2026-09-29 · JPY');
-    const row = screen.getByText('JP72030').closest('tr')!;
-    expect(within(row).getByText('已有账户名称')).toBeInTheDocument();
-    expect(within(row).getByText('JPY 200.00')).toBeInTheDocument();
-    expect(within(row).getByText('+JPY 1000.00')).toBeInTheDocument();
-    expect(mocks.subscribe).not.toHaveBeenCalled();
-    expect(mocks.add).not.toHaveBeenCalled();
-    expect(mocks.names).not.toHaveBeenCalled();
+    const view = render(<PositionMonitor userId="7" isActive accountInfo={saved} />);
+    await waitFor(() => expect(mocks.names).toHaveBeenCalledWith([symbol], 10, 50));
+    expect(mocks.subscribe).toHaveBeenCalledWith({symbols: [symbol]});
+    const handler = mocks.add.mock.calls.find(([topic]) => topic === 'quote')![1];
+    await act(async () => {handler({stock_code: symbol, data: {price: 210}});});
+    const row = screen.getByText(symbol).closest('tr')!;
+    expect(within(row).getByText(market === 'JP' ? 'JPY 210.00' : '¥210.00')).toBeInTheDocument();
+    expect(screen.queryByLabelText('持仓估值来源')).not.toBeInTheDocument();
+    expect(within(row).getByText('+¥2000.00')).toBeInTheDocument();
     expect(saved).toEqual(before);
+    view.rerender(<PositionMonitor userId="7" isActive={false} accountInfo={saved} />);
+    expect(mocks.unsubscribe).toHaveBeenCalledWith([symbol]);
+    expect(mocks.remove).toHaveBeenCalledWith('quote', handler);
   });
-  it('does not relabel a different-market account while the market account is loading', () => {
-    render(<PositionMonitor userId="7" isActive accountInfo={account('CN')} />);
-    expect(screen.queryByText('SH600036')).not.toBeInTheDocument();
-    expect(screen.getByLabelText('持仓估值来源')).toHaveTextContent('尚无已提交估值');
-  });
-  it('fills missing names from the saved publication/date without using returned latest prices', async () => {
-    const saved = account();
-    (saved.positions as any[])[0].name = '';
-    mocks.names.mockResolvedValue([{code: 'JP72030', result: {success: true, data: {name: '日期资料名称', price: 999}}}]);
+  it('keeps aggregate positions from the user account across market selections', async () => {
+    const saved = account('CN');
+    (saved.positions as any[]).push({...((account().positions as any[])[0]), name: '日本持仓'});
+    (saved.positions as any[]).push({...((account('CN').positions as any[])[0]), symbol: 'JPM', name: 'US ticker'});
     render(<PositionMonitor userId="7" isActive accountInfo={saved} />);
-    await waitFor(() => expect(screen.getByText('日期资料名称')).toBeInTheDocument());
-    expect(mocks.names).toHaveBeenCalledWith(['JP72030'], 10, 50, {market: 'JP', asof: '2026-09-29', data_version: 'v1'});
-    expect(screen.getByText('JPY 200.00')).toBeInTheDocument();
-    expect(screen.queryByText('JPY 999.00')).not.toBeInTheDocument();
-    expect(mocks.subscribe).not.toHaveBeenCalled();
+    const cnRow = (await screen.findByText('SH600036')).closest('tr')!;
+    const jpRow = (await screen.findByText('JP72030')).closest('tr')!;
+    expect(within(cnRow).getByText('¥190.00')).toBeInTheDocument();
+    expect(within(cnRow).getByText('¥200.00')).toBeInTheDocument();
+    expect(within(jpRow).getByText('JPY 190.00')).toBeInTheDocument();
+    expect(within(jpRow).getByText('JPY 200.00')).toBeInTheDocument();
+    const usRow = screen.getByText('JPM').closest('tr')!;
+    expect(within(usRow).getByText('¥200.00')).toBeInTheDocument();
+    expect(within(usRow).queryByText('JPY 200.00')).not.toBeInTheDocument();
+    expect(screen.queryByText('尚无已提交估值')).not.toBeInTheDocument();
   });
-  it('ignores an earlier date/version name reply after switching checkpoint', async () => {
-    const first = account();
-    (first.positions as any[])[0].name = '';
-    const second = structuredClone(first);
-    second.execution_context = {...second.execution_context!, trade_date: '2026-09-30', data_version: 'v2'};
-    let resolve!: (value: unknown[]) => void;
-    mocks.names.mockImplementationOnce(() => new Promise(done => {resolve = done;}));
-    mocks.names.mockResolvedValue([{code: 'JP72030', result: {success: true, data: {name: '新日期名称'}}}]);
-    const view = render(<PositionMonitor userId="7" isActive accountInfo={first} />);
-    view.rerender(<PositionMonitor userId="7" isActive accountInfo={second} />);
-    await waitFor(() => expect(screen.getByText('新日期名称')).toBeInTheDocument());
-    await act(async () => {resolve([{code: 'JP72030', result: {success: true, data: {name: '迟到的旧名称'}}}]);});
-    expect(screen.queryByText('迟到的旧名称')).not.toBeInTheDocument();
-    expect(screen.getByText('新日期名称')).toBeInTheDocument();
-  });
-  it('preserves saved inline names when later checkpoints add them', async () => {
-    const first = account();
-    (first.positions as any[])[0].name = '';
-    mocks.names.mockResolvedValue([{code: 'JP72030', result: {success: true, data: {name: '补全名称'}}}]);
-    const view = render(<PositionMonitor userId="7" isActive accountInfo={first} />);
-    await waitFor(() => expect(screen.getByText('补全名称')).toBeInTheDocument());
-    view.rerender(<PositionMonitor userId="7" isActive accountInfo={account()} />);
-    expect(screen.getByText('已有账户名称')).toBeInTheDocument();
-    expect(screen.queryByText('补全名称')).not.toBeInTheDocument();
-  });
-  it('keeps code fallback when historical metadata is unavailable, including StrictMode', async () => {
-    const saved = account();
-    (saved.positions as any[])[0].name = '';
-    mocks.names.mockResolvedValue([{code: 'JP72030', result: {success: false}}]);
-    render(<React.StrictMode><PositionMonitor userId="7" isActive accountInfo={saved} /></React.StrictMode>);
-    await waitFor(() => expect(mocks.names).toHaveBeenCalledTimes(2));
+  it('uses JP symbol fallback when metadata is unavailable', async () => {
+    const saved = account(); (saved.positions as any[])[0].name = '';
+    render(<PositionMonitor userId="7" isActive accountInfo={saved} />);
+    await waitFor(() => expect(mocks.names).toHaveBeenCalled());
     expect(screen.getAllByText('JP72030')).toHaveLength(2);
     expect(screen.getByText('JPY 200.00')).toBeInTheDocument();
-  });
-  it('does not carry latest names from the previous global account into a dated checkpoint', async () => {
-    mocks.market = 'CN';
-    mocks.names.mockResolvedValue([{code: 'JP72030', result: {success: true, data: {name: '最新资料名称'}}}]);
-    const view = render(<PositionMonitor userId="7" isActive accountInfo={account()} />);
-    await waitFor(() => expect(screen.getByText('最新资料名称')).toBeInTheDocument());
-    mocks.market = 'JP';
-    view.rerender(<PositionMonitor userId="7" isActive accountInfo={account()} />);
-    expect(screen.getByText('已有账户名称')).toBeInTheDocument();
-    expect(screen.queryByText('最新资料名称')).not.toBeInTheDocument();
-  });
-  it('releases the previous quote subscription when entering a dated market', async () => {
-    mocks.market = 'CN';
-    const view = render(<PositionMonitor userId="7" isActive accountInfo={account('CN')} />);
-    await waitFor(() => expect(mocks.subscribe).toHaveBeenCalledOnce());
-    mocks.market = 'JP';
-    view.rerender(<PositionMonitor userId="7" isActive accountInfo={account()} />);
-    expect(mocks.unsubscribe).toHaveBeenCalledWith(['SH600036']);
-    expect(mocks.subscribe).toHaveBeenCalledOnce();
-    expect(screen.getByText('JP72030')).toBeInTheDocument();
-  });
-  it.each(['CN', 'HK', 'US', 'FUTURES', 'CRYPTO'])('keeps original %s names, quote subscriptions and valuation overlay', async market => {
-    mocks.market = market;
-    const saved = account('CN');
-    const view = render(<PositionMonitor userId="7" isActive accountInfo={saved} />);
-    await waitFor(() => expect(mocks.names).toHaveBeenCalledWith(['SH600036'], 10, 50));
-    expect(mocks.subscribe).toHaveBeenCalledWith({symbols: ['SH600036']});
-    const handler = mocks.add.mock.calls.find(([topic]) => topic === 'quote')![1];
-    await act(async () => {handler({stock_code: 'SH600036', data: {price: 210}});});
-    const row = screen.getByText('SH600036').closest('tr')!;
-    expect(within(row).getByText('¥210.00')).toBeInTheDocument();
-    expect(screen.queryByLabelText('持仓估值来源')).not.toBeInTheDocument();
-    view.rerender(<PositionMonitor userId="7" isActive={false} accountInfo={saved} />);
-    expect(mocks.unsubscribe).toHaveBeenCalledWith(['SH600036']);
-    expect(mocks.remove).toHaveBeenCalledWith('quote', handler);
   });
 });

@@ -28,12 +28,12 @@ async function exportRows(label: string) {
 describe('original history page with registered Japanese codes', () => {
   beforeEach(() => {vi.clearAllMocks(); mocks.market = 'JP'; mocks.orders.mockResolvedValue([...originalRows, ...jpRows]); mocks.names.mockResolvedValue([]);});
   afterEach(async () => {await act(async () => {message.destroy();});});
-  it('keeps original owner pagination requests and renders only Japanese rows with normalized codes, JST and JPY', async () => {
+  it('keeps original owner pagination requests and renders only Japanese rows with normalized codes, original timestamps and account currency', async () => {
     render(<TradingHistory {...props} />);
     const code = await screen.findByText('JP72030');
     const row = code.closest('tr')!;
     expect(within(row).getByText('09:00:00')).toBeInTheDocument();
-    expect(within(row).getByText('JPY 200.00')).toBeInTheDocument();
+    expect(within(row).getByText('¥200.00')).toBeInTheDocument();
     expect(screen.getByText('JP216A0')).toBeInTheDocument();
     expect(screen.getByText('JP72050')).toBeInTheDocument();
     expect(screen.queryByText('600036.SH')).not.toBeInTheDocument();
@@ -45,15 +45,15 @@ describe('original history page with registered Japanese codes', () => {
     await waitFor(() => expect(mocks.csv).toHaveBeenCalledOnce());
     const exported = mocks.csv.mock.lastCall![0];
     expect(exported).toHaveLength(1);
-    expect(exported[0]).toMatchObject({代码: 'JP216A0', 成交金额: '20000.00', 币种: 'JPY'});
+    expect(exported[0]).toMatchObject({代码: 'JP216A0', 成交金额: '20000.00'});
     expect(exported[0].时间).toContain('09:00:00');
   });
-  it('exports the original numeric Excel fields with one optional currency field', async () => {
+  it('exports the original numeric Excel fields with the original export schema', async () => {
     render(<TradingHistory {...props} />);
     await screen.findByText('JP72030');
     await exportRows('导出当前页 Excel');
     await waitFor(() => expect(mocks.excel).toHaveBeenCalledOnce());
-    expect(mocks.excel.mock.lastCall![0][0]).toMatchObject({代码: 'JP72030', 数量: 100, 价格: '200.00', 金额: 20000, 币种: 'JPY'});
+    expect(mocks.excel.mock.lastCall![0][0]).toMatchObject({代码: 'JP72030', 数量: 100, 价格: '200.00', 金额: 20000});
   });
   it.each([['CN', '600036.SH'], ['HK', '00700.HK'], ['US', 'AAPL'], ['FUTURES', 'IF2609.CN'], ['CRYPTO', 'BTCUSDT']])('keeps original %s filtering, time, money and export fields', async (market, symbol) => {
     mocks.market = market;
@@ -85,7 +85,7 @@ describe('original history page with registered Japanese codes', () => {
     expect(screen.queryByText('JP72030')).not.toBeInTheDocument();
     expect(mocks.orders).toHaveBeenCalledTimes(2);
   });
-  it('keeps the dated history readable in the application StrictMode', async () => {
+  it('keeps Japanese history readable in the application StrictMode', async () => {
     render(<React.StrictMode><TradingHistory {...props} /></React.StrictMode>);
     await screen.findByText('JP72030');
     expect(screen.queryByText('600036.SH')).not.toBeInTheDocument();

@@ -895,9 +895,7 @@ def _default_live_trade_config() -> dict:
     }
 
 
-def _normalize_live_trade_config(
-    user_live_cfg: dict, base_live_cfg: dict, *, execution_context=None
-) -> dict:
+def _normalize_live_trade_config(user_live_cfg: dict, base_live_cfg: dict) -> dict:
     merged = dict(_default_live_trade_config())
     merged.update(base_live_cfg or {})
     merged.update(user_live_cfg or {})
@@ -908,17 +906,19 @@ def _normalize_live_trade_config(
         "AM": ("09:30", "11:30"),
         "PM": ("13:00", "15:00"),
     }
-    if execution_context is not None:
-        from backend.services.live_trading.services.hosted_lifecycle_inputs import (
-            lifecycle_session_ranges,
-        )
+    if str(merged.get("market") or "").upper() == "JP":
+        from backend.services.simulation.services.market_schedule import open_registered_schedule_context
 
-        session_ranges = lifecycle_session_ranges(execution_context)
+        schedule = open_registered_schedule_context("JP")
+        session_ranges = {
+            name: (start.strftime("%H:%M"), end.strftime("%H:%M"))
+            for name, (start, end) in schedule.continuous_windows(datetime.now(schedule.timezone).date()).items()
+        }
+
+    jp_market = str(merged.get("market") or "").upper() == "JP"
 
     def _covers(start, end, hhmm):
-        return start <= hhmm and (
-            hhmm < end if execution_context is not None else hhmm <= end
-        )
+        return start <= hhmm <= end
 
     def _hhmm(value: object) -> str:
         text = str(value or "").strip()
@@ -949,14 +949,7 @@ def _normalize_live_trade_config(
                 status_code=400,
                 detail=(
                     f"live_trade_config.{label}={hhmm} 不在任何交易时段内"
-                    + (
-                        "（" + " / ".join(
-                            f"{name} {start}-{end}"
-                            for name, (start, end) in session_ranges.items()
-                        ) + "，连续交易结束时刻不含）"
-                        if execution_context is not None
-                        else "（AM 09:30-11:30 / PM 13:00-15:00）"
-                    )
+                    + (f"（{session_ranges}）" if jp_market else "（AM 09:30-11:30 / PM 13:00-15:00）")
                 ),
             )
     needed = list(
@@ -1038,11 +1031,7 @@ def _normalize_live_trade_config(
                 detail=(
                     f"live_trade_config.{key}={target} 必须落在已选执行时段内"
                     f"（当前 {ranges_text}）。"
-                    + (
-                        f"请使用 {ranges_text} 内的连续交易时点。"
-                        if execution_context is not None
-                        else "若要用下午时点请勾选 PM/下午；若只跑上午请把时点改到 09:30-11:30。"
-                    )
+                    f"若要用下午时点请勾选 PM/下午；若只跑上午请把时点改到 09:30-11:30。"
                 ),
             )
 

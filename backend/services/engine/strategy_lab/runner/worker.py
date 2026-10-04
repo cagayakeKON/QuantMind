@@ -145,7 +145,7 @@ def run_request(req: dict[str, Any]) -> int:
         if not getattr(provider, "market", None):
             result.config = ctx.to_config_dict()
         if getattr(provider, "market", None):
-            result.config.update(market=provider.market, currency=provider.currency, data_version=provider.reader.data_version, execution_model="dated_cash", run_params=params)
+            result.config.update(market=provider.market, currency=provider.currency, data_version=provider.reader.data_version, execution_model="simple", run_params=params)
         # Re-attach data_snapshot_at via provider helper if present
         try:
             from ..engine.data_provider import data_snapshot_at

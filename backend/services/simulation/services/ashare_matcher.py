@@ -11,10 +11,13 @@ import math
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Protocol
 
 from backend.services.simulation.services.local_market_data import DailyBar
-from backend.services.simulation.services.market_rules import lot_size_for_symbol
+from backend.services.simulation.services.market_rules import (
+    Market,
+    infer_market,
+    lot_size_for_symbol,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,27 +47,13 @@ class MatchResult:
     """撮合结果。"""
 
     success: bool
-    fill_price: float | Decimal = 0.0
+    fill_price: float = 0.0
     fill_quantity: int = 0
-    commission: float | Decimal = 0.0
-    stamp_duty: float | Decimal = 0.0
-    transfer_fee: float | Decimal = 0.0
-    total_fee: float | Decimal = 0.0
+    commission: float = 0.0
+    stamp_duty: float = 0.0
+    transfer_fee: float = 0.0
+    total_fee: float = 0.0
     reason: str = ""
-
-
-class DailyMatchRules(Protocol):
-    """Optional dated market rules for the existing daily matching pipeline."""
-
-    def validate(self, side: str, quantity: int, bar: DailyBar) -> None: ...
-
-    def lot_size(self, bar: DailyBar) -> int: ...
-
-    def price(self, side: str, bar: DailyBar, cfg: MatchConfig) -> Decimal: ...
-
-    def fees(
-        self, quantity: int, price: Decimal, side: str, cfg: MatchConfig
-    ) -> tuple[Decimal, Decimal, Decimal, Decimal]: ...
 
 
 def _pick_price(bar: DailyBar, mode: str) -> float:
@@ -102,10 +91,8 @@ def match_order(
     bar: DailyBar,
     cfg: MatchConfig,
     available_volume: float | None = None,
-    *,
-    rules: DailyMatchRules | None = None,
 ) -> MatchResult:
-    """按现有默认规则或显式提供的市场规则撮合单笔订单。
+    """对单笔订单执行 A 股撮合规则。
 
     Args:
         side: "buy" / "sell"
@@ -113,18 +100,15 @@ def match_order(
         bar: 当日行情（不复权）
         cfg: 撮合参数
         available_volume: T+1 可卖量（仅 sell 时需要）
-        rules: 可选的带日期市场适配；未提供时原撮合行为保持不变。
     """
     # ── 停牌 ──
     if bar.suspended:
         return MatchResult(success=False, reason="SUSPENDED")
 
     # ── 涨跌停 ──
-    if rules is not None:
-        rules.validate(side, quantity, bar)
-    if rules is None and side == "buy" and bar.close >= bar.limit_up:
+    if side == "buy" and bar.close >= bar.limit_up:
         return MatchResult(success=False, reason="LIMIT_UP")
-    if rules is None and side == "sell" and bar.close <= bar.limit_down:
+    if side == "sell" and bar.close <= bar.limit_down:
         return MatchResult(success=False, reason="LIMIT_DOWN")
 
     # ── T+1 可卖量 ──
@@ -136,11 +120,17 @@ def match_order(
             )
 
     # ── 整手 ──
-    lot_size = (
-        rules.lot_size(bar)
-        if rules is not None
-        else max(1, int(lot_size_for_symbol(bar.symbol) or cfg.lot_size or _LOT_SIZE))
-    )
+    if infer_market(bar.symbol) is Market.JP:
+        from backend.services.simulation.services.market_rules import japan_trading_unit
+
+        try:
+            lot_size = japan_trading_unit(bar.trade_date, {"lot_size": bar.lot_size})
+        except ValueError as exc:
+            return MatchResult(success=False, reason=str(exc))
+    else:
+        lot_size = max(
+            1, int(lot_size_for_symbol(bar.symbol) or cfg.lot_size or _LOT_SIZE)
+        )
     if side == "buy":
         fill_qty = _floor_to_lot(quantity, lot_size)
         if fill_qty <= 0:
@@ -150,34 +140,35 @@ def match_order(
         fill_qty = quantity
 
     # ── 成交价 + 滑点 ──
-    if rules is not None:
-        fill_price = rules.price(side, bar, cfg)
-        if fill_price <= 0:
-            return MatchResult(success=False, reason="INVALID_PRICE")
-    else:
-        base_price = _pick_price(bar, cfg.price_mode)
-        if base_price <= 0:
-            return MatchResult(success=False, reason="INVALID_PRICE")
+    base_price = _pick_price(bar, cfg.price_mode)
+    if base_price <= 0:
+        return MatchResult(success=False, reason="INVALID_PRICE")
 
-        slippage = cfg.slippage_bps / 10000
-        direction = 1 if side == "buy" else -1
-        fill_price = round(base_price * (1 + direction * slippage), 4)
+    slippage = cfg.slippage_bps / 10000
+    direction = 1 if side == "buy" else -1
+    fill_price = round(base_price * (1 + direction * slippage), 4)
+    if infer_market(bar.symbol) is Market.JP and bar.price_tick > 0:
+        from backend.services.simulation.jp.rules import round_price
 
-        # 涨跌停价格钳制
-        if math.isfinite(bar.limit_up) and fill_price > bar.limit_up:
-            fill_price = bar.limit_up
-        if bar.limit_down > 0 and fill_price < bar.limit_down:
-            fill_price = bar.limit_down
+        fill_price = float(
+            round_price(
+                Decimal(str(fill_price)),
+                side.upper(),
+                bar.trade_date,
+                {"scale_category": bar.tick_category},
+            )
+        )
+
+    # 涨跌停价格钳制
+    if math.isfinite(bar.limit_up) and fill_price > bar.limit_up:
+        fill_price = bar.limit_up
+    if bar.limit_down > 0 and fill_price < bar.limit_down:
+        fill_price = bar.limit_down
 
     # ── 费用 ──
-    if rules is not None:
-        commission, stamp_duty, transfer_fee, total_fee = rules.fees(
-            fill_qty, fill_price, side, cfg
-        )
-    else:
-        commission, stamp_duty, transfer_fee, total_fee = compute_fees(
-            fill_qty, fill_price, side, cfg
-        )
+    commission, stamp_duty, transfer_fee, total_fee = compute_fees(
+        fill_qty, fill_price, side, cfg
+    )
 
     return MatchResult(
         success=True,
