@@ -223,7 +223,13 @@ async def read_manual_snapshot(context, *, tenant_id, user_id, redis, db=None):
         return None
     # Prospective settlement/corporate actions are pure during preview. Actual
     # lots and checkpoints are changed only by the original locked fill path.
-    account = context.cash_rules.prepare_day(account, context.trade_date)
+    from backend.services.simulation.services.dated_account_day import (
+        project_account_to_day,
+    )
+
+    account = await asyncio.to_thread(
+        project_account_to_day, context.cash_rules, account, context.trade_date
+    )
     return {
         "account_id": manager.account_id,
         "snapshot_at": account.get("timestamp"),

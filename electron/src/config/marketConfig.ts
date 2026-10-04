@@ -26,7 +26,7 @@ export interface MarketConfig {
   /** 后端 market adapter ID */
   adapterId: string;
   trainingDefaults?: { commissionRate: number; dealPrice: 'open' | 'close' };
-  trainingCapabilities?: {dealPrices: ('open' | 'close')[]; industryFeature: boolean};
+  trainingCapabilities?: {dealPrices: ('open' | 'close')[]; industryFeature: boolean; executionNodes?: ('local' | 'remote')[]};
   simulationExecution?: 'dated_daily';
   simulationTimeZone?: string;
   stockCodePattern?: RegExp;
@@ -46,7 +46,7 @@ export const MARKET_CONFIGS: Record<AppMarket, MarketConfig> = {
     defaultUniverse: 'all', benchmark: 'TOPIX', benchmarkName: 'TOPIX 价格指数',
     currency: 'JPY', calendar: 'XTKS', adapterId: 'japan',
     trainingDefaults: { commissionRate: 0, dealPrice: 'open' },
-    trainingCapabilities: {dealPrices: ['open'], industryFeature: false},
+    trainingCapabilities: {dealPrices: ['open'], industryFeature: false, executionNodes: ['local']},
     simulationExecution: 'dated_daily',
     simulationTimeZone: 'Asia/Tokyo',
     stockCodePattern: /^JP\d[A-Z0-9]{3}\d$/,

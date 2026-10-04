@@ -138,7 +138,7 @@ class ContextRequest(BaseModel):
         market = resolve_market(self.market, str(self.benchmark or ""))
         benchmark = str(
             self.benchmark or ("TOPIX" if market == "JP" else "SH000300")
-        ).strip()
+        ).strip() or ("TOPIX" if market == "JP" else "SH000300")
         if market == "JP" and benchmark.upper() != "TOPIX":
             raise HTTPException(
                 status_code=422,

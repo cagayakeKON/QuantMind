@@ -2456,33 +2456,51 @@ def _compute_shap_drivers_sync(
         d_ref = date.fromisoformat(as_of_date_str)
     except (ValueError, TypeError):
         d_ref = date.today()
-    snap = _resolve_snapshot_parquet(market, d_ref.year)
-    if snap is None:
-        return None
-    sym = _snapshot_symbol(market, normalized_symbol)
-
     import numpy as np
     import pandas as pd
     import pyarrow.parquet as pq
 
-    schema = set(pq.read_schema(snap).names)
-    avail = [c for c in feat_cols if c in schema]
-    if not avail:
-        return None
-    try:
-        tbl = pq.read_table(
-            snap, columns=["symbol", "trade_date"] + avail,
-            filters=[("symbol", "=", sym)],
-        )
-        df = tbl.to_pandas()
-    except Exception:
-        return None
-    if df.empty:
-        return None
-    df = df[df["trade_date"].astype(str) <= as_of_date_str]
-    if df.empty:
-        return None
-    row = df.sort_values("trade_date").iloc[-1]
+    from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
+
+    provider = LOCAL_MARKET_PROVIDERS.get(market)
+    native_loader = provider.model_feature_snapshot_loader if provider else None
+    if native_loader:
+        from importlib import import_module
+
+        module, function = native_loader.rsplit(".", 1)
+        try:
+            snapshot = getattr(import_module(module), function)(
+                meta, normalized_symbol, d_ref, feat_cols
+            )
+        except Exception as exc:
+            logger.warning("%s model feature attribution unavailable: %s", market, exc)
+            return None
+        if snapshot is None:
+            return None
+        row, avail = snapshot
+    else:
+        snap = _resolve_snapshot_parquet(market, d_ref.year)
+        if snap is None:
+            return None
+        sym = _snapshot_symbol(market, normalized_symbol)
+        schema = set(pq.read_schema(snap).names)
+        avail = [c for c in feat_cols if c in schema]
+        if not avail:
+            return None
+        try:
+            tbl = pq.read_table(
+                snap, columns=["symbol", "trade_date"] + avail,
+                filters=[("symbol", "=", sym)],
+            )
+            df = tbl.to_pandas()
+        except Exception:
+            return None
+        if df.empty:
+            return None
+        df = df[df["trade_date"].astype(str) <= as_of_date_str]
+        if df.empty:
+            return None
+        row = df.sort_values("trade_date").iloc[-1]
 
     fill_values: dict[str, Any] = meta.get("fill_values") or {}
     x = np.array(

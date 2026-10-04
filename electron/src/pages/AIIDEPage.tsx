@@ -44,6 +44,7 @@ import { PAGE_LAYOUT } from '../config/pageLayout';
 import { useAppSelector } from '../store';
 import { selectCurrentMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
+import { getAiIdeDefaultModel } from './aiIdeMarketContext';
 
 /**
  * AI-IDE Page Implementation
@@ -348,29 +349,35 @@ const AIIDEPage: React.FC = () => {
 
     // Initial load: Fetch file list from cloud
     React.useEffect(() => {
+        fetchLocalFileList();
+        return () => {
+            if (eventSourceRef.current) eventSourceRef.current.close();
+        };
+    }, []);
+
+    const usesMarketDefault = currentMarket === 'JP';
+    React.useEffect(() => {
+        let active = true;
+        setDefaultModelName('');
         const init = async () => {
-             // 只需要加载文件列表（云端模式下）
-             await fetchLocalFileList();
              // 加载默认模型名，供执行上下文提示
              try {
-                 const defaultModel = await modelTrainingService.getDefaultModel();
+                 const defaultModel = await getAiIdeDefaultModel(currentMarket);
                  const mid = String(defaultModel?.model_id || '').trim();
                  if (mid) {
                      const meta = defaultModel?.metadata_json || {};
                      const display = String(
                          (meta as any)?.display_name || (meta as any)?.name || (meta as any)?.model_name || ''
                      ).trim();
-                     setDefaultModelName(display || mid);
+                     if (active) setDefaultModelName(display || mid);
                  }
              } catch (err) {
                  console.warn('[AI-IDE] 默认模型解析失败', err);
              }
         };
         init();
-        return () => {
-            if (eventSourceRef.current) eventSourceRef.current.close();
-        };
-    }, []);
+        return () => { active = false; };
+    }, [usesMarketDefault]);
 
     React.useEffect(() => {
         if (activeTab === 'local') {
@@ -822,7 +829,7 @@ const AIIDEPage: React.FC = () => {
         let runId: string | undefined;
 
         try {
-            const defaultModel = await modelTrainingService.getDefaultModel();
+            const defaultModel = await getAiIdeDefaultModel(currentMarket);
             const defaultModelId = String(defaultModel?.model_id || '').trim();
             if (defaultModelId) {
                 modelId = defaultModelId;
@@ -850,7 +857,8 @@ const AIIDEPage: React.FC = () => {
         }
 
         try {
-            const latestRun = await modelTrainingService.getLatestInferenceRun(modelId);
+            const latestRun = currentMarket === 'JP' && !modelId
+                ? null : await modelTrainingService.getLatestInferenceRun(modelId);
             const resolvedModelId = String(latestRun?.model_id || '').trim();
             const latestRunId = String(latestRun?.run_id || '').trim();
             if (!modelId && resolvedModelId) {
@@ -864,6 +872,7 @@ const AIIDEPage: React.FC = () => {
         }
 
         return {
+            ...(currentMarket === 'JP' ? {market: currentMarket} : {}),
             strategy_id: strategyId,
             model_id: modelId,
             run_id: runId,

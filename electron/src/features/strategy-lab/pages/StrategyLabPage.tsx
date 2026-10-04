@@ -304,6 +304,7 @@ const StrategyLabPage: React.FC = () => {
         open={aiOpen}
         onClose={() => setAiOpen(false)}
         code={code}
+        market={currentMarket}
         lastError={
           result?.status === 'failed'
             ? { message: result.error || '', traceback: result.error_traceback || '' }

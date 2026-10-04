@@ -205,6 +205,10 @@ def run_market_sync(market: str, cfg: dict[str, Any]) -> dict[str, Any]:
             except Exception as exc:  # noqa: BLE001
                 logger.error("%s 定时同步 qlib 缓存失败: %s", market, exc, exc_info=True)
                 result["qlib"] = {"status": "error", "reason": str(exc)}
+                if market == "JP":
+                    # JP research is published only after the full feature build.
+                    # Let the public scheduled-task wrapper report this failure.
+                    raise
 
     if market == "JP":
         from backend.services.engine.data_platform.jp_publication import (

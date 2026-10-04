@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+import os
 import shutil
 import tempfile
 from datetime import date
@@ -65,6 +66,49 @@ def prediction_path(directory: Path) -> Path:
     raise RuleDataMissing(
         "JP predictions are unavailable; run historical inference first"
     )
+
+
+def replay_prediction_snapshot(directory: Path, expected_digest=None) -> Path:
+    """Capture one inference file into a content-addressed replay artifact.
+
+    A legacy session may be captured only while its saved whole-file digest
+    still matches. Never reconstruct old predictions from a changed source.
+    """
+    artifacts = directory / "replay_predictions"
+    if expected_digest is not None:
+        if (
+            not isinstance(expected_digest, str)
+            or len(expected_digest) != 64
+            or any(char not in "0123456789abcdef" for char in expected_digest)
+        ):
+            raise RuleDataMissing("Invalid JP replay prediction snapshot digest")
+        pinned = artifacts / f"{expected_digest}.parquet"
+        if pinned.is_file():
+            return pinned
+    source_path = prediction_path(directory)
+    artifacts.mkdir(exist_ok=True)
+    handle, temporary = tempfile.mkstemp(prefix=".capturing-", dir=artifacts)
+    try:
+        digest = hashlib.sha256()
+        with os.fdopen(handle, "wb") as target, source_path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+                target.write(chunk)
+        value = digest.hexdigest()
+        if expected_digest is not None and value != expected_digest:
+            raise RuleDataMissing(
+                "JP replay predictions changed before their saved snapshot was captured"
+            )
+        pinned = artifacts / f"{value}.parquet"
+        # Link publishes a complete artifact without replacing an existing one;
+        # a concurrent session with this digest reuses exactly the same bytes.
+        try:
+            os.link(temporary, pinned)
+        except FileExistsError:
+            pass
+        return pinned
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 def labels_available_on(meta, calendar, signal_day):

@@ -679,6 +679,11 @@ async def get_data_window(
     node = str(node_id or "local").strip() or "local"
     source = str(factor_source or wp.DEFAULT_FACTOR_SOURCE).strip()
     market_upper = str(market or "CN").upper()
+    if market_upper == "JP" and node != "local":
+        raise HTTPException(
+            status_code=422,
+            detail="JP training supports the local node only; remote JP datasets are not adapted",
+        )
 
     window = await wp.probe_data_window(
         node, source, market=market_upper, force=refresh

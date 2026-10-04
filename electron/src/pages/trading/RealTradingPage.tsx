@@ -77,9 +77,13 @@ const getErrorHttpStatus = (err: unknown): number | undefined => {
 const RealTradingPage: React.FC = () => {
     const currentMarket = useAppSelector(selectCurrentMarket);
     const datedMarket = getMarketConfig(currentMarket).simulationExecution ? currentMarket : undefined;
+    const replayEnabled = !!getMarketConfig(currentMarket).replay;
     const [executionInputs, setExecutionInputs] = useState<SimulationExecutionInputs>();
     const selectedInputs = executionInputs?.market === datedMarket ? executionInputs : undefined;
     const [activeTab, setActiveTab] = useState<ActiveTab>('manage');
+    useEffect(() => {
+        if (activeTab === 'replay' && !replayEnabled) setActiveTab('manage');
+    }, [activeTab, replayEnabled]);
 
     // 券商通道卡「去配置凭证」跳转：切到设置页签
     useEffect(() => {
@@ -141,7 +145,7 @@ const RealTradingPage: React.FC = () => {
         try {
             const { realTradingService } = await import('../../services/realTradingService');
             const statusData = datedMarket
-                ? await realTradingService.getStatus(userId, tradingMode, tenantId, datedMarket, selectedInputs?.execution_context)
+                ? await realTradingService.getStatus(userId, tradingMode, tenantId, datedMarket)
                 : await realTradingService.getStatus(userId, tradingMode, tenantId);
             const runtimeMode = resolveTradingAccountMode(statusData?.mode, tradingMode);
             const accountData = await realTradingService.getRuntimeAccount(userId, tenantId, runtimeMode, currentMarket).catch(() => null);
@@ -508,7 +512,7 @@ const RealTradingPage: React.FC = () => {
 
     const tabs: Array<{ id: ActiveTab; label: string; icon: LucideIcon }> = [
         { id: 'manage', label: '策略管理', icon: LayoutDashboard },
-        ...(getMarketConfig(currentMarket).replay ? [{ id: 'replay' as const, label: '时光回放', icon: Clock }] : []),
+        ...(replayEnabled ? [{ id: 'replay' as const, label: '时光回放', icon: Clock }] : []),
         // 时光回放功能尚存多处问题，暂时隐藏入口，完善后取消注释即可恢复（ReplayPage 渲染分支保留）
         // { id: 'replay', label: '时光回放', icon: Clock },
         { id: 'manual-task', label: '手动任务', icon: ClipboardList },
@@ -568,7 +572,7 @@ const RealTradingPage: React.FC = () => {
                 />
             )}
             {activeTab === 'settings' && <SettingsCenter userId={userId} isActive={activeTab === 'settings'} />}
-            {activeTab === 'replay' && <ReplayPage />}
+            {activeTab === 'replay' && replayEnabled && <ReplayPage />}
         </>
     );
 

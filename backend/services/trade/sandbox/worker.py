@@ -37,6 +37,8 @@ def _restricted_execute(code_str: str, sandbox_context):
         compiled_code = compile(code_str, "<strategy>", "exec")
 
         # 模拟执行环境初始化
+        sandbox_context.follow_active_runtime()
+        sandbox_context.wait_for_active_runtime()
         sandbox_context.log("Sandbox Strategy Starting...")
 
         # 定义一个简单的事件驱动钩子（真实环境需要更完备的生命周期：on_init, on_bar 等）

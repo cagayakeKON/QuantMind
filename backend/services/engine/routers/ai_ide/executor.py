@@ -79,13 +79,19 @@ def _build_runner_environment(
     user_id: str, request_meta: dict[str, Any] | None = None
 ) -> dict[str, str]:
     request_meta = request_meta or {}
+    market = str(request_meta.get("market") or "").strip().upper()
     # Normalize provider_uri: frontend sends relative paths like "db/qlib_data/hk_data"
     # but container expects absolute paths like "/app/db/qlib_data/hk_data"
     provider_uri = str(request_meta.get("qlib_provider_uri") or "").strip()
     if provider_uri and not provider_uri.startswith("/"):
         provider_uri = f"/app/{provider_uri}"
     if not provider_uri:
-        provider_uri = "/app/db/qlib_data"
+        if market == "JP":
+            from backend.shared.qlib_paths import resolve_qlib_provider_uri
+
+            provider_uri = resolve_qlib_provider_uri("JP")
+        else:
+            provider_uri = "/app/db/qlib_data"
 
     # Compute market-specific default pred path
     # （pred 仍按调用方给定的旧容器约定解析，不随缓存归一改位置）
@@ -96,7 +102,10 @@ def _build_runner_environment(
     try:
         from backend.shared.qlib_paths import fallback_to_ready_provider_uri
 
-        ready_uri = fallback_to_ready_provider_uri(provider_uri)
+        ready_uri = (
+            provider_uri if market == "JP"
+            else fallback_to_ready_provider_uri(provider_uri)
+        )
         if ready_uri != provider_uri:
             logger.warning(
                 "AI-IDE provider_uri 未就绪，回退到可用缓存目录: %s -> %s",
@@ -114,7 +123,7 @@ def _build_runner_environment(
         "QLIB_DATA_PATH": provider_uri,
         "QLIB_PRED_PATH": os.getenv("AI_IDE_PRED_PATH", default_pred),
         "AI_IDE_ALLOW_FEATURE_SIGNAL_FALLBACK": os.getenv(
-            "AI_IDE_ALLOW_FEATURE_SIGNAL_FALLBACK", "true"
+            "AI_IDE_ALLOW_FEATURE_SIGNAL_FALLBACK", "false" if market == "JP" else "true"
         ),
     }
     meta_env_map = {
@@ -124,6 +133,7 @@ def _build_runner_environment(
         "qlib_provider_uri": "AI_IDE_BACKTEST_PROVIDER_URI",
         "qlib_region": "AI_IDE_BACKTEST_REGION",
         "benchmark": "AI_IDE_BACKTEST_BENCHMARK",
+        "market": "AI_IDE_BACKTEST_MARKET",
     }
     for meta_key, env_key in meta_env_map.items():
         value = str(request_meta.get(meta_key) or "").strip()
@@ -133,6 +143,11 @@ def _build_runner_environment(
     # 否则子容器里的用户代码又会去读那份没人同步的旧缓存
     if env.get("AI_IDE_BACKTEST_PROVIDER_URI"):
         env["AI_IDE_BACKTEST_PROVIDER_URI"] = provider_uri
+    if market == "JP":
+        env["AI_IDE_BACKTEST_MARKET"] = "JP"
+        env["AI_IDE_BACKTEST_PROVIDER_URI"] = provider_uri
+        env.setdefault("AI_IDE_BACKTEST_BENCHMARK", "TOPIX")
+        env.setdefault("AI_IDE_BACKTEST_REGION", "us")
     passthrough_keys = [
         "APP_ENV",
         "DB_DRIVER",
@@ -158,6 +173,8 @@ def _build_runner_environment(
         "QLIB_SIGNAL_MIN_DATES",
         "QLIB_SIGNAL_MIN_INSTRUMENTS",
         "QLIB_SIGNAL_MAX_NAN_RATIO",
+        "QM_QUANTJP_DATA_DIR",
+        "QM_JP_TRADING_UNITS_FILE",
     ]
     for key in passthrough_keys:
         value = os.getenv(key)
@@ -167,6 +184,7 @@ def _build_runner_environment(
 
 
 class StartRequest(BaseModel):
+    market: str | None = None
     file_id: str | None = None
     path: str | None = None  # 兼容前端字段，通常即 ID
     content: str | None = None  # 运行未保存的代码
@@ -573,7 +591,11 @@ STRATEGY_PATH = "/app/strategy.py"
 try:
     from backend.shared.qlib_paths import fallback_to_ready_provider_uri as _fallback_qlib
 
-    QLIB_DATA_PATH = _fallback_qlib(os.getenv("AI_IDE_BACKTEST_PROVIDER_URI", ""))
+    QLIB_DATA_PATH = (
+        os.getenv("AI_IDE_BACKTEST_PROVIDER_URI") or os.getenv("QLIB_DATA_PATH", "")
+        if os.getenv("AI_IDE_BACKTEST_MARKET", "").strip().upper() == "JP"
+        else _fallback_qlib(os.getenv("AI_IDE_BACKTEST_PROVIDER_URI", ""))
+    )
 except Exception:  # noqa: BLE001
     QLIB_DATA_PATH = os.getenv("AI_IDE_BACKTEST_PROVIDER_URI", "/app/db/qlib_data")
 
@@ -675,7 +697,9 @@ def _init_qlib():
     from qlib.data import D
 
     provider_uri = QLIB_DATA_PATH
-    region = os.getenv("AI_IDE_BACKTEST_REGION") or "cn"
+    region = os.getenv("AI_IDE_BACKTEST_REGION") or (
+        "us" if os.getenv("AI_IDE_BACKTEST_MARKET", "").strip().upper() == "JP" else "cn"
+    )
     if not os.path.exists(provider_uri):
         print(f"[ERROR] Qlib 数据目录不存在: {provider_uri}")
         return False
@@ -721,22 +745,33 @@ def _run_module_backtest(module):
         return 2
 
     # 3. 从环境变量获取回测参数（由 AI-IDE 前端/后端注入）
-    start_date = os.getenv("AI_IDE_BACKTEST_START_DATE", (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"))
-    end_date = os.getenv("AI_IDE_BACKTEST_END_DATE", datetime.now().strftime("%Y-%m-%d"))
+    market = os.getenv("AI_IDE_BACKTEST_MARKET", "").strip().upper() or None
+    is_jp = market == "JP"
+    default_start = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+    default_end = datetime.now().strftime("%Y-%m-%d")
+    if is_jp and not (os.getenv("AI_IDE_BACKTEST_START_DATE") and os.getenv("AI_IDE_BACKTEST_END_DATE")):
+        from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
+        from importlib import import_module
+
+        loader = LOCAL_MARKET_PROVIDERS[market].strategy_runner_date_loader
+        module_name, function = loader.rsplit(".", 1)
+        default_start, default_end = getattr(import_module(module_name), function)()
+    start_date = os.getenv("AI_IDE_BACKTEST_START_DATE", default_start)
+    end_date = os.getenv("AI_IDE_BACKTEST_END_DATE", default_end)
     initial_capital = float(os.getenv("AI_IDE_BACKTEST_INITIAL_CAPITAL", "1000000"))
     universe = os.getenv("AI_IDE_BACKTEST_UNIVERSE", "all")
-    benchmark = os.getenv("AI_IDE_BACKTEST_BENCHMARK", "SH000300")
+    benchmark = os.getenv("AI_IDE_BACKTEST_BENCHMARK", "TOPIX" if is_jp else "SH000300")
     model_id = os.getenv("AI_IDE_BACKTEST_MODEL_ID", "").strip() or None
     strategy_id = os.getenv("AI_IDE_BACKTEST_STRATEGY_ID", "").strip() or None
     run_id = os.getenv("AI_IDE_BACKTEST_RUN_ID", "").strip() or None
-    commission = float(os.getenv("AI_IDE_BACKTEST_COMMISSION", "0.00025"))
-    min_commission = float(os.getenv("AI_IDE_BACKTEST_MIN_COMMISSION", "5.0"))
-    stamp_duty = float(os.getenv("AI_IDE_BACKTEST_STAMP_DUTY", "0.0005"))
-    transfer_fee = float(os.getenv("AI_IDE_BACKTEST_TRANSFER_FEE", "0.00001"))
-    min_transfer_fee = float(os.getenv("AI_IDE_BACKTEST_MIN_TRANSFER_FEE", "0.01"))
-    impact_cost_coefficient = float(os.getenv("AI_IDE_BACKTEST_IMPACT_COST_COEFFICIENT", "0.0005"))
+    commission = float(os.getenv("AI_IDE_BACKTEST_COMMISSION", "0" if is_jp else "0.00025"))
+    min_commission = float(os.getenv("AI_IDE_BACKTEST_MIN_COMMISSION", "0" if is_jp else "5.0"))
+    stamp_duty = float(os.getenv("AI_IDE_BACKTEST_STAMP_DUTY", "0" if is_jp else "0.0005"))
+    transfer_fee = float(os.getenv("AI_IDE_BACKTEST_TRANSFER_FEE", "0" if is_jp else "0.00001"))
+    min_transfer_fee = float(os.getenv("AI_IDE_BACKTEST_MIN_TRANSFER_FEE", "0" if is_jp else "0.01"))
+    impact_cost_coefficient = float(os.getenv("AI_IDE_BACKTEST_IMPACT_COST_COEFFICIENT", "0" if is_jp else "0.0005"))
     signal_lag_days = int(os.getenv("AI_IDE_BACKTEST_SIGNAL_LAG_DAYS", "1"))
-    deal_price = os.getenv("AI_IDE_BACKTEST_DEAL_PRICE", "close")
+    deal_price = os.getenv("AI_IDE_BACKTEST_DEAL_PRICE", "open" if is_jp else "close")
     risk_free_rate = float(os.getenv("AI_IDE_BACKTEST_RISK_FREE_RATE", "0.02"))
 
     print(f"[SYSTEM] 回测参数: {start_date} ~ {end_date}, capital={initial_capital}, universe={universe}")
@@ -759,6 +794,7 @@ def _run_module_backtest(module):
         )
 
         request = QlibBacktestRequest(
+            market=market,
             strategy_type="CustomStrategy",
             strategy_content=pathlib.Path(STRATEGY_PATH).read_text(encoding="utf-8"),
             strategy_params=dict(kwargs or {}),
@@ -781,7 +817,7 @@ def _run_module_backtest(module):
             deal_price=deal_price,
             risk_free_rate=risk_free_rate,
             allow_feature_signal_fallback=os.getenv(
-                "AI_IDE_ALLOW_FEATURE_SIGNAL_FALLBACK", "true"
+                "AI_IDE_ALLOW_FEATURE_SIGNAL_FALLBACK", "false" if is_jp else "true"
             ).strip().lower() in {"1", "true", "yes", "on"},
             qlib_provider_uri=QLIB_DATA_PATH,
             qlib_region=os.getenv("AI_IDE_BACKTEST_REGION"),
@@ -789,7 +825,7 @@ def _run_module_backtest(module):
             # universe=all 全市场 + 近 1 年区间下要 500s+，向量化引擎秒级完成。
             # 策略是 standard_topk 型 TopK 打分选股，向量化引擎语义一致。
             use_vectorized=os.getenv(
-                "AI_IDE_BACKTEST_VECTORIZED", "true"
+                "AI_IDE_BACKTEST_VECTORIZED", "false" if is_jp else "true"
             ).strip().lower() in {"1", "true", "yes", "on"},
         )
 
@@ -968,6 +1004,7 @@ async def start_execution(request: Request, item: StartRequest):
             "runner": runner_path,
             "image": runner_image,
             "request_meta": {
+                "market": item.market,
                 "strategy_id": item.strategy_id,
                 "model_id": item.model_id,
                 "run_id": item.run_id,

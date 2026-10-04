@@ -106,13 +106,35 @@ class DatedCashBacktestAccount:
                     "Orders require a cash side and positive integer quantity"
                 )
             symbol = context.symbol(request["symbol"])
+            basis = request.get("quantity_basis_date")
+            if basis is not None:
+                if basis != str(signal_day):
+                    raise ValueError("Order share basis must match its signal date")
+                convert = getattr(self.rules, "signal_quantity_at_execution", None)
+                if not callable(convert):
+                    raise NotImplementedError(
+                        "This market cannot convert signal-day shares"
+                    )
+                quantity = convert(symbol, signal_day, day, quantity, side=side)
             result = {
                 **deepcopy(request),
                 "symbol": StockCodeUtil.to_prefix(symbol, market=context.market),
                 "trade_date": str(day),
                 "settlement_date": str(self.reader.calendar.settlement_date(day)),
                 "status": "rejected",
+                "quantity": quantity,
+                **(
+                    {"signal_quantity": request["quantity"]}
+                    if basis is not None
+                    else {}
+                ),
             }
+            if basis is not None and quantity == 0:
+                result["reason"] = (
+                    "Signal quantity converts below the execution trading unit"
+                )
+                results.append(result)
+                continue
             bar = self.reader.get_bar(symbol, day)
             if bar is None:
                 # A missing price row does not waive required security metadata.

@@ -51,6 +51,19 @@ def run_cash_backtest(
         raise ValueError(
             "Select a shared strategy template instead of retired jp_cash_topk"
         )
+    from backend.services.engine.qlib_app.services.backtest_service import (
+        QlibBacktestService,
+    )
+    from backend.services.engine.qlib_app.services.strategy_builder import (
+        LongShortTopkBuilder,
+    )
+
+    if isinstance(
+        QlibBacktestService._resolve_strategy_builder(request), LongShortTopkBuilder
+    ):
+        raise ValueError(
+            "JP cash backtests do not support shorting or leverage strategies"
+        )
     if request.strategy_content:
         code_dates = extract_backtest_dates(request.strategy_content)
         if code_dates:

@@ -390,7 +390,10 @@ async def test_original_scheduler_persists_job_and_preserves_wall_clock_and_lock
         )
         assert job.status == "succeeded"
     assert await count_fills(pipe) == 1
-    assert [entry[0] for entry in client.writes] == (["set"])
+    assert [entry[0] for entry in client.writes] == (["set", "eval"])
+    updated = __import__("json").loads(client.values["trade:active_strategy:test:0007"])
+    assert updated["execution_context"]["trade_date"] == str(pipe.context.trade_date)
+    assert updated["execution_context_provenance"]["scheduled_trade_date"] == str(day)
     if not expired:
         assert (
             await instance._process_key("trade:active_strategy:test:0007", now=now)
@@ -433,7 +436,9 @@ async def test_hosted_next_session_resolves_fresh_artifact_and_preserves_cny(
     await initialize(pipe.pg, cash=30000)
     startup = request(pipe)["execution_context"]
     first = await scheduler.run_simulation_cycle_for_active(
-        **cycle_kwargs(pipe, execution_context=startup)
+        **cycle_kwargs(
+            pipe, execution_context=startup, active_runtime_id="parent-runtime"
+        )
     )
     assert first["status"] == "succeeded" and await count_fills(pipe) == 1
     cn_cache = pipe.pg.setup.redis.client.values["simulation:account:test:7"]
@@ -480,6 +485,7 @@ async def test_hosted_next_session_resolves_fresh_artifact_and_preserves_cny(
             run_id="ordinary-hosted-2",
             execution_context=startup,
             scheduled_trade_date=day + timedelta(days=1),
+            active_runtime_id="parent-runtime",
         )
     )
     assert result["status"] == "succeeded", result
@@ -500,6 +506,121 @@ async def test_hosted_next_session_resolves_fresh_artifact_and_preserves_cny(
         assert [
             row["trade_date"] for row in checkpoint["metadata"]["state"]["daily"]
         ] == ["2026-09-28", "2026-09-29"]
+
+    from backend.services.simulation.services import account_context
+    from backend.services.simulation.services.hosted_runtime_context import (
+        publish_hosted_runtime_context,
+    )
+    from backend.services.trade.routers.internal_strategy_lifecycle import (
+        sync_account_state,
+    )
+    from backend.services.trade.sandbox import context as sdk_module
+    from backend.services.trade.services import sandbox_execution_inputs
+    from backend.tests.test_jp_hosted_runtime_continuity import RuntimeRedis
+    from backend.tests.test_market_sandbox_execution import sdk, active, signal
+    from backend.tests.test_market_simulation_checkpoint import financial_rows
+    import json
+
+    worker = sdk(startup)
+    previous_runtime = active(worker)
+    runtime = RuntimeRedis(previous_runtime)
+    worker._redis = runtime
+    worker.follow_active_runtime()
+    assert publish_hosted_runtime_context(
+        runtime, runtime.key, previous_runtime, result
+    )
+    worker._refresh_execution_context()
+    assert worker.execution_context == result["runtime_execution_context"]
+    assert worker.execution_context["trade_date"] == str(day)
+    assert worker.execution_context["prediction_sha256"] == "b" * 64
+
+    @asynccontextmanager
+    async def sessions(*args, **kwargs):
+        async with pipe.pg.sessions() as db:
+            yield db
+
+    monkeypatch.setattr(account_context, "get_session", sessions)
+    public = await sync_account_state(
+        "00000007",
+        "test",
+        db=None,
+        market="JP",
+        trading_mode="SIMULATION",
+        execution_context=json.dumps(worker.execution_context),
+    )
+    assert public["execution_context"]["trade_date"] == str(day)
+    assert (
+        public["execution_context"]["last_cycle_inputs"]["prediction_sha256"]
+        == "b" * 64
+    )
+    monkeypatch.setattr(
+        sdk_module, "read_sandbox_simulation_account", lambda **kw: public
+    )
+    assert worker.get_cash() == public["cash"]
+    assert (
+        worker.get_position("7203")["volume"]
+        == public["positions"]["JP72030"]["volume"]
+    )
+    monkeypatch.setattr(sandbox_execution_inputs, "get_session", sessions)
+    before = await financial_rows(pipe.pg)
+    with pytest.raises(ValueError, match="completed"):
+        await sandbox_execution_inputs.prepare_sandbox_order_inputs(
+            signal(worker), json.loads(runtime.values[runtime.key]), pipe.pg.setup.redis
+        )
+    # Enforce the same completion boundary inside the locked fill scope, even
+    # if a sandbox preflight raced with the successful hosted close.
+    async with pipe.pg.sessions() as db:
+        manager = next_context.accounts(db, pipe.pg.setup.redis)
+        await manager.prepare_dated_day(day)
+        rejected = await manager.apply_dated_fill(
+            trade_date=day, symbol="JP72030", side="buy", matched=None, order_id="late"
+        )
+        assert not rejected["success"] and "completed" in rejected["reason"]
+        await db.rollback()
+    assert await financial_rows(pipe.pg) == before
+
+    from backend.services.simulation.jp.data import JPExecutionData
+
+    # Simulate Redis context publication failing after PG completed this cycle.
+    # Waiting recovers only this parent's committed cycle and never executes it.
+    runtime.values[runtime.key] = json.dumps(previous_runtime)
+    monkeypatch.setattr(
+        JPExecutionData, "latest_trade_date", lambda self, on_or_before=None: day
+    )
+    waiting = await scheduler.run_simulation_cycle_for_active(
+        **cycle_kwargs(
+            pipe,
+            execution_context=startup,
+            active_runtime_id="parent-runtime",
+            run_id="recovery-attempt",
+            scheduled_trade_date=day + timedelta(days=2),
+        )
+    )
+    assert (
+        waiting["status"] == "skipped"
+        and waiting["runtime_context_reconciliation"] is True
+    )
+    assert waiting["execution_context"]["hosted_cycle_run_id"] == "ordinary-hosted-2"
+    assert publish_hosted_runtime_context(
+        runtime, runtime.key, previous_runtime, waiting
+    )
+    assert (
+        json.loads(runtime.values[runtime.key])["execution_context"]
+        == result["runtime_execution_context"]
+    )
+    assert await financial_rows(pipe.pg) == before
+    other_runtime = await scheduler.run_simulation_cycle_for_active(
+        **cycle_kwargs(
+            pipe,
+            execution_context=startup,
+            active_runtime_id="replaced-parent",
+            run_id="other-recovery",
+            scheduled_trade_date=day + timedelta(days=2),
+        )
+    )
+    assert other_runtime["status"] == "skipped"
+    assert "runtime_context_reconciliation" not in other_runtime
+    assert await financial_rows(pipe.pg) == before
 
 
 @pg_test

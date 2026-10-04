@@ -83,6 +83,50 @@ class JapanReplayCashRules:
             raise ValueError(f"JP quantity must be a multiple of {unit}")
         return quantity
 
+    def signal_quantity_at_execution(
+        self, symbol, signal_day, execution_day, quantity, *, side
+    ):
+        """Convert prior-close raw shares into next-session raw shares.
+
+        Callers must explicitly declare this basis. Already execution-dated
+        orders retain their existing quantity contract.
+        """
+        if self.reader.calendar.next_session(signal_day) != execution_day:
+            raise ValueError("Share conversion requires adjacent cash sessions")
+        canonical = StockCodeUtil.to_prefix(symbol, market=self.market)
+        bars, master = self.reader.day(execution_day, [canonical])
+        if canonical not in master:
+            raise RuleDataMissing(
+                f"Missing dated JP master/units: {canonical} on {execution_day}"
+            )
+        bar = bars.get(canonical)
+        if bar is None:
+            raise RuleDataMissing(
+                f"Exact share-action input is unavailable for {canonical}"
+            )
+        factor = money(bar.get("adj_factor", "1"))
+        if factor <= 0:
+            raise RuleDataMissing(f"Invalid adjustment factor for {canonical}")
+        action = str(bar.get("ex_rights_type", ""))
+        if action == "3" or (factor != 1 and action not in {"1", "2"}):
+            raise RuleDataMissing(
+                f"Unresolved share-order corporate action: {canonical}"
+            )
+        ratio = Fraction(str(factor)).limit_denominator(100000)
+        converted = Fraction(quantity) / ratio
+        if converted.denominator != 1:
+            raise RuleDataMissing(
+                f"Fractional-share order treatment required: {canonical}"
+            )
+        unit = lot_size(execution_day, master[canonical])
+        if side == "SELL" and converted.numerator % unit:
+            raise RuleDataMissing(
+                f"Odd-lot sale treatment required after share conversion: {canonical}"
+            )
+        # The signal-day lot rounding can become a partial execution-day lot
+        # after a consolidation. Keep cash orders on the dated board lot grid.
+        return converted.numerator // unit * unit
+
     def validate_initial_cash(self, account, initial_cash):
         state = self._metadata(account)["state"]
         if money(state["initial_cash"]) != money(initial_cash):

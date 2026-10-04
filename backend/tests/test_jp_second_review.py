@@ -160,7 +160,7 @@ def test_sdk_worker_uses_published_jp_and_next_open_cash_execution(lab_native):
     assert result.status == "success" and len(result.trades) == 1
     trade = result.trades[0]
     raw = provider.reader.get_bar("JP72030", date(2026, 9, 29))
-    assert trade.date == "2026-09-29" and trade.price == raw.open and trade.qty == 100
+    assert trade.date == "2026-09-29" and trade.price == raw.open and trade.qty == 200
     assert trade.detail["currency"] == "JPY" and trade.detail["fee"] == "0"
     assert len(result.equity) == 3
 

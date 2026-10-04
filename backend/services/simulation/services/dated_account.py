@@ -303,6 +303,14 @@ class DatedSimulationAccountManager(SimulationAccountManager):
     async def apply_dated_fill(self, *, trade_date, symbol, side, matched, order_id):
         if self._account is None or self._pending_order is not None:
             raise ValueError("Registered cash fill has no exclusive prepared scope")
+        checkpoint = self._states(self._row).get(self.execution_market, {})
+        if checkpoint.get("cycle_completed") is True and (
+            checkpoint.get("metadata") or {}
+        ).get("prepared_date") == str(trade_date):
+            return {
+                "success": False,
+                "reason": "Dated cash session is already completed",
+            }
         try:
             updated = self.rules.apply_fill(
                 self._account, trade_date, symbol, side, matched, str(order_id)

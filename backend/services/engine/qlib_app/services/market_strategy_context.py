@@ -39,6 +39,7 @@ class StrategyContextSpec:
     environment: dict[str, str] = field(default_factory=dict)
     feature_snapshot_reader: str | None = None
     feature_fields: tuple[str, ...] | None = None
+    required_market_state_fields: tuple[str, ...] = ()
 
     def as_dict(self):
         return asdict(self)
@@ -171,13 +172,25 @@ class MarketStrategyContext:
         def historical_features(instruments, fields, start_time, end_time):
             try:
                 original = list(instruments)
-                return self._read_provider_features(
+                frame = self._read_provider_features(
                     original,
                     [self.mapper(code) for code in original],
                     fields,
                     start_time,
                     end_time,
                 )
+                for required in self.spec.required_market_state_fields:
+                    values = (
+                        pd.to_numeric(frame[required], errors="coerce")
+                        if required in frame
+                        else pd.Series(dtype=float)
+                    )
+                    if values.empty or values.isna().any():
+                        raise ValueError(
+                            "Dynamic position requires published benchmark "
+                            f"{required}; this market publication does not support it"
+                        )
+                return frame
             except Exception as exc:
                 self.errors.append(str(exc))
                 raise

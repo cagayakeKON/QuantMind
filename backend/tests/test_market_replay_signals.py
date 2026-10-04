@@ -160,6 +160,45 @@ async def test_saved_prediction_digest_rejects_replaced_snapshot(model_input):
 
 
 @pytest.mark.asyncio
+async def test_session_snapshot_survives_future_inference_append_and_retains_integrity(
+    model_input,
+):
+    row, state = model_input
+    original = await replay_data.read_signal_input(row, date(2026, 9, 30))
+    row.strategy_params["prediction_sha256"] = original.prediction_sha256
+    source = state.directory / "pred.parquet"
+    frame = pd.read_parquet(source)
+    frame.loc[len(frame)] = ["JP72030", date(2026, 10, 1), 123, "test"]
+    frame.to_parquet(source, index=False)
+    restored = await replay_data.read_signal_input(row, date(2026, 9, 30))
+    assert restored.prediction_sha256 == original.prediction_sha256
+    assert restored.frame.equals(original.frame)
+    assert restored.prediction_file != source
+    assert restored.prediction_file.is_file()
+    restored.prediction_file.write_bytes(source.read_bytes())
+    with pytest.raises(RuleDataMissing, match="saved snapshot"):
+        await replay_data.read_signal_input(row, date(2026, 9, 30))
+
+
+@pytest.mark.asyncio
+async def test_missing_legacy_artifact_cannot_be_reconstructed_from_new_predictions(
+    model_input,
+):
+    import hashlib
+
+    row, state = model_input
+    source = state.directory / "pred.parquet"
+    row.strategy_params["prediction_sha256"] = hashlib.sha256(
+        source.read_bytes()
+    ).hexdigest()
+    frame = pd.read_parquet(source)
+    frame.loc[len(frame)] = ["JP72030", date(2026, 10, 1), 123, "test"]
+    frame.to_parquet(source, index=False)
+    with pytest.raises(RuleDataMissing, match="saved snapshot"):
+        await replay_data.read_signal_input(row, date(2026, 9, 30))
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "change,expected",
     [

@@ -16,6 +16,7 @@ import { useAppDispatch, useAppSelector } from '../store';
 import { selectCurrentMarket, AppMarket, setMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
 import { switchMarketTrainingContext } from './training/marketTrainingContext';
+import { supportsTrainingNode, trainingNodesForMarket, preferredTrainingNode } from './training/marketTrainingNodes';
 import { TrainingTarget, TrainingParams, TrainingContext, TrainingStatus, TrainingDraft, SplitKey, TimePeriodMap, FeatureCategory, STORAGE_KEY, DEFAULT_FEATURE_CATEGORIES, getDefaultFeaturesForMarket, resolveDefaultSelectedFeatures, DEFAULT_TIME_PERIODS, DEFAULT_TARGET, DEFAULT_PARAMS, DEFAULT_CONTEXT, buildAutoDisplayName, buildLabelFormula, buildEffectiveTradeDate, daysBetween, toISOStringRange, restoreRange, shouldMigrateLegacyDraftPeriods, buildTrainingRequest, formatRange, toDynamicCategories, TrainingResult, buildBackendTrainingPayload, parseTrainingResult, parseSuggestedTimePeriods, MODEL_DL_DEFAULTS, WfaConfig, ImportedTrainingConfig, buildTrainingConfigFile, parseTrainingConfig, serializeTrainingConfig, TrainingFactorFilterConfig, DEFAULT_FACTOR_FILTER } from './training/trainingUtils';
 import { AdminModelFeatureDataCoverage, QuantDBTrainingSource } from '../features/admin/types';
 import { adminService } from '../features/admin/services/adminService';
@@ -291,9 +292,11 @@ export const ModelTrainingPage: React.FC = () => {
     [selectedFeatures, featureCategories, timePeriods, target, params, context, displayName, currentMarket, wfaConfig, formState.poolRef]
   );
   // 训练节点
+  const eligibleTrainingNodes = useMemo(() => trainingNodesForMarket(currentMarket, trainingNodes), [currentMarket, trainingNodes]);
+  const constrainedTrainingNodes = !!getMarketConfig(currentMarket).trainingCapabilities?.executionNodes;
   const selectedNodeObj = useMemo(
-    () => trainingNodes.find((n) => n.id === selectedNode) || trainingNodes[0],
-    [trainingNodes, selectedNode]
+    () => eligibleTrainingNodes.find((n) => n.id === selectedNode) || (constrainedTrainingNodes ? undefined : trainingNodes[0]),
+    [eligibleTrainingNodes, constrainedTrainingNodes, trainingNodes, selectedNode]
   );
 
   const isDirectCatalogReady = !isQuantDBMarket(currentMarket) || (
@@ -301,7 +304,7 @@ export const ModelTrainingPage: React.FC = () => {
   );
   const isSelectedNodeReady = selectedNodeObj
     ? NODE_READY.has(String(selectedNodeObj.readiness || ''))
-    : trainingNodes.length === 0;
+    : !constrainedTrainingNodes && trainingNodes.length === 0;
   const isReadyToTrain = selectedFeatures.length > 0 && target.horizonDays >= 1 && totalDays > 0 && isDirectCatalogReady && isSelectedNodeReady;
   // 只看本页训练态，不用后端残留的 pending 把「开始训练」锁死
   const isTrainingInProgress = trainingStatus === 'running';
@@ -344,7 +347,7 @@ export const ModelTrainingPage: React.FC = () => {
   // 本地 → 直读本机 QuantDB；远程 → 后端 SSH 只读探针（带缓存），
   // 与因子目录的草稿/发布状态无关。
   useEffect(() => {
-    if (!isQuantDBMarket(currentMarket)) {
+    if (!isQuantDBMarket(currentMarket) || !supportsTrainingNode(currentMarket, selectedNodeObj)) {
       setDataWindow(null);
       return;
     }
@@ -384,19 +387,15 @@ export const ModelTrainingPage: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [selectedNode, factorSource, currentMarket]);
+  }, [selectedNode, factorSource, currentMarket, constrainedTrainingNodes ? selectedNodeObj : undefined]);
 
   useEffect(() => {
     if (trainingNodes.length === 0) return;
-    const current = trainingNodes.find((n) => n.id === selectedNode);
-    if (current && NODE_READY.has(String(current.readiness || ''))) return;
-    const preferred = trainingNodes.find((n) => n.type === 'remote' && n.readiness === 'ready')
-      || trainingNodes.find((n) => n.readiness === 'ready')
-      || trainingNodes.find((n) => n.type === 'remote' && NODE_READY.has(String(n.readiness || '')));
+    const preferred = preferredTrainingNode(currentMarket, trainingNodes, selectedNode);
     if (preferred && preferred.id !== selectedNode) {
       setSelectedNode(preferred.id);
     }
-  }, [trainingNodes, selectedNode]);
+  }, [trainingNodes, selectedNode, currentMarket]);
 
   // 直读市场（CN/HK）训练目录完全由后端发布版本驱动；不回退到任何内置字段。
   useEffect(() => {
@@ -550,6 +549,10 @@ export const ModelTrainingPage: React.FC = () => {
   };
 
   const startTraining = async () => {
+    if (!supportsTrainingNode(currentMarket, selectedNodeObj)) {
+      message.warning('日本市场当前仅支持本地训练，请选择本地节点');
+      return;
+    }
     if (isTrainingInProgress) {
       message.warning('训练任务进行中，请稍候');
       return;
@@ -914,11 +917,12 @@ export const ModelTrainingPage: React.FC = () => {
                     loading={nodesLoading && trainingNodes.length === 0}
                     onChange={setSelectedNode}
                     placeholder="选择训练节点"
-                    options={trainingNodes.map((node) => ({
+                    options={eligibleTrainingNodes.map((node) => ({
                       value: node.id,
                       label: `${node.type === 'remote' ? '☁️' : '💻'} ${node.name} · ${node.readiness_label || (node.online ? '就绪' : '离线')}`,
                     }))}
                   />
+                  {constrainedTrainingNodes && <div className="mt-2 text-[10px] text-slate-500">日本市场当前仅支持本地训练，远程训练尚未接入。</div>}
                   {selectedNodeObj && (
                     <div className="mt-2 text-[10px] text-slate-500 truncate">
                       {selectedNodeObj.status_desc || selectedNodeObj.gpu_summary || (selectedNodeObj.type === 'remote' ? '远程 GPU 节点' : '本地 Docker 节点')}

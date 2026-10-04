@@ -30,6 +30,15 @@ from backend.services.simulation.services.simulation_manager import require_sim_
 logger = logging.getLogger(__name__)
 
 
+class PublishedDailyWaiting(ValueError):
+    """No new execution; an already committed runtime context can be recovered."""
+
+    def __init__(self, message, *, runtime_inputs=None, provenance=None):
+        super().__init__(message)
+        self.runtime_inputs = runtime_inputs
+        self.provenance = provenance
+
+
 @dataclass(frozen=True)
 class HostedCycleSignals:
     run_id: str
@@ -77,6 +86,8 @@ async def prepare_hosted_cycle_context(
     strategy_id,
     config,
     scheduled_trade_date=None,
+    active_runtime_id=None,
+    cycle_run_id=None,
 ):
     tenant_id = (tenant_id or "").strip() or "default"
     user_id = str(user_id or "").strip()
@@ -112,6 +123,8 @@ async def prepare_hosted_cycle_context(
                 SimulationAccount,
                 SimulationLedgerService.build_account_id(tenant_id, str(owner)),
             )
+            if root and (root.tenant_id != tenant_id or root.user_id != str(owner)):
+                raise ValueError("Hosted account checkpoint belongs to another owner")
             checkpoint = (
                 (root.market_state or {}).get(inputs.market, {}) if root else {}
             )
@@ -123,9 +136,52 @@ async def prepare_hosted_cycle_context(
                     and checkpoint.get("cycle_completed") is True
                 )
             ):
-                raise ValueError(
+                recovery = None
+                provenance = checkpoint.get("cycle_inputs")
+                if (
+                    checkpoint.get("cycle_completed") is True
+                    and isinstance(provenance, dict)
+                    and provenance.get("strategy_id") == str(strategy_id)
+                    and provenance.get("trade_date") == saved_day
+                    and provenance.get("data_version") == checkpoint.get("data_version")
+                    and provenance.get("market") == inputs.market
+                    and active_runtime_id
+                    and provenance.get("hosted_runtime_id") == active_runtime_id
+                    and provenance.get("hosted_cycle_run_id")
+                ):
+                    from .dated_account import require_market_ledger_scope
+
+                    require_market_ledger_scope(
+                        checkpoint, root.account_id, inputs.market
+                    )
+                    fees = checkpoint["metadata"]["state"]["config"]
+                    recovery = type(inputs).model_validate(
+                        {
+                            "market": inputs.market,
+                            "data_version": checkpoint["data_version"],
+                            "trade_date": saved_day,
+                            "commission_rate": fees["commission_rate"],
+                            "slippage_bps": fees["slippage_bps"],
+                            "model_data_version": provenance.get("model_data_version"),
+                            "prediction_sha256": provenance.get("prediction_sha256"),
+                        }
+                    )
+                    adapter = registered_account_input_adapter(inputs.market)
+                    context = await asyncio.to_thread(
+                        adapter.prepare_inputs, recovery.model_dump()
+                    )
+                    await asyncio.to_thread(
+                        context.rules.restore_checkpoint,
+                        checkpoint,
+                        recovery.trade_date,
+                    )
+                raise PublishedDailyWaiting(
                     "published_daily_waiting: completed history already processed; "
-                    "waiting for a new published session"
+                    "waiting for a new published session",
+                    runtime_inputs=recovery.model_dump(mode="json")
+                    if recovery
+                    else None,
+                    provenance=provenance if recovery else None,
                 )
         # Startup artifact hashes belong to that one inference session. Resolve and
         # validate fresh model inputs for a new cycle while pinning execution data/fees.
@@ -187,6 +243,17 @@ async def prepare_hosted_cycle_context(
                 **context.params,
                 "scheduled_trade_date": str(scheduled_trade_date),
                 "execution_date_mode": "published_daily_delayed",
+            },
+        )
+    if active_runtime_id is not None:
+        if not str(active_runtime_id).strip() or not str(cycle_run_id or "").strip():
+            raise ValueError("Hosted cycle requires its active runtime and cycle ID")
+        context = replace(
+            context,
+            params={
+                **context.params,
+                "hosted_runtime_id": str(active_runtime_id),
+                "hosted_cycle_run_id": str(cycle_run_id),
             },
         )
     adapter = registered_account_input_adapter(context.market.value)

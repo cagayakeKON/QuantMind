@@ -11,7 +11,7 @@ from backend.services.simulation.services.market_execution_data import (
 )
 from .model_signals import (
     labels_available_on,
-    prediction_path,
+    replay_prediction_snapshot,
     read_test_scores,
     resolve_model,
 )
@@ -42,7 +42,9 @@ async def read_signal_input(row, trade_date: date):
     ):
         raise RuleDataMissing("JP replay model publication changed since creation")
     await asyncio.to_thread(labels_available_on, meta, data.calendar, data_day)
-    path = prediction_path(directory)
+    path = await asyncio.to_thread(
+        replay_prediction_snapshot, directory, params.get("prediction_sha256")
+    )
     scores, digest = await asyncio.to_thread(read_test_scores, path, data_day, data_day)
     if params.get("prediction_sha256") and params["prediction_sha256"] != digest:
         raise RuleDataMissing(
@@ -63,7 +65,7 @@ async def read_signal_input(row, trade_date: date):
 
 
 async def prepare_session_inputs(req, auth):
-    """Pin native JP inputs for the existing session creation, without writes."""
+    """Pin native JP inputs and an immutable model artifact, without finance writes."""
     from backend.services.simulation.replay.session_context import ReplaySessionInputs
 
     if req.mode.strip().lower() == "code" or (req.stop_loss_pct or 0) > 0:
@@ -92,7 +94,7 @@ async def prepare_session_inputs(req, auth):
     signal_day = data.calendar.sessions[index - 1]
     directory, meta = await resolve_model(auth.tenant_id, auth.user_id, req.model_id)
     await asyncio.to_thread(labels_available_on, meta, data.calendar, signal_day)
-    path = prediction_path(directory)
+    path = await asyncio.to_thread(replay_prediction_snapshot, directory)
     scores, digest = await asyncio.to_thread(
         read_test_scores, path, signal_day, signal_day
     )
@@ -100,6 +102,8 @@ async def prepare_session_inputs(req, auth):
         raise RuleDataMissing(
             f"Exact JP test-split signals are missing on {signal_day}"
         )
+    if path.stem != digest:
+        raise RuleDataMissing("JP replay prediction snapshot integrity failure")
     model_id = req.model_id or meta["effective_model_id"]
     params.update(
         data_version=data.data_version,

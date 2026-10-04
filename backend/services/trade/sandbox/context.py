@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 import redis
 
-from backend.shared.simulation_account_keys import account_key
+from backend.shared.simulation_account_keys import account_key, active_strategy_key
 from backend.shared.stock_utils import StockCodeUtil
 from backend.services.trade.sandbox.registered_account_reader import (
     read_sandbox_simulation_account,
@@ -53,6 +53,74 @@ class SandboxContext:
         self._account_cache_market: str | None = None
         self._account_cache_inputs: dict | None = None
         self._last_cache_time: float = 0
+        self._follow_active_runtime = False
+
+    def follow_active_runtime(self):
+        """Enable the worker's existing Redis runtime channel for dated inputs."""
+        self._follow_active_runtime = self.execution_context is not None
+
+    def wait_for_active_runtime(self, timeout=5):
+        # submit_strategy returns before the parent publishes its active record.
+        # Wait only at worker startup; all later reads/orders fail closed if it
+        # disappears. Never allow a startup order to bypass runtime identity.
+        if not self._follow_active_runtime:
+            return
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                self._refresh_execution_context()
+                return
+            except ValueError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+
+    def _refresh_execution_context(self):
+        if not self._follow_active_runtime:
+            return
+        old = validate_sandbox_execution_inputs(
+            self.execution_context,
+            mode="SIMULATION",
+            execution_config=self.exec_config,
+            live_trade_config=self.live_trade_config,
+        )
+        client = self._get_redis()
+        raw = (
+            client.get(active_strategy_key(self.tenant_id, self.user_id))
+            if client else None
+        )
+        active = json.loads(raw) if raw else None
+        if (
+            not isinstance(active, dict)
+            or active.get("mode") != "SIMULATION"
+            or active.get("runtime_tenant_id") != self.tenant_id
+            or active.get("runtime_user_id") != self.user_id
+            or str(active.get("strategy_id") or "") != self.strategy_id
+            or (
+                active.get("sandbox_restored_run_id") or active.get("sandbox_run_id")
+            ) != self.run_id
+        ):
+            raise ValueError("Dated sandbox runtime is stopped or belongs to another run")
+        new = validate_sandbox_execution_inputs(
+            active.get("execution_context"),
+            mode=active.get("mode"),
+            execution_config=active.get("execution_config"),
+            live_trade_config=active.get("live_trade_config"),
+        )
+        if (
+            new.market != old.market
+            or new.trade_date < old.trade_date
+            or new.commission_rate != old.commission_rate
+            or new.slippage_bps != old.slippage_bps
+        ):
+            raise ValueError(
+                "Dated sandbox runtime changed its cash rules or moved backwards"
+            )
+        if new.model_dump(mode="json") != self.execution_context:
+            self.execution_context = new.model_dump(mode="json")
+            self._account_cache = {}
+            self._account_cache_inputs = None
+            self._last_cache_time = 0
 
     def _get_redis(self) -> redis.Redis | None:
         """Worker 进程独立获取 Redis 连接"""
@@ -70,6 +138,7 @@ class SandboxContext:
 
     def _load_account_from_redis(self) -> dict[str, Any]:
         """从 Redis 加载账户状态，带 1 秒缓存"""
+        self._refresh_execution_context()
         now = time.time()
         if self.execution_context is not None:
             validate_sandbox_execution_inputs(
@@ -125,6 +194,7 @@ class SandboxContext:
         self.signals_queue.append({"type": "log", "timestamp": self._current_time, "message": str(message)})
 
     def _add_order_signal(self, symbol: str, quantity: int, price: float, side: str, order_type: str = "limit"):
+        self._refresh_execution_context()
         signal = {
             "type": "order",
             "tenant_id": self.tenant_id,
@@ -147,6 +217,7 @@ class SandboxContext:
         常见交易API接口：设置目标持仓比例。
         沙箱在这里只产生一条 intent (意图信号)，不真实向柜台发单。
         """
+        self._refresh_execution_context()
         signal = {
             "type": "order_target_percent",
             "tenant_id": self.tenant_id,

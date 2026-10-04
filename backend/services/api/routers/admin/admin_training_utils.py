@@ -878,6 +878,11 @@ async def submit_training_job(
     context = context_raw if isinstance(context_raw, dict) else {}
     benchmark_hint = str(context.get("benchmark") or "SH000300").strip()
     market = _resolve_market(context.get("market"), benchmark_hint)
+    if market == "JP" and (str(payload.get("node_id") or "local").strip() or "local") != "local":
+        raise HTTPException(
+            status_code=422,
+            detail="JP training supports the local node only; remote JP datasets are not adapted",
+        )
     payload, allowed_features = await _resolve_quantdb_factor_payload(payload, market)
     # 探针模式：窗口与切分来自数据本身（本地直读 / 远程 SSH 探针），
     # 与因子目录的草稿·发布状态无关；远程节点成段缺数据在此拦截。

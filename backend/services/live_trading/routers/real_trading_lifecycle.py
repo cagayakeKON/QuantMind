@@ -483,8 +483,19 @@ async def start_trading(
                                 strategy_id=strategy_id or strategy_name,
                                 live_trade_config=live_config,
                                 run_id=bootstrap_task_id,
+                                **({"active_runtime_id": run_id} if dated_inputs is not None else {}),
                                 **dated_kwargs,
                             )
+                            if dated_inputs is not None:
+                                from backend.services.simulation.services.hosted_runtime_context import publish_hosted_runtime_context
+
+                                active_key = _active_strategy_key(resolved_tenant_id, resolved_user_id)
+                                active_raw = redis.client.get(active_key)
+                                active_snapshot = json.loads(active_raw) if active_raw else None
+                                if isinstance(active_snapshot, dict) and active_snapshot.get("run_id") == run_id:
+                                    publish_hosted_runtime_context(
+                                        redis.client, active_key, active_snapshot, bootstrap_result
+                                    )
                             if bootstrap_result.get("status") == "failed":
                                 bootstrap_skipped_reason = str(
                                     bootstrap_result.get("error") or "simulation cycle failed"
@@ -918,6 +929,8 @@ async def get_status(
         {"execution_context": status_inputs.model_dump(mode="json")}
         if status_inputs is not None else {}
     )
+    if active_inputs is not None and isinstance(active_data.get("execution_context_provenance"), dict):
+        dated_status["execution_context_provenance"] = active_data["execution_context_provenance"]
     latest_signal_run_id, signal_source_status = await _build_signal_source_status(
         redis.client,
         resolved_tenant_id,

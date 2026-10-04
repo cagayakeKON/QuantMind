@@ -8,11 +8,13 @@ corporate actions, funding restrictions and settlement.
 import math
 from copy import deepcopy
 from dataclasses import dataclass
+from importlib import import_module
 from types import SimpleNamespace
 
 import pandas as pd
 from qlib.backtest.decision import Order
 from qlib.backtest.exchange import Exchange
+from qlib.backtest.high_performance_ds import NumpyQuote
 from qlib.backtest.position import Position
 from qlib.backtest.signal import Signal
 from qlib.backtest.utils import CommonInfrastructure, LevelInfrastructure
@@ -27,6 +29,7 @@ class DecisionQuote:
     suspended: bool = False
     limit_buy: bool = False
     limit_sell: bool = False
+    fields: dict | None = None
 
     def __post_init__(self):
         if not math.isfinite(self.price) or self.price < 0:
@@ -48,21 +51,173 @@ class _RawShareFactor(float):
         return value
 
 
+class _DecisionQuoteSource:
+    """Qlib quote transport restricted to the declared prior-close snapshot."""
+
+    def __init__(self, quotes, signal_day):
+        self.errors = []
+        self.day = (
+            pd.Timestamp(signal_day).normalize() if signal_day is not None else None
+        )
+        self.fields = {code: dict(quote.fields or {}) for code, quote in quotes.items()}
+        rows = []
+        for code, quote in quotes.items():
+            values = {
+                **self.fields[code],
+                "$close": quote.price,
+                "$factor": 1.0,
+                "limit_buy": quote.limit_buy,
+                "limit_sell": quote.limit_sell,
+            }
+            self.fields[code] = values
+            rows.append({"instrument": code, "datetime": self.day, **values})
+        self.inner = (
+            NumpyQuote(
+                pd.DataFrame(rows).set_index(["instrument", "datetime"]),
+                "day",
+                region="us",
+            )
+            if rows and self.day is not None
+            else None
+        )
+
+    def get_all_stock(self):
+        return list(self.fields)
+
+    def validate_window(self, start_time, end_time):
+        try:
+            if self.day is None:
+                raise ValueError(
+                    "Dated Exchange quote requires a bound signal snapshot"
+                )
+            start = self.day if start_time is None else pd.Timestamp(start_time)
+            end = self.day if end_time is None else pd.Timestamp(end_time)
+            if (
+                start.normalize() != self.day
+                or end.normalize() != self.day
+                or end < start
+            ):
+                raise NotImplementedError(
+                    "Dated Exchange quotes cover only the declared signal day; use the isolated data provider for historical ranges"
+                )
+            return start, end
+        except (ValueError, NotImplementedError) as error:
+            self.errors.append(str(error))
+            raise
+
+    def get_data(self, stock_id, start_time, end_time, field, method=None):
+        start, end = self.validate_window(start_time, end_time)
+        try:
+            if stock_id not in self.fields:
+                return None
+            if field not in self.fields[stock_id]:
+                raise NotImplementedError(
+                    f"Dated Exchange snapshot field is unavailable: {field}"
+                )
+            return self.inner.get_data(stock_id, start, end, field, method)
+        except (ValueError, NotImplementedError) as error:
+            self.errors.append(str(error))
+            raise
+
+
+def assert_dated_cash_strategy(config):
+    """Reject actual short strategies before their decision or margin-pool reads."""
+    from ..utils.extended_strategies import RedisLongShortTopkStrategy
+
+    if isinstance(config, BaseStrategy):
+        cls = type(config)
+        kwargs = vars(config)
+    elif isinstance(config, dict):
+        cls = config.get("class")
+        if isinstance(cls, str):
+            from .strategy_builder import _BUILTIN_CLASS_MODULE_MAP
+
+            module = config.get("module_path") or _BUILTIN_CLASS_MODULE_MAP.get(cls)
+            if module:
+                cls = getattr(import_module(module), cls)
+        kwargs = config.get("kwargs") or {}
+    else:
+        return
+    if (isinstance(cls, type) and issubclass(cls, RedisLongShortTopkStrategy)) or (
+        kwargs.get("enable_short_selling")
+        or kwargs.get("requires_short_selling")
+        or float(kwargs.get("long_exposure", 1)) > 1
+    ):
+        raise ValueError(
+            "Dated cash execution does not support shorting or leverage strategies"
+        )
+
+
 class DecisionExchange(Exchange):
     """Use Qlib's order generators with an explicit, already-known snapshot."""
 
     def __init__(self, commission):
         # Do not call Exchange.__init__: it reads the process-global provider.
         self.open_cost = self.close_cost = float(commission)
+        self.min_cost = self.impact_cost = 0.0
+        self.freq = "day"
+        self.trade_unit = None
+        self.trade_w_adj_price = False
+        self.buy_price = self.sell_price = "$close"
         self.quotes = {}
+        self.quote = _DecisionQuoteSource({}, None)
 
-    def get_deal_price(self, stock_id, start_time=None, end_time=None, direction=None):
-        return self.quotes[stock_id].price
+    def bind_snapshot(self, quotes, signal_day):
+        self.quotes = quotes
+        self.quote = _DecisionQuoteSource(quotes, signal_day)
+        self.execution_day = None
 
-    def get_close(self, stock_id, start_time=None, end_time=None):
-        return self.quotes[stock_id].price
+    def _decision_window(self, start_time, end_time):
+        # Native Qlib order generators ask for execution-day pricing/factor while
+        # sizing orders. This exchange deliberately projects the known close;
+        # actual execution-day quotes are read only by the account matcher.
+        if self.quote.day is None:
+            return
+        start = self.quote.day if start_time is None else pd.Timestamp(start_time)
+        end = self.quote.day if end_time is None else pd.Timestamp(end_time)
+        if (
+            self.execution_day is not None
+            and start.normalize() == self.execution_day
+            and end.normalize() == self.execution_day
+            and end >= start
+        ):
+            return
+        self.quote.validate_window(start_time, end_time)
 
-    def get_factor(self, stock_id, start_time=None, end_time=None):
+    def assert_quote_reads_succeeded(self):
+        if self.quote.errors:
+            raise ValueError(
+                "Dated Exchange quote read failed: " + self.quote.errors[0]
+            )
+
+    def get_quote_from_qlib(self):
+        message = "Dated Exchange cannot reload the process-global quote provider"
+        self.quote.errors.append(message)
+        raise NotImplementedError(message)
+
+    def get_deal_price(
+        self,
+        stock_id,
+        start_time=None,
+        end_time=None,
+        direction=None,
+        method="ts_data_last",
+    ):
+        self._decision_window(start_time, end_time)
+        return self.quote.get_data(stock_id, None, None, "$close", method)
+
+    def get_close(
+        self, stock_id, start_time=None, end_time=None, method="ts_data_last"
+    ):
+        return self.quote.get_data(stock_id, start_time, end_time, "$close", method)
+
+    def get_factor(
+        self, stock_id, start_time=None, end_time=None, method="ts_data_last"
+    ):
+        if self.quote.day is not None:
+            self._decision_window(start_time, end_time)
+            if method is None:
+                return self.quote.get_data(stock_id, None, None, "$factor", method)
         return _RawShareFactor(self.quotes[stock_id].trading_unit)
 
     def get_amount_of_trade_unit(
@@ -195,10 +350,12 @@ def build_dated_strategy(request, *, strategy_context=None, signal_data=None):
         signal_data=signal_data,
         backtest_id=request.backtest_id,
     )
+    assert_dated_cash_strategy(config)
     config = StrategyAdapter(PROJECT_ROOT).adapt(
         config,
         context={"backtest_id": request.backtest_id, "universe": request.universe},
     )
+    assert_dated_cash_strategy(config)
     # These public classes need only the dated signal/exchange/position contracts.
     # Classes reading D.features need an isolated provider adapter before enabling.
     supported = {
@@ -274,6 +431,7 @@ class DatedStrategyRunner:
     def __init__(
         self, config, sessions, start, end, commission=0, *, strategy_context=None
     ):
+        assert_dated_cash_strategy(config)
         self.calendar = _SessionCalendar(sessions, start, end)
         self.exchange = DecisionExchange(commission)
         self.signal = _SnapshotSignal()
@@ -292,6 +450,7 @@ class DatedStrategyRunner:
             if self.uses_snapshot_signal:
                 config["kwargs"]["signal"] = self.signal
             self.strategy = init_instance_by_config(config, accept_types=BaseStrategy)
+        assert_dated_cash_strategy(self.strategy)
         common = CommonInfrastructure(
             trade_account=self.account, trade_exchange=self.exchange
         )
@@ -317,7 +476,11 @@ class DatedStrategyRunner:
             # an earlier clock. This affects only the new dated context.
             if hasattr(self.strategy, "_price_frame_cache"):
                 self.strategy._price_frame_cache.clear()
-        self.exchange.quotes = quotes
+        if isinstance(self.exchange, DecisionExchange):
+            self.exchange.bind_snapshot(quotes, signal_day)
+            self.exchange.execution_day = self.calendar.get_step_time()[0].normalize()
+        else:
+            self.exchange.quotes = quotes
         self.signal.day = pd.Timestamp(signal_day)
         self.signal.scores = pd.Series(scores, dtype=float)
         self.account.current_position = Position(
@@ -331,6 +494,8 @@ class DatedStrategyRunner:
                 code, "day", step - self.holding_since[code] + 1
             )
         decision = self.strategy.generate_trade_decision(self.execute_result)
+        if isinstance(self.exchange, DecisionExchange):
+            self.exchange.assert_quote_reads_succeeded()
         if self.strategy_context is not None:
             self.strategy_context.assert_reads_succeeded()
         self.orders = [order for order in decision.get_decision() if order.amount != 0]
@@ -383,4 +548,6 @@ class DatedStrategyRunner:
                     code, "day", holding_counts.get(code, 0) + 1
                 )
             self.strategy.post_exe_step(self.execute_result)
+            if isinstance(self.exchange, DecisionExchange):
+                self.exchange.assert_quote_reads_succeeded()
             self.strategy_context.assert_reads_succeeded()

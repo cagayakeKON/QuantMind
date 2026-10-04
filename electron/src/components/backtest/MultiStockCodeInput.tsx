@@ -39,12 +39,24 @@ export const MultiStockCodeInput: React.FC<Props> = ({
   const currentMarket = useAppSelector(selectCurrentMarket);
   const localSearch = getMarketConfig(currentMarket).stockSearch !== 'gateway';
   const searchRevision = useRef(0);
+  const selectedMarket = useRef(currentMarket);
+  selectedMarket.current = currentMarket;
+  const previousMarket = useRef(currentMarket);
+  const marketEffectMounted = useRef(false);
+  const jpSearchBoundary = currentMarket === 'JP';
 
   // 启动时加载本地数据
   useEffect(() => {
-    searchRevision.current += 1;
-    setOptions([]);
-    setLoading(false);
+    const initialLoad = !marketEffectMounted.current;
+    const involvesJP = previousMarket.current === 'JP' || currentMarket === 'JP';
+    previousMarket.current = currentMarket;
+    marketEffectMounted.current = true;
+    if (!initialLoad && !involvesJP) return;
+    if (!initialLoad) {
+      searchRevision.current += 1;
+      setOptions([]);
+      setLoading(false);
+    }
     if (localSearch) stockListService.load().catch(err => {
       console.error('Failed to load stock list:', err);
     });
@@ -67,7 +79,7 @@ export const MultiStockCodeInput: React.FC<Props> = ({
       if (!keyword) return [];
 
       const response = await fetch(
-        `${SERVICE_ENDPOINTS.API_GATEWAY}/stocks/search?q=${encodeURIComponent(keyword)}&limit=10&market=${currentMarket}`
+        `${SERVICE_ENDPOINTS.API_GATEWAY}/stocks/search?q=${encodeURIComponent(keyword)}&limit=10${localSearch ? '' : `&market=${currentMarket}`}`
       );
       const payload = await response.json();
       const rawList = Array.isArray(payload?.results)
@@ -99,37 +111,41 @@ export const MultiStockCodeInput: React.FC<Props> = ({
   // 搜索股票
   const searchStocks = async (query: string) => {
     if (!query || query.length < 2) {
+      if (currentMarket === 'JP') searchRevision.current += 1;
       setOptions([]);
       return;
     }
 
     setLoading(true);
     const revision = ++searchRevision.current;
+    const requestMarket = currentMarket;
+    const acceptResult = () => (requestMarket !== 'JP' && selectedMarket.current !== 'JP')
+      || (requestMarket === selectedMarket.current && revision === searchRevision.current);
     try {
       let results: StockOption[] = [];
 
       if (localSearch && stockListService.isLoaded()) {
         results = searchLocalStocks(query);
-        setDataSource('local');
+        if (acceptResult()) setDataSource('local');
 
         if (results.length === 0) {
           results = await searchTencentStocks(query);
-          setDataSource('api');
+          if (acceptResult()) setDataSource('api');
         }
       } else {
         results = await searchTencentStocks(query);
-        setDataSource('api');
+        if (acceptResult()) setDataSource('api');
       }
 
       // 过滤掉已选择的股票
       results = results.filter(r => !value.includes(r.symbol));
 
-      if (revision === searchRevision.current) setOptions(results);
+      if (acceptResult()) setOptions(results);
     } catch (error) {
       console.error('Stock search failed:', error);
-      if (revision === searchRevision.current) setOptions([]);
+      if (acceptResult()) setOptions([]);
     } finally {
-      if (revision === searchRevision.current) setLoading(false);
+      if (acceptResult()) setLoading(false);
     }
   };
 
@@ -139,12 +155,13 @@ export const MultiStockCodeInput: React.FC<Props> = ({
       if (searchQuery) {
         searchStocks(searchQuery);
       } else {
+        if (currentMarket === 'JP') searchRevision.current += 1;
         setOptions([]);
       }
     }, 300);
 
     return () => clearTimeout(timer);
-  }, [searchQuery, value, currentMarket]); // 添加value依赖，当选中列表变化时重新过滤
+  }, [searchQuery, value, jpSearchBoundary]); // 添加value依赖，当选中列表变化时重新过滤
 
   // 点击外部关闭下拉框
   useEffect(() => {
@@ -171,6 +188,10 @@ export const MultiStockCodeInput: React.FC<Props> = ({
     if (!value.includes(option.symbol)) {
       onChange([...value, option.symbol]);
     }
+    if (currentMarket === 'JP') {
+      searchRevision.current += 1;
+      setLoading(false);
+    }
     setSearchQuery('');
     setOptions([]);
 
@@ -184,6 +205,10 @@ export const MultiStockCodeInput: React.FC<Props> = ({
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newValue = e.target.value;
+    if (currentMarket === 'JP') {
+      searchRevision.current += 1;
+      if (newValue.length < 2) setLoading(false);
+    }
     setSearchQuery(newValue);
     setShowDropdown(true);
   };

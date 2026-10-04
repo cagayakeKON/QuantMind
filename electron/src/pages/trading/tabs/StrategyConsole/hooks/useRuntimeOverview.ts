@@ -86,6 +86,7 @@ export function useRuntimeOverview(
     const scopeRef = useRef(executionScope);
     scopeRef.current = executionScope;
     const datedReady = !executionScope || (tradingMode === 'simulation' && executionContext?.market === market);
+    const statusReady = market === 'JP' && tradingMode === 'simulation' || datedReady;
     const loadersRef = useRef({ status: () => {}, precheck: () => {} });
     statusRef.current = status;
     marketRef.current = market;
@@ -97,12 +98,14 @@ export function useRuntimeOverview(
     };
 
     const loadStatus = useCallback(async () => {
-        if (!datedReady) return;
+        if (!statusReady) return;
         if (fetchingRef.current.status) return;
         fetchingRef.current.status = true;
         try {
             const { realTradingService } = await import('../../../../../services/realTradingService');
-            const data = executionContext
+            const data = market === 'JP' && tradingMode === 'simulation'
+                ? await realTradingService.getStatus(userId, tradingMode, tenantId, market)
+                : executionContext
                 ? await realTradingService.getStatus(userId, tradingMode, tenantId, market, executionContext)
                 : await realTradingService.getStatus(userId, tradingMode, tenantId);
             if (scopeRef.current !== executionScope || (executionScope && !mountedRef.current)) return;
@@ -117,7 +120,7 @@ export function useRuntimeOverview(
                 else loadersRef.current.status();
             }
         }
-    }, [tenantId, userId, tradingMode, executionScope, datedReady]);
+    }, [tenantId, userId, tradingMode, executionScope, statusReady]);
 
     const loadPrecheck = useCallback(async () => {
         if (!datedReady) return;

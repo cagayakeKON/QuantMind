@@ -32,6 +32,27 @@ def close_account_day(rules, account, day):
     return rules.record_account_day(marked, day, stale)
 
 
+def project_account_to_day(rules, account, target):
+    """Pure session-by-session preview of a committed dated checkpoint.
+
+    Use the same preparation and closing order as the locked account writer,
+    including events on sessions without an order. No ledger/cache is written.
+    """
+    saved = rules.checkpoint(account)["metadata"]["prepared_date"]
+    days = pending_sessions(rules, account, target)
+    if days and saved and rules.backtest_state(account)["cursor"] != saved:
+        account = close_account_day(rules, account, date.fromisoformat(saved))
+    for day in days:
+        prepared = rules.prepare_day(account, day)
+        if saved:
+            rules.corporate_action_inputs(account, prepared, day)
+        account = prepared
+        saved = str(day)
+        if day < target:
+            account = close_account_day(rules, account, day)
+    return account
+
+
 def native_account_metrics(rules, account, day):
     state = rules.backtest_state(account)
     initial = float(state["initial_cash"])

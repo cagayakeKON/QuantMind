@@ -41,6 +41,21 @@ describe('JP stock search boundary', () => {
     expect(screen.queryByText('新 A 股')).not.toBeInTheDocument();
   });
 
+  it.each([['CN', 'US'], ['HK', 'CN'], ['US', 'HK']])('preserves options and mount-only loading when switching %s to %s', async (from, to) => {
+    mocks.market = from;
+    const props = { value: '', onChange: vi.fn() };
+    const view = render(<StockCodeInput {...props} />);
+    await search('query');
+    await reply(0, '原市场结果', '600036.SH');
+    expect(mocks.load).toHaveBeenCalledOnce();
+    mocks.market = to;
+    view.rerender(<StockCodeInput {...props} />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(350); });
+    expect(screen.getByText('原市场结果')).toBeVisible();
+    expect(mocks.load).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it.each(['CN', 'HK', 'US'])('preserves the original %s gateway fallback parameters', async (market) => {
     mocks.market = market;
     render(<StockCodeInput value="" onChange={vi.fn()} />);

@@ -215,6 +215,8 @@ async def probe_data_window(
     node = str(node_id or "local").strip() or "local"
     kind = "local" if node == "local" else "remote"
     market = str(market or "CN").upper()
+    if market == "JP" and kind == "remote":
+        raise ValueError("JP training supports the local node only")
     key = (kind, node, source, market)
     if not force:
         cached = _cache_get(key)

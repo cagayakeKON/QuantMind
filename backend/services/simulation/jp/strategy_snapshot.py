@@ -25,6 +25,11 @@ def strategy_snapshot(state, scores, bars, master, signal_day):
             suspended=price <= 0
             or money(bar.get("volume") or 0) <= 0
             or info.get("product_category") != "011",
+            fields={
+                "$" + field: float(bar[field])
+                for field in ("open", "high", "low", "volume", "amount")
+                if field in bar and pd.notna(bar[field])
+            },
         )
     for row in scores:
         code = StockCodeUtil.to_qlib(row["symbol"], market="JP")

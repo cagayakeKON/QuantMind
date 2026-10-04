@@ -39,12 +39,22 @@ export const StockCodeInput: React.FC<Props> = ({
   const searchRevision = useRef(0);
   const selectedMarket = useRef(currentMarket);
   selectedMarket.current = currentMarket;
+  const previousMarket = useRef(currentMarket);
+  const marketEffectMounted = useRef(false);
+  const jpSearchBoundary = currentMarket === 'JP';
 
   // 启动时加载本地数据
   useEffect(() => {
-    searchRevision.current += 1;
-    setOptions([]);
-    setLoading(false);
+    const initialLoad = !marketEffectMounted.current;
+    const involvesJP = previousMarket.current === 'JP' || currentMarket === 'JP';
+    previousMarket.current = currentMarket;
+    marketEffectMounted.current = true;
+    if (!initialLoad && !involvesJP) return;
+    if (!initialLoad) {
+      searchRevision.current += 1;
+      setOptions([]);
+      setLoading(false);
+    }
     if (localSearch) stockListService.load().catch(err => {
       console.error('Failed to load stock list:', err);
     });
@@ -151,7 +161,7 @@ export const StockCodeInput: React.FC<Props> = ({
     }, 300);
 
     return () => clearTimeout(timer);
-  }, [searchQuery, currentMarket]);
+  }, [searchQuery, jpSearchBoundary]);
 
   // 点击外部关闭下拉框
   useEffect(() => {

@@ -109,6 +109,7 @@ class DatedLabBroker:
                     "side": side,
                     "quantity": int(quantity),
                     "signal_date": str(today.date()),
+                    "quantity_basis_date": str(today.date()),
                     "reason": reason,
                 }
             )

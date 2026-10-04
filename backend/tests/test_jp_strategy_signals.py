@@ -190,7 +190,8 @@ def get_strategy_config():
     if pool == "list:JP216A0" or kind == "dict":
         # Preserve native allocation across the explicit all-stock Signal's
         # candidate list; unquoted candidates do not become actual fills.
-        quantity = 300 if kind == "dict" else 900
+        # The prior-close quantities (300/900) execute across a 1:2 split.
+        quantity = 600 if kind == "dict" else 1800
         assert [(fill["symbol"], fill["quantity"]) for fill in result.trades] == [
             (expected, quantity)
         ]

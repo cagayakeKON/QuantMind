@@ -218,7 +218,7 @@ def test_shared_templates_execute_through_jp_ledger(model_data, strategy):
     request.strategy_content = "STRATEGY_CONFIG = {'class': 'NotUsed'}"
     result = backtest.run_cash_backtest(request, directory, meta)
     assert result.total_trades == 1
-    assert result.trades[0]["quantity"] == 900
+    assert result.trades[0]["quantity"] == 1800
     assert float(result.trades[0]["price"]) == 50
     assert result.trades[0]["settlement_date"] == "2026-10-01"
     assert float(result.advanced_stats["settled_cash"]) == 100000
@@ -304,5 +304,7 @@ def test_market_adapter_preserves_alpha_symbols_and_blocks_missing_historical_un
     ],
 )
 def test_unadapted_provider_strategies_never_silently_fall_back(strategy):
-    with pytest.raises(ValueError, match="data-provider adapter|dated market state"):
+    with pytest.raises(
+        ValueError, match="data-provider adapter|dated market state|shorting"
+    ):
         build_dated_strategy(QlibBacktestRequest(strategy_type=strategy))

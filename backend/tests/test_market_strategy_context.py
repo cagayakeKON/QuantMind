@@ -139,7 +139,7 @@ def get_strategy_config():
     assert result.config["strategy_decision_class"] == "RedisRecordingStrategy"
     assert result.config["strategy_data_version"] == meta["jp_data_version"]
     assert result.config["strategy_price_basis"] == "raw"
-    assert result.trades[0]["quantity"] == 900
+    assert result.trades[0]["quantity"] == 1800
     assert [record["status"] for record in saved] == ["running", "completed"]
     assert D._provider is original_provider
 
@@ -215,7 +215,7 @@ STRATEGY_CONFIG = {
     # the 8% stop; the completed Sep 29 close (50) equals the real purchase price.
     expected = ["BUY", "SELL"] if strategy == "StopLoss" else ["BUY"]
     assert [trade["side"] for trade in result.trades] == expected
-    assert result.trades[0]["quantity"] == 900
+    assert result.trades[0]["quantity"] == 1800
     assert [record["status"] for record in saved] == ["running", "completed"]
     assert D._provider is original_provider
 

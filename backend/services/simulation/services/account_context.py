@@ -224,7 +224,8 @@ async def read_registered_simulation_account(
         # account read could observe a newer day after opening its publication.
         restore = (
             getattr(
-                context.rules, "restore_execution_checkpoint",
+                context.rules,
+                "restore_execution_checkpoint",
                 context.rules.restore_checkpoint,
             )
             if execution_inputs is not None
@@ -238,17 +239,11 @@ async def read_registered_simulation_account(
         if execution_inputs is not None:
             # The same rules as execution project the committed checkpoint to the
             # requested day. This read does not advance the persisted account.
-            from .dated_account_day import pending_sessions, close_account_day
+            from .dated_account_day import project_account_to_day
 
-            days = pending_sessions(context.rules, account, context.trade_date)
-            if days and context.rules.backtest_state(account)["cursor"] != str(saved_date):
-                account = close_account_day(context.rules, account, saved_date)
-            for day in days:
-                prepared = context.rules.prepare_day(account, day)
-                context.rules.corporate_action_inputs(account, prepared, day)
-                account = prepared
-                if day < context.trade_date:
-                    account = close_account_day(context.rules, account, day)
+            account = await asyncio.to_thread(
+                project_account_to_day, context.rules, account, context.trade_date
+            )
         public = context.serialize(account, checkpoint)
         if include_trade_stats:
             from .dated_account_day import native_trade_stats

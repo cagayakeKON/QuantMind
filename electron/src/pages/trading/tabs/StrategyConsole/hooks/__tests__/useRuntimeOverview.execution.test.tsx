@@ -50,20 +50,20 @@ describe('existing runtime overview with optional dated inputs', () => {
     expect(mocks.precheck).toHaveBeenCalledWith('REAL');
   });
 
-  it('passes dated inputs to the original status and precheck without changing the global order query', async () => {
+  it('polls JP runtime identity while passing dated inputs only to explicit precheck', async () => {
     const { result } = renderHook(() => useRuntimeOverview('tenant', '7', 'simulation', 'JP', true, context, true));
     await waitFor(() => expect(result.current.ready.precheck).toBe(true));
-    expect(mocks.status).toHaveBeenCalledWith('7', 'simulation', 'tenant', 'JP', context);
+    expect(mocks.status).toHaveBeenCalledWith('7', 'simulation', 'tenant', 'JP');
     expect(mocks.precheck).toHaveBeenCalledWith('SIMULATION', context);
     expect(mocks.orders).toHaveBeenCalledWith('7', undefined, 'simulation', { limit: 10, offset: 0 });
     expect(result.current.recentOrders[0].symbol).toBe('SH600036');
     expect(mocks.model).toHaveBeenCalledWith('JP');
   });
 
-  it.each([undefined, { ...context, market: 'CN' }])('does not perform an undated readiness request while inputs are unavailable or mismatched', async (inputs) => {
+  it.each([undefined, { ...context, market: 'CN' }])('can discover JP runtime but does not precheck unavailable or mismatched inputs', async (inputs) => {
     const { result } = renderHook(() => useRuntimeOverview('tenant', '7', 'simulation', 'JP', true, inputs, true));
     await waitFor(() => expect(result.current.ready.model).toBe(true));
-    expect(mocks.status).not.toHaveBeenCalled();
+    expect(mocks.status).toHaveBeenCalledWith('7', 'simulation', 'tenant', 'JP');
     expect(mocks.precheck).not.toHaveBeenCalled();
     expect(result.current.precheck).toBeNull();
   });
@@ -87,7 +87,7 @@ describe('existing runtime overview with optional dated inputs', () => {
     await act(async () => { finishStatus({ status: 'running', stale: true }); finishPrecheck({ ...precheck, stale: true }); });
     await waitFor(() => expect(mocks.precheck).toHaveBeenCalledTimes(2));
     expect(mocks.precheck.mock.lastCall).toEqual(['SIMULATION', changed]);
-    expect(mocks.status.mock.lastCall).toEqual(['7', 'simulation', 'tenant', 'JP', changed]);
+    expect(mocks.status.mock.lastCall).toEqual(['7', 'simulation', 'tenant', 'JP']);
     expect(result.current.status).toEqual({ status: 'stopped' });
     expect(result.current.precheck).toEqual(precheck);
   });
@@ -109,5 +109,20 @@ describe('existing runtime overview with optional dated inputs', () => {
     await waitFor(() => expect(result.current.ready).toEqual({ status: true, precheck: true, model: true }));
     expect(mocks.precheck).toHaveBeenCalledWith('SIMULATION', context);
     expect(result.current.precheck).toEqual(precheck);
+  });
+
+  it('discovers the next hosted day while the form still holds the startup inputs', async () => {
+    const next = {...context, trade_date: '2026-10-01', data_version: 'v2'};
+    let active = context;
+    mocks.status.mockImplementation(async (...args) => {
+      if (args[4]) throw new Error('409 stale execution context');
+      return {status: 'running', execution_context: active};
+    });
+    const {result} = renderHook(() => useRuntimeOverview('tenant', '7', 'simulation', 'JP', true, context, true));
+    await waitFor(() => expect(result.current.status?.execution_context).toEqual(context));
+    active = next;
+    await act(async () => {result.current.refresh();});
+    await waitFor(() => expect(result.current.status?.execution_context).toEqual(next));
+    expect(mocks.status.mock.calls.every(args => args.length === 4 && args[3] === 'JP')).toBe(true);
   });
 });

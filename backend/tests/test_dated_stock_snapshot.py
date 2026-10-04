@@ -32,17 +32,17 @@ def publications(snapshot, tmp_path, monkeypatch):
         conn.execute(
             "UPDATE research.master SET CoName='Future' WHERE Date = '2026-09-30'"
         )
-    import_jquants_snapshot(snapshot, root)
-    version = QuantJPDataHub(root).data_dir.name
+    version = import_jquants_snapshot(snapshot, root)["version"]
     with duckdb.connect(str(snapshot)) as conn:
         conn.execute("UPDATE research.master SET CoName='Revised publication'")
         conn.execute(
             "UPDATE research.daily_prices SET O=999,H=1000,L=998,C=999,Va=999000 "
             "WHERE Date='2026-09-29'"
         )
-    import_jquants_snapshot(snapshot, root)
-    current = QuantJPDataHub(root).data_dir.name
+    current = import_jquants_snapshot(snapshot, root)["version"]
     assert current != version
+    # Raw import advances quotes, while research stays pinned until features publish.
+    assert QuantJPDataHub(root).data_dir.name == version
     monkeypatch.setenv("QM_QUANTJP_DATA_DIR", str(root))
     app = FastAPI()
     app.include_router(routes.router)

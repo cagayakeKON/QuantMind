@@ -215,6 +215,14 @@ class RedisMemory:
         self.writes.append(("delete", key))
         self.values.pop(key, None)
 
+    def eval(self, script, count, key, expected, updated):
+        assert count == 1 and "KEEPTTL" in script
+        self.writes.append(("eval", key, expected, updated))
+        if self.values.get(key) != expected:
+            return 0
+        self.values[key] = updated
+        return 1
+
 
 def active_payload():
     return {

@@ -184,6 +184,17 @@ async def test_same_http_create_automatic_step_reports_and_restart_recovery(api)
     assert params["_model_data_version"] == api.meta["jp_data_version"]
     assert params["_model_data_version"] != params["data_version"]
     assert len(params["prediction_sha256"]) == 64
+    pinned = (
+        api.directory / "replay_predictions" / f"{params['prediction_sha256']}.parquet"
+    )
+    assert pinned.is_file()
+    # Normal inference appends future sessions to the mutable registered model.
+    # This existing session continues with its exact captured prediction bytes.
+    original = pinned.read_bytes()
+    frame = pd.read_parquet(api.prediction)
+    frame.loc[len(frame)] = ["JP72030", date(2026, 10, 1), 0.123, "test"]
+    frame.to_parquet(api.prediction, index=False)
+    assert pinned.read_bytes() == original
     assert api.pg.setup.redis.client.values == {}
     assert await quantities(api, sid) == [0, 0, 0]
     response = await api.client.post(f"/api/v1/replay/sessions/{sid}/step")
@@ -345,6 +356,8 @@ async def test_required_prediction_replacement_rolls_back_day_not_prior_checkpoi
     response = await create(api)
     assert response.status_code == 201, response.text
     sid = response.json()["session_id"]
+    digest = response.json()["strategy_params"]["prediction_sha256"]
+    prediction = api.directory / "replay_predictions" / f"{digest}.parquet"
     base = f"/api/v1/replay/sessions/{sid}"
     assert (await api.client.post(base + "/step")).status_code == 200
     async with api.pg.sessions() as db:
@@ -356,9 +369,9 @@ async def test_required_prediction_replacement_rolls_back_day_not_prior_checkpoi
             )
         ).scalar_one()
         saved = deepcopy(checkpoint.market_state)
-    frame = pd.read_parquet(api.prediction)
+    frame = pd.read_parquet(prediction)
     frame["pred"] = 0.123
-    frame.to_parquet(api.prediction, index=False)
+    frame.to_parquet(prediction, index=False)
     result = await api.client.post(base + "/step")
     assert result.status_code == 500 and "saved snapshot" in result.text, result.text
     assert await quantities(api, sid) == [1, 1, 1]

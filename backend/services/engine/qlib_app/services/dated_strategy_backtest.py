@@ -67,6 +67,7 @@ def dated_strategy_orders(decisions, signal_day, execution_day, *, market):
                 "side": "BUY" if decision.direction == Order.BUY else "SELL",
                 "quantity": int(quantity),
                 "signal_date": str(signal_day),
+                "quantity_basis_date": str(signal_day),
                 "execution_date": str(execution_day),
                 "order_type": "MARKET",
             }
@@ -160,6 +161,10 @@ def run_dated_strategy_series(
         needed = sorted(set(state["positions"]) | {order["symbol"] for order in orders})
         _, master = reader.day(day, needed, list(state["positions"]))
         result = account.execute_day(day, orders)
+        # Callback amounts and deal_amounts must use the same execution shares.
+        # The journal retains signal_quantity and quantity_basis_date separately.
+        for decision, executed in zip(decisions, result["orders"], strict=True):
+            decision.amount = executed["quantity"]
         state = account.state
         position_history[pd.Timestamp(day)] = inputs.position_snapshot(state)
         position_info[str(day)] = inputs.position_information(state, master)

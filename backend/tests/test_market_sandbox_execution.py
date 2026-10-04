@@ -324,6 +324,7 @@ async def test_original_worker_execution_publishes_a_dated_intent_for_shared_con
     consumer, monkeypatch
 ):
     await initialize(consumer.api.pg)
+    consumer.context._redis = consumer.api.pg.setup.redis.client
     published_rows = []
     monkeypatch.setattr(
         worker,

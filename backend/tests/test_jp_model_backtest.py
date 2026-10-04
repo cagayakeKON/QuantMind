@@ -63,6 +63,9 @@ def runtime_factory(monkeypatch):
 @pytest.fixture
 def model_data(snapshot, tmp_path, monkeypatch):
     with duckdb.connect(str(snapshot)) as conn:
+        # This fixture verifies full target sizing across a 1:2 split; keep
+        # sufficient observed volume for the converted execution-share order.
+        conn.execute("UPDATE research.daily_prices SET Vo=10000,Va=C*10000")
         conn.execute(
             "INSERT INTO research.calendar VALUES ('2026-09-24','1'), ('2026-09-25','1'), ('2026-10-01','1'), ('2026-10-02','1')"
         )
@@ -109,7 +112,7 @@ def test_real_raw_fills_dated_settlement_and_topix_report(model_data):
     assert result.market == "JP" and result.currency == "JPY"
     assert result.total_trades == 1
     fill = result.trades[0]
-    assert fill["symbol"] == "JP72030" and fill["quantity"] == 900
+    assert fill["symbol"] == "JP72030" and fill["quantity"] == 1800
     assert float(fill["price"]) == 50 and float(fill["fee"]) == 0
     assert fill["settlement_date"] == "2026-10-01"
     assert result.total_return == 0 and result.benchmark_return == 0
@@ -125,7 +128,7 @@ def test_standard_topk_strategy_uses_actual_public_strategy(model_data):
     assert result.config["strategy_type"] == "TopkDropout"
     assert result.total_trades == 1
     # The actual public strategy allocates available cash across its buy list.
-    assert result.trades[0]["quantity"] == 900
+    assert result.trades[0]["quantity"] == 1800
     assert result.config["strategy_decision_class"] == "RedisRecordingStrategy"
 
 
@@ -136,7 +139,7 @@ def test_standard_topk_keeps_public_builder_parameter_rules(model_data):
     result = backtest.run_cash_backtest(request, model, meta)
     # The public TopK builder does not consume the weight strategy's max_weight.
     assert result.total_trades == 1
-    assert result.trades[0]["quantity"] == 900
+    assert result.trades[0]["quantity"] == 1800
     assert result.equity_curve[-1]["value"] == request.initial_capital
 
 
@@ -211,12 +214,17 @@ def test_prior_close_sizing_sells_first_without_using_future_open():
     ]
     assert all(row["signal_date"] == "2026-09-28" for row in orders)
     bars["JP72030"]["open"] = 99999
-    assert (
-        strategy_snapshot(
-            state, [{"symbol": "JP72030", "score": 1}], bars, master, signal
-        )
-        == snapshot
+    changed = strategy_snapshot(
+        state, [{"symbol": "JP72030", "score": 1}], bars, master, signal
     )
+    assert changed["quotes"]["jp_72030"].price == snapshot["quotes"]["jp_72030"].price
+    assert [
+        (order.stock_id, order.direction, order.amount)
+        for order in runner.decide(step=0, **changed)
+    ] == [
+        ("jp_67580", 0, 100),
+        ("jp_72030", 1, 300),
+    ]
 
 
 @pytest.mark.asyncio

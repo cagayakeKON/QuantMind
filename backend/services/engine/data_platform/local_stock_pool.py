@@ -26,10 +26,15 @@ class LocalStockPoolInputs:
     snapshot: Callable[[date], pd.DataFrame]
     sessions: list[date]
     exchanges: set[str]
+    field_mapping: dict[str, str] | None = None
 
 
-def _column(factor, frame):
-    mapping = FACTOR_COLUMN_MAP.get(factor, factor)
+def _column(factor, frame, field_mapping=None):
+    mapping = (
+        FACTOR_COLUMN_MAP.get(factor, factor)
+        if field_mapping is None
+        else field_mapping.get(factor, factor)
+    )
     column = mapping[-1] if isinstance(mapping, tuple) else mapping
     if column not in frame:
         raise ValueError(f"Stock-pool field is unavailable: {factor}")
@@ -44,6 +49,11 @@ def query_local_stock_pool(dsl, market, *, exchange=None):
     inputs = getattr(import_module(module), factory)()
     day = inputs.trade_date
     frame = inputs.snapshot(day)
+    if inputs.field_mapping:
+        frame = frame.copy()
+        for alias, column in inputs.field_mapping.items():
+            if alias not in frame and column in frame:
+                frame[alias] = frame[column]
     total = len(frame)
     params = []
     if dsl.startswith("SQL: "):
@@ -61,18 +71,20 @@ def query_local_stock_pool(dsl, market, *, exchange=None):
         conditions, combiners = _parse_dsl(dsl)
         clauses = []
         for i, condition in enumerate(conditions):
-            column = _column(condition["factor"], frame)
+            column = _column(condition["factor"], frame, inputs.field_mapping)
             if condition["type"] == "delta":
                 window = int(condition["window"])
                 days = inputs.sessions
                 if window <= 0 or len(days) <= window:
                     raise ValueError("Trend condition lacks historical sessions")
                 previous = inputs.snapshot(days[-window - 1])
-                _column(condition["factor"], previous)
+                previous_column = _column(
+                    condition["factor"], previous, inputs.field_mapping
+                )
                 delta = f"query_delta_{i}"
                 frame[delta] = pd.to_numeric(
                     frame[column], errors="coerce"
-                ) - pd.to_numeric(previous[column], errors="coerce").reindex(
+                ) - pd.to_numeric(previous[previous_column], errors="coerce").reindex(
                     frame.index
                 )
                 column = delta

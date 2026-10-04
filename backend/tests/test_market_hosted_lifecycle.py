@@ -80,6 +80,13 @@ class Redis:
     def keys(self, pattern):
         return [key for key in self.values if fnmatch.fnmatchcase(key, pattern)]
 
+    def eval(self, script, count, key, expected, updated):
+        assert count == 1 and "KEEPTTL" in script
+        if self.values.get(key) != expected:
+            return 0
+        self.values[key] = updated
+        return 1
+
 
 @pytest.fixture
 def controller(monkeypatch, tmp_path):
@@ -170,6 +177,64 @@ def form(inputs=None, **changes):
         **({"execution_context": json.dumps(inputs)} if inputs is not None else {}),
         **changes,
     }
+
+
+@pytest.mark.asyncio
+async def test_status_uses_advanced_runtime_inputs_and_declares_delayed_dates(
+    controller,
+):
+    from backend.services.simulation.services.hosted_runtime_context import (
+        publish_hosted_runtime_context,
+    )
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(controller.app), base_url="http://audit"
+    ) as client:
+        started = await client.post("/start", data=form(dated()))
+        assert started.status_code == 200
+        key = utils._active_strategy_key("test", "00000007")
+        saved = json.loads(controller.redis.get(key))
+        new = {
+            **saved["execution_context"],
+            "trade_date": "2026-09-29",
+            "data_version": "next-publication",
+            "prediction_sha256": "b" * 64,
+        }
+        provenance = {
+            "market": "JP",
+            "trade_date": "2026-09-29",
+            "scheduled_trade_date": "2026-09-30",
+            "execution_date_mode": "published_daily_delayed",
+            "data_version": "next-publication",
+            "prediction_sha256": "b" * 64,
+        }
+        assert publish_hosted_runtime_context(
+            controller.redis,
+            key,
+            saved,
+            {
+                "status": "succeeded",
+                "runtime_execution_context": new,
+                "execution_context": provenance,
+            },
+        )
+        status = await client.get(
+            "/status", params={"market": "JP", "execution_context": json.dumps(new)}
+        )
+        assert status.status_code == 200, status.text
+        assert status.json()["execution_context"] == new
+        assert status.json()["execution_context_provenance"] == provenance
+        assert controller.service.get_default_model_hosted_status.await_args.kwargs[
+            "trade_date"
+        ] == date(2026, 9, 29)
+        stale = await client.get(
+            "/status",
+            params={
+                "market": "JP",
+                "execution_context": json.dumps(saved["execution_context"]),
+            },
+        )
+        assert stale.status_code == 409
 
 
 @pytest.mark.asyncio
@@ -487,6 +552,8 @@ async def test_public_http_actual_readiness_bootstrap_ledger_and_status(
             config=controller.manager.submit_strategy.call_args.kwargs[
                 "live_trade_config"
             ],
+            active_runtime_id=saved["run_id"],
+            cycle_run_id=payload["bootstrap"]["task_id"],
         )
         assert expected_cycle.signals() == []
     if case != "filled":

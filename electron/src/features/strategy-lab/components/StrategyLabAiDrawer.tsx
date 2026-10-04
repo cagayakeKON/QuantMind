@@ -28,6 +28,7 @@ import { SendOutlined, RobotOutlined, CodeOutlined } from '@ant-design/icons';
 import { authService } from '../../auth/services/authService';
 import { SERVICE_URLS } from '../../../config/services';
 import { humanizeError } from '../utils/humanizeError';
+import type { AppMarket } from '../../../store/slices/uiSlice';
 
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -44,6 +45,7 @@ interface Props {
   onClose: () => void;
   /** Current editor code — sent as context with each turn. */
   code: string;
+  market?: AppMarket;
   /** Last error from the runner — humanizeError-pre-massaged. */
   lastError?: { message?: string; traceback?: string } | null;
   /** Called when the user clicks "应用此代码" on a fenced ```python block. */
@@ -65,7 +67,7 @@ const SUGGESTED_PROMPTS = [
   '修复上一次回测报的错误',
 ];
 
-const StrategyLabAiDrawer: React.FC<Props> = ({ open, onClose, code, lastError, onApplyCode }) => {
+const StrategyLabAiDrawer: React.FC<Props> = ({ open, onClose, code, market, lastError, onApplyCode }) => {
   const [history, setHistory] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -108,6 +110,7 @@ const StrategyLabAiDrawer: React.FC<Props> = ({ open, onClose, code, lastError, 
         body: JSON.stringify({
           message: msg,
           current_code: code,
+          ...(market === 'JP' ? {market} : {}),
           error_msg: lastError?.message || null,
           extra_context: {
             source: 'strategy_lab',
@@ -186,7 +189,7 @@ const StrategyLabAiDrawer: React.FC<Props> = ({ open, onClose, code, lastError, 
       }) as unknown as ChatTurn[]);
       cancelRef.current = null;
     }
-  }, [busy, code, history, lastError]);
+  }, [busy, code, market, history, lastError]);
 
   const handleApply = useCallback((turn: ChatTurn) => {
     const fenced = extractFencedPython(turn.content);

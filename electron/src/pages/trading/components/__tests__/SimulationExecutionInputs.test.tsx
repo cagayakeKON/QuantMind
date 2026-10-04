@@ -85,6 +85,29 @@ describe('common simulation controller input flow', () => {
     expect(mocks.inputs).toHaveBeenCalledTimes(requestCount);
   });
 
+  it('refreshes active hosted inputs on the next day without sending stale startup inputs to status', async () => {
+    const next = { ...inputs.execution_context, trade_date: '2026-10-01', data_version: 'v2' };
+    let active = inputs.execution_context;
+    mocks.status.mockImplementation(async (...args) => {
+      if (args[4]) throw new Error('409 stale execution context');
+      return { status: 'running', user_id: '7', mode: 'SIMULATION', execution_context: active };
+    });
+    mocks.inputs.mockImplementation(async (_market: string, day?: string, version?: string) => ({
+      ...structuredClone(inputs),
+      trade_dates: [...inputs.trade_dates, next.trade_date],
+      execution_context: { ...inputs.execution_context, trade_date: day || inputs.execution_context.trade_date, data_version: version || 'v1' },
+    }));
+    render(<RealTradingPage />);
+    await waitFor(() => expect(screen.getByTestId('console-context')).toHaveTextContent('2026-09-30'));
+    active = next;
+    await act(async () => { window.dispatchEvent(new Event('refresh-account-data')); });
+    await waitFor(() => expect(screen.getByTestId('console-context')).toHaveTextContent('2026-10-01'));
+    expect(screen.getByTestId('console-context')).toHaveTextContent('v2');
+    expect(mocks.inputs).toHaveBeenCalledWith('JP', '2026-10-01', 'v2');
+    expect(mocks.status.mock.calls.every(args => args.length === 4 && args[3] === 'JP')).toBe(true);
+    expect(mocks.reset).not.toHaveBeenCalled();
+  });
+
   it('passes one confirmed context through the actual wizard, precheck and final start', async () => {
     render(<RealTradingPage />);
     await screen.findByText(/日线开盘价模拟/);

@@ -45,6 +45,7 @@ def prepare_context(request):
         instrument_mapper="backend.services.simulation.jp.strategy_context.to_provider_instrument",
         environment=environment,
         feature_snapshot_reader="backend.services.simulation.jp.feature_snapshot.create_reader",
+        required_market_state_fields=("$volume",),
         feature_fields=(
             "open",
             "high",

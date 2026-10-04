@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -36,17 +36,47 @@ _MARKET_NAMES = {
     "CN": "A股市场",
     "US": "美股市场",
     "HK": "港股市场",
+    "JP": "日本市场",
     "CRYPTO": "区块链市场",
     "FUTURES": "期货市场",
 }
 
 _RESULTS_DIR = Path(
-    os.getenv("TRADING_AGENTS_RESULTS_DIR", "").strip() or "/data/reports/trading_agents"
+    os.getenv("TRADING_AGENTS_RESULTS_DIR", "").strip()
+    or "/data/reports/trading_agents"
 )
 
 
-def _resolve_stock_name(ticker: str, market: str) -> str:
+def _resolve_stock_name(ticker: str, market: str, trade_date: str | None = None) -> str:
     """从本地数据查股票名称（CN: QuantDB instrument_detail；US/HK: 板块 parquet）。"""
+    if market.upper() == "JP":
+        # Reports bind company names to the analysis date, never latest master.
+        if not trade_date:
+            return ""
+        try:
+            from backend.services.engine.data_platform.market_provider import (
+                LOCAL_MARKET_PROVIDERS,
+            )
+            from backend.shared.stock_utils import StockCodeUtil
+
+            frame = (
+                LOCAL_MARKET_PROVIDERS["JP"]
+                .open_raw()
+                .fetch_stock_list(as_of=date.fromisoformat(trade_date))
+            )
+            if frame.empty:
+                return ""
+            symbol = StockCodeUtil.to_suffix(ticker, market="JP")
+            hit = frame[frame["symbol"].eq(symbol)]
+            if not hit.empty:
+                value = str(hit.iloc[0]["stock_name"]).strip()
+                if value and value.lower() not in {"nan", "none", "<na>"}:
+                    return value
+        except Exception as exc:
+            logger.warning(
+                "JP report name unavailable (%s %s): %s", ticker, trade_date, exc
+            )
+        return ""
     # 统一候选代码（纯代码 / 带后缀）
     suffixes = {
         "CN": [".SH", ".SZ", ".BJ"],
@@ -160,7 +190,9 @@ def _convert_to_pdf(md_path: Path, pdf_path: Path) -> bool:
 def _sanitize_name(raw: str) -> str:
     """清洗股票名/文件名非法字符（Windows/路径分隔符等）。"""
     cleaned = raw.replace("/", "").replace("\\", "").replace(":", "").replace("*", "")
-    cleaned = cleaned.replace("?", "").replace('"', "").replace("<", "").replace(">", "")
+    cleaned = (
+        cleaned.replace("?", "").replace('"', "").replace("<", "").replace(">", "")
+    )
     return cleaned.replace("|", "").strip() or "未命名"
 
 
@@ -178,7 +210,11 @@ def export_report_files(
     result: dict[str, Any] = {"md": None, "pdf": None, "dir": None, "error": None}
     try:
         market_dir = _MARKET_NAMES.get(market.upper(), market or "CN")
-        stock_name = _resolve_stock_name(ticker, market)
+        stock_name = (
+            _resolve_stock_name(ticker, market, trade_date)
+            if market.upper() == "JP"
+            else _resolve_stock_name(ticker, market)
+        )
         safe_stock_name = _sanitize_name(stock_name) if stock_name else ""
 
         out_dir = _RESULTS_DIR / market_dir
@@ -190,7 +226,9 @@ def export_report_files(
         md_path = out_dir / f"{file_prefix}_{trade_date}_投研分析报告.md"
         pdf_path = out_dir / f"{file_prefix}_{trade_date}_投研分析报告.pdf"
 
-        md_text = _build_report_md(ticker, trade_date, stock_name, signal, tracker, market)
+        md_text = _build_report_md(
+            ticker, trade_date, stock_name, signal, tracker, market
+        )
         md_path.write_text(md_text, encoding="utf-8")
         result["md"] = str(md_path)
         result["dir"] = str(out_dir)

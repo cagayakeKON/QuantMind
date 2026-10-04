@@ -113,6 +113,11 @@ class SimulationCycleContext:
                 scheduled_trade_date=self.params["scheduled_trade_date"],
                 execution_date_mode=self.params["execution_date_mode"],
             )
+        if self.params.get("hosted_runtime_id"):
+            result.update(
+                hosted_runtime_id=self.params["hosted_runtime_id"],
+                hosted_cycle_run_id=self.params["hosted_cycle_run_id"],
+            )
         return result
 
     def signals(self):

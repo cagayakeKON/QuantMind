@@ -31,6 +31,8 @@ class LocalMarketProvider:
     trading_agents_router: str | None = None
     native_api_symbol_pattern: str | None = None
     raw_hub_factory: str | None = None
+    model_feature_snapshot_loader: str | None = None
+    strategy_runner_date_loader: str | None = None
 
     def open_raw(self, data_version: str | None = None):
         """Latest daily quotes; research open() keeps its complete publication."""
@@ -83,6 +85,10 @@ LOCAL_MARKET_PROVIDERS = {
         stock_pool_input_factory=(
             "backend.services.simulation.jp.stock_pool.open_stock_pool_inputs"
         ),
+        model_feature_snapshot_loader=(
+            "backend.services.simulation.jp.model_snapshot.read_model_snapshot"
+        ),
+        strategy_runner_date_loader="backend.services.simulation.jp.runner_context.default_dates",
     ),
 }
 

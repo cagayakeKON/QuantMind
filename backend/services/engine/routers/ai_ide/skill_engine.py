@@ -22,6 +22,16 @@ def _resolve_market_qlib(market: str) -> str:
 
 
 MARKET_QLIB_CONFIG = {
+    "JP": {
+        "provider_uri": _resolve_market_qlib("JP"),
+        "region": "us",
+        "region_upper": "US",
+        "template_overrides": {
+            "qlib_model_strategy_config": "jp_qlib_model_strategy_config",
+            "stock_pool_reference": "jp_stock_pool_reference",
+            "fundamental_factor_reference": "jp_fundamental_factor_reference",
+        },
+    },
     "CN": {
         "provider_uri": _resolve_market_qlib("CN"),
         "region": "cn",
@@ -243,7 +253,8 @@ class SkillEngine:
 
         parts = []
         for template_name in templates:
-            content = self.load_template(template_name)
+            source = market_cfg.get("template_overrides", {}).get(template_name, template_name)
+            content = self.load_template(source)
             if content:
                 content = content.replace(
                     "{{PROVIDER_URI}}", market_cfg["provider_uri"]

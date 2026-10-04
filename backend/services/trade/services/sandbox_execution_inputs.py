@@ -133,9 +133,20 @@ async def prepare_sandbox_order_inputs(signal, active, redis):
         account = await manager.get_account(uid, tenant_id=tenant, market=inputs.market)
         if account is None:
             raise ValueError("Sandbox registered cash account is not initialized")
+        cursor = account_context.rules.backtest_state(account)["cursor"]
+        if cursor and str(inputs.trade_date) <= cursor:
+            raise ValueError(
+                "Dated sandbox session is completed; wait for a new published cycle"
+            )
         # Pure projection for target sizing. Inventory/ledger changes are applied
         # by the original execution transaction, never by this read-only input.
-        account = account_context.rules.prepare_day(account, inputs.trade_date)
+        from backend.services.simulation.services.dated_account_day import (
+            project_account_to_day,
+        )
+
+        account = await asyncio.to_thread(
+            project_account_to_day, account_context.rules, account, inputs.trade_date
+        )
     return SandboxOrderInputs(
         tenant, uid, account_context, execution, symbol, bar, account
     )
