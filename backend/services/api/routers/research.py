@@ -74,8 +74,11 @@ async def get_research_overview(
     limit: int = Query(50),
     offset: int = Query(0),
     current_user: dict = Depends(get_current_user),
+    market: str | None = Query(None),
 ):
     tid, uid = str(current_user["tenant_id"]), str(current_user["user_id"])
+    if market is not None:
+        return await get_research_overview_service(tid, uid, model_id, run_id, limit, offset, market)
     return await get_research_overview_service(tid, uid, model_id, run_id, limit, offset)
 
 

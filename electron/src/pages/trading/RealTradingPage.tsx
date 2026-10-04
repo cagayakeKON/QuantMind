@@ -128,9 +128,27 @@ const RealTradingPage: React.FC = () => {
     const [isRevealing, setIsRevealing] = useState(false);
     const preflightRequestSeqRef = useRef(0);
     const isFetchingRef = useRef(false);
+    const accountScopeKey = currentMarket === 'JP' ? `JP:${tenantId}:${userId}:${tradingMode}` : 'legacy';
+    const accountScopeRef = useRef({ key: accountScopeKey, revision: 0 });
+    if (accountScopeRef.current.key !== accountScopeKey) {
+        accountScopeRef.current = { key: accountScopeKey, revision: accountScopeRef.current.revision + 1 };
+        isFetchingRef.current = false;
+    }
+    useEffect(() => {
+        if (accountScopeRef.current.revision === 0) return;
+        setStatus(null);
+        setAccountInfo(null);
+        setEffectiveExecutionConfig(null);
+        setEffectiveLiveTradeConfig(null);
+        setExecutionInputs(undefined);
+        setPollingPausedByAuth(false);
+    }, [accountScopeKey]);
 
     const fetchData = useCallback(async () => {
+        if (accountScopeRef.current.key !== accountScopeKey) return;
         if (isFetchingRef.current) return;
+        const revision = accountScopeRef.current.revision;
+        const acceptsResult = () => accountScopeRef.current.key === accountScopeKey && accountScopeRef.current.revision === revision;
 
         const token = authService.getAccessToken();
         if (!token) {
@@ -144,11 +162,14 @@ const RealTradingPage: React.FC = () => {
         isFetchingRef.current = true;
         try {
             const { realTradingService } = await import('../../services/realTradingService');
+            if (!acceptsResult()) return;
             const statusData = datedMarket
                 ? await realTradingService.getStatus(userId, tradingMode, tenantId, datedMarket)
                 : await realTradingService.getStatus(userId, tradingMode, tenantId);
+            if (!acceptsResult()) return;
             const runtimeMode = resolveTradingAccountMode(statusData?.mode, tradingMode);
             const accountData = await realTradingService.getRuntimeAccount(userId, tenantId, runtimeMode, currentMarket).catch(() => null);
+            if (!acceptsResult()) return;
 
             setStatus(statusData);
             setAccountInfo(accountData);
@@ -156,6 +177,7 @@ const RealTradingPage: React.FC = () => {
             setEffectiveLiveTradeConfig(statusData?.live_trade_config || null);
             setPollingPausedByAuth(false);
         } catch (e: unknown) {
+            if (!acceptsResult()) return;
             const httpStatus = getErrorHttpStatus(e);
             if (httpStatus === 401) {
                 setPollingPausedByAuth(true);
@@ -178,9 +200,9 @@ const RealTradingPage: React.FC = () => {
             setEffectiveExecutionConfig(null);
             setEffectiveLiveTradeConfig(null);
         } finally {
-            isFetchingRef.current = false;
+            if (acceptsResult()) isFetchingRef.current = false;
         }
-    }, [tenantId, userId, tradingMode, datedMarket, selectedInputs]);
+    }, [tenantId, userId, tradingMode, datedMarket, selectedInputs, accountScopeKey]);
 
     useEffect(() => {
         if (pollingPausedByAuth) {

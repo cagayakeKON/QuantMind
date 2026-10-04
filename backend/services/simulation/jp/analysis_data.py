@@ -149,7 +149,7 @@ def public_legacy_result_view(payload):
 
 
 def public_factor_metrics(result, request, pred, strategy_context):
-    """Offline labels use the executed provider and the original factor algorithms."""
+    """Evaluate close-to-next-close labels on the pinned adjusted research data."""
     from backend.services.engine.qlib_app.services.factor_analysis_service import (
         FactorAnalysisService,
     )
@@ -164,14 +164,12 @@ def public_factor_metrics(result, request, pred, strategy_context):
     if strategy_context.execution_day != pd.Timestamp(request.end_date):
         raise ValueError("Factor analysis requires the completed execution interval")
     instruments = pred.index.get_level_values("instrument").unique().tolist()
-    # This is post-execution evaluation, not a strategy data read. The causal
-    # features() guard stays intact; Ref(close, -1) is the original report label.
-    label = strategy_context._read_provider_features(
-        instruments,
-        [strategy_context.mapper(code) for code in instruments],
-        ["Ref($close, -1)/$close - 1"],
-        request.start_date,
-        request.end_date,
+    # Execution quotes remain raw. Post-execution research uses the same
+    # immutable publication's split-adjusted prices, without re-registering D
+    # or relaxing the strategy's causal guard. Preserve the public label's
+    # close-to-next-session-close interval (not the training open-price label).
+    label = adjusted_close_labels(
+        recorded_version(result), instruments, request.start_date, request.end_date
     )
     if label is None or label.empty:
         return {"factor_metrics": None, "stratified_returns": None}
@@ -187,6 +185,45 @@ def public_factor_metrics(result, request, pred, strategy_context):
             for row in groups
         ],
     }
+
+
+def adjusted_close_labels(version, instruments, start, end):
+    from .data import open_execution_data
+
+    reader = open_execution_data(version)
+    calendar = pd.DatetimeIndex(reader.calendar.sessions)
+    days = calendar[(calendar >= pd.Timestamp(start)) & (calendar <= pd.Timestamp(end))]
+    if days.empty:
+        return pd.DataFrame()
+    after = calendar[calendar > days[-1]]
+    through = after[0] if len(after) else days[-1]
+    grid = calendar[(calendar >= days[0]) & (calendar <= through)]
+    prices = reader.hub.fetch_daily_kline_batch(
+        instruments, days[0].date(), through.date(), adjust="qfq"
+    )
+    if prices.empty:
+        return pd.DataFrame()
+    if prices.duplicated(["symbol", "trade_date"]).any():
+        raise ValueError("Duplicate recorded JP research prices")
+    frames = []
+    for instrument in instruments:
+        symbol = StockCodeUtil.to_suffix(instrument, market="JP")
+        selected = prices[prices.symbol == symbol].copy()
+        selected["trade_date"] = pd.to_datetime(selected["trade_date"])
+        close = pd.to_numeric(selected.set_index("trade_date")["close"], errors="raise")
+        close = close.reindex(grid).where(lambda values: values > 0)
+        # Missing bars stay missing; never bridge a suspension/missing session.
+        returns = (close.shift(-1) / close - 1).reindex(days)
+        frames.append(
+            pd.DataFrame(
+                {
+                    "instrument": instrument,
+                    "datetime": days,
+                    "Ref($close, -1)/$close - 1": returns.to_numpy(),
+                }
+            )
+        )
+    return pd.concat(frames).set_index(["instrument", "datetime"])
 
 
 def save_style_features(result, request, context):
@@ -318,6 +355,24 @@ def public_report_metrics(result, request):
     )
     performance = RiskAnalyzer._extract_performance_metrics(report, effective_request)
     daily_returns = performance.pop("daily_returns")
+    # The shared kernel derives net returns from account.pct_change(); its
+    # report normally includes the initial account row. Our actual-session
+    # report excludes that row for period counting, so use the already correct
+    # net-return series with the same sample/annualization/Sharpe definitions.
+    volatility = (
+        float(daily_returns.std(ddof=1) * np.sqrt(252))
+        if len(daily_returns) > 1
+        else None
+    )
+    performance["volatility"] = RiskAnalyzer._clean_nan(volatility)
+    annual = performance["annual_return"]
+    performance["sharpe_ratio"] = (
+        RiskAnalyzer._clean_nan(
+            (annual - effective_request.risk_free_rate) / volatility
+        )
+        if annual is not None and volatility is not None and volatility > 0
+        else None
+    )
     # The cash report keeps its initial balance; its signed drawdown already
     # comes from the same public curve algorithm.
     performance["max_drawdown"] = min(row["drawdown"] for row in result.drawdown_curve)

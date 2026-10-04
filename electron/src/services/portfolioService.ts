@@ -342,6 +342,9 @@ class PortfolioService {
         tenantId = 'default',
         market = 'CN',
     ): Promise<{ data: FundData; isSimulated: boolean }> {
+        if (market === 'JP' && mode === 'real') {
+            throw new Error('日本市场尚未接入实盘账户，请使用模拟交易。');
+        }
         try {
             const { realTradingService } = await import('./realTradingService');
             let account: any = null;

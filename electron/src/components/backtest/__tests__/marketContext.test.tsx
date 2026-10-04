@@ -26,7 +26,7 @@ beforeEach(() => {
   localStorage.clear();
   state.market = 'JP'; state.poolMarket = '';
   state.run.mockReset().mockResolvedValue({ backtest_id: 'controlled', status: 'completed' });
-  state.range.mockReset().mockResolvedValue({ exists: true, min_date: '2026-09-28', max_date: '2026-09-30' });
+  state.range.mockReset().mockResolvedValue({ exists: true, min_date: '2026-09-28', max_date: '2026-09-30', data_version: 'execution-published-v1' });
   state.users.mockReset().mockResolvedValue({ items: [
     { model_id: 'jp-user', status: 'active', metadata_json: { display_name: 'Tokyo model', context: { market: 'JP' } } },
     { model_id: 'cn-user', status: 'active', metadata_json: { display_name: 'Shanghai model', market: 'CN' }, is_default: true },
@@ -52,6 +52,7 @@ describe('market context in the existing backtest components', () => {
     fireEvent.click(screen.getByRole('button', { name: /立即执行回测/ }));
     await waitFor(() => expect(state.run).toHaveBeenCalledWith(expect.objectContaining({
       market: 'JP', model_id: 'jp-user', benchmark_symbol: 'TOPIX', commission: 0,
+      jp_data_version: 'execution-published-v1',
       user_id: 'alice', qlib_provider_uri: '/data/quantjp/.qlib_cache/jp_data',
     })));
     await screen.findByText('Common result');
@@ -95,6 +96,7 @@ describe('market context in the existing backtest components', () => {
     fireEvent.click(screen.getByRole('button', { name: /执行代码/ }));
     await waitFor(() => expect(state.run).toHaveBeenCalledWith(expect.objectContaining({
       market: 'JP', benchmark_symbol: 'TOPIX', commission: 0, strategy_type: 'CustomStrategy',
+      jp_data_version: 'execution-published-v1',
     })));
   });
 

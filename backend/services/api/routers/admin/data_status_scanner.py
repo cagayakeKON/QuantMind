@@ -83,11 +83,9 @@ _XCALS_MARKET_MAP: dict[str, str] = {
 
 def _resolve_qlib_dir(market: str) -> Path:
     if _is_jp(market):
-        from backend.services.engine.qlib_data_builder import QlibDataBuilder
+        from backend.shared.qlib_paths import resolve_qlib_provider_uri
 
-        # Match the registered builder; the global legacy QLIB_PROVIDER_URI
-        # may point at CN and cannot describe the new market's data status.
-        return QlibDataBuilder.for_market("JP").qlib_dir
+        return Path(resolve_qlib_provider_uri("JP"))
     return _MARKET_QLIB_DIRS.get(market, _MARKET_QLIB_DIRS["a_share"])
 
 

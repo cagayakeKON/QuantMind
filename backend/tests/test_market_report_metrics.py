@@ -159,8 +159,16 @@ async def test_native_public_report_has_shared_core_and_risk_metrics(
         {"account": equity.value.iloc[1:], "return": equity.value.pct_change().iloc[1:]}
     )
     original = RiskAnalyzer._extract_performance_metrics(report, request)
-    for field in ("total_return", "annual_return", "sharpe_ratio", "volatility"):
+    for field in ("total_return", "annual_return"):
         assert getattr(result, field) == pytest.approx(original[field])
+    # Exclude the initial cash row only from trading-day counting; include the
+    # first execution's fee/price change in volatility and the public Sharpe.
+    net_returns = equity.value.pct_change().iloc[1:]
+    volatility = float(net_returns.std(ddof=1) * 252**0.5)
+    assert result.volatility == pytest.approx(volatility)
+    assert result.sharpe_ratio == pytest.approx(
+        (original["annual_return"] - request.risk_free_rate) / volatility
+    )
     risk = RiskAnalyzer._compute_risk_metrics(
         original["daily_returns"],
         "TOPIX",

@@ -162,6 +162,7 @@ export const QlibExpertBacktest: React.FC = () => {
   
   // 数据日期范围（从后端获取）
   const [dataMinDate, setDataMinDate] = useState<string | null>(null);
+  const [dataVersion, setDataVersion] = useState<string | null>(null);
   const [dataMaxDate, setDataMaxDate] = useState<string | null>(null);
 
   const [isRunning, setIsRunning] = useState(false);
@@ -213,6 +214,10 @@ export const QlibExpertBacktest: React.FC = () => {
   };
 
   const handleRun = async (overrideCode?: string) => {
+    if (marketConfig.backtest?.market === 'JP' && !dataVersion) {
+      setError('请等待日本市场执行数据版本加载完成后再提交');
+      return;
+    }
     // 防御性处理：确保 codeToRun 始终是字符串，避免 React 事件对象干扰
     const codeToRun = (typeof overrideCode === 'string') ? overrideCode : strategyCode;
 
@@ -244,6 +249,7 @@ export const QlibExpertBacktest: React.FC = () => {
 
       const config: BacktestConfig = {
         market: marketConfig.backtest?.market,
+        ...(marketConfig.backtest?.market === 'JP' ? { jp_data_version: dataVersion! } : {}),
         symbol: universePath,
         start_date: effectiveStart,
         end_date: effectiveEnd,
@@ -310,6 +316,7 @@ export const QlibExpertBacktest: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     setDataMinDate(null);
+    setDataVersion(null);
     setDataMaxDate(null);
     const fetchDataRange = async () => {
       const { backtestService } = await import('../../services/backtestService');
@@ -317,6 +324,7 @@ export const QlibExpertBacktest: React.FC = () => {
       if (!cancelled && result.exists && result.min_date && result.max_date) {
         setDataMinDate(result.min_date);
         setDataMaxDate(result.max_date);
+        setDataVersion(result.data_version ?? null);
       }
     };
     fetchDataRange();

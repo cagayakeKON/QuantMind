@@ -220,7 +220,7 @@ export const GridSearchPanel: React.FC = () => {
   const currentMarket = useAppSelector(selectCurrentMarket);
   const marketConfig = getMarketConfig(currentMarket);
   const marketContext = marketConfig.backtest;
-  const [coverage, setCoverage] = useState<{ market: string; startDate: string; endDate: string } | null>(null);
+  const [coverage, setCoverage] = useState<{ market: string; startDate: string; endDate: string; dataVersion?: string } | null>(null);
   const [coverageError, setCoverageError] = useState('');
   const [isRunning, setIsRunning] = useState(false);
   const [tasks, setTasks] = useState<OptimizationTask[]>([]);
@@ -267,7 +267,7 @@ export const GridSearchPanel: React.FC = () => {
           setCoverageError('当前市场没有可用的日线数据覆盖范围');
           return;
         }
-        setCoverage({ market: marketContext.market, startDate: result.min_date, endDate: result.max_date });
+        setCoverage({ market: marketContext.market, startDate: result.min_date, endDate: result.max_date, dataVersion: result.data_version });
       } catch (error) {
         if (!cancelled) setCoverageError(error instanceof Error ? error.message : '读取市场数据范围失败');
       }
@@ -444,6 +444,10 @@ export const GridSearchPanel: React.FC = () => {
   );
 
   const runOptimization = async (gridConfig: GridSearchConfig) => {
+    if (marketContext?.market === 'JP' && (!coverage?.dataVersion || coverage.market !== 'JP')) {
+      setGlobalError('请等待日本市场执行数据版本加载完成后再提交');
+      return;
+    }
     submittedMarketRef.current = marketContext?.market;
     setGlobalError('');
     setConfig(gridConfig);
@@ -501,6 +505,7 @@ export const GridSearchPanel: React.FC = () => {
             commission: 0.00025, min_commission: 5,
             stamp_duty: 0.0005, transfer_fee: 0.00001,
           }),
+          ...(marketContext?.market === 'JP' ? { jp_data_version: coverage!.dataVersion } : {}),
         },
         {
           signal: abortControllerRef.current.signal,

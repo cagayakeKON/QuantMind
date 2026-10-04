@@ -452,6 +452,26 @@ class JapanReplayCashRules:
         metadata["state"] = ledger.state
         return self.project(updated)
 
+    def fill_result(self, account, order_id):
+        """Project the committed lot-accounting result for one exact fill."""
+        fills = [
+            fill
+            for fill in self._metadata(account)["state"]["fills"]
+            if fill["order_id"] == str(order_id)
+        ]
+        if len(fills) != 1:
+            raise ValueError("JP replay fill accounting result is unavailable")
+        fill = fills[0]
+        if fill["side"] != "SELL":
+            return {"realized_pnl": None, "avg_cost_before": None}
+        realized = money(fill["realized_pnl"])
+        quantity = money(fill["quantity"])
+        consumed_cost = money(fill["price"]) * quantity - money(fill["fee"]) - realized
+        return {
+            "realized_pnl": float(realized),
+            "avg_cost_before": float(consumed_cost / quantity),
+        }
+
     def merge_marks(self, account, projection):
         updated = deepcopy(account)
         metadata = self._metadata(updated)

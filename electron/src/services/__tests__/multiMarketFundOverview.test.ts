@@ -23,19 +23,25 @@ describe('existing user aggregate fund calculation in all markets', () => {
     expect(actual.data.currency).toBeUndefined();
     expect(mocks.simulation).toHaveBeenCalledWith('owner', 'tenant', undefined, {timeoutMs: 8000});
   });
-  it.each(['CN', 'JP', 'HK', 'US', 'CRYPTO', 'FUTURES'])('retains original real-account selection in %s', async market => {
+  it.each(['CN', 'HK', 'US', 'CRYPTO', 'FUTURES'])('retains original real-account selection in %s', async market => {
     const expected = await portfolioService.getFundOverview('owner', 'real', 'tenant', 'CN');
     const actual = await portfolioService.getFundOverview('owner', 'real', 'tenant', market);
     expect(actual).toEqual(expected);
     expect(actual.isSimulated).toBe(false);
     expect(mocks.real).toHaveBeenCalledWith('owner', 'tenant');
   });
-  it('uses the native JP simulation account when no real account exists', async () => {
-    mocks.real.mockResolvedValue(null);
-    const result = await portfolioService.getFundOverview('owner', 'real', 'tenant', 'JP');
-    expect(result.isSimulated).toBe(true);
-    expect(mocks.simulation).toHaveBeenCalledWith('owner', 'tenant', 'JP', {timeoutMs: 8000});
-    expect(result.data.currency).toBe('JPY');
+  it.each([true, false])('rejects unsupported JP real accounts without reading another account (legacy real exists: %s)', async realExists => {
+    mocks.real.mockResolvedValue(realExists ? {...account, currency: 'CNY', is_online: true} : null);
+    const cacheRead = vi.spyOn(localStorage, 'getItem');
+    try {
+      await expect(portfolioService.getFundOverview('owner', 'real', 'tenant', 'JP')).rejects.toThrow('尚未接入实盘账户');
+      expect(mocks.real).not.toHaveBeenCalled();
+      expect(mocks.simulation).not.toHaveBeenCalled();
+      expect(mocks.ledger).not.toHaveBeenCalled();
+      expect(cacheRead).not.toHaveBeenCalled();
+    } finally {
+      cacheRead.mockRestore();
+    }
   });
   it('shows native JPY capital and daily PnL without the CNY user baseline', async () => {
     mocks.simulation.mockResolvedValue({...account, currency: 'JPY', total_asset: 30000, cash: 20000,

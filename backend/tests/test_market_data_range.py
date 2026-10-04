@@ -1,6 +1,7 @@
 """Common date-range endpoint uses registered publications only when requested."""
 
 from types import SimpleNamespace
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -44,6 +45,7 @@ async def test_published_jp_cash_dates_exclude_uncovered_calendar(
         "min_date": "2026-09-28",
         "max_date": "2026-09-30",
         "total_trading_days": 3,
+        "data_version": model_data[2]["jp_data_version"],
     }
 
 
@@ -53,6 +55,7 @@ async def test_no_published_bars_returns_unavailable_without_fallback(
     monkeypatch, empty_calendar
 ):
     hub = SimpleNamespace(
+        data_dir=Path("empty-execution-publication"),
         fetch_calendar=lambda: (
             pd.DataFrame()
             if empty_calendar
@@ -63,7 +66,7 @@ async def test_no_published_bars_returns_unavailable_without_fallback(
     monkeypatch.setitem(
         coverage.LOCAL_MARKET_PROVIDERS,
         "JP",
-        SimpleNamespace(open_raw=lambda: hub, daily_partition_dir="daily"),
+        SimpleNamespace(open=lambda: hub, daily_partition_dir="daily"),
     )
     result = await coverage.registered_market_data_range("JP")
     assert result == {
@@ -71,4 +74,5 @@ async def test_no_published_bars_returns_unavailable_without_fallback(
         "min_date": None,
         "max_date": None,
         "total_trading_days": 0,
+        "data_version": "empty-execution-publication",
     }

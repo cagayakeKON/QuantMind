@@ -18,6 +18,22 @@ from backend.tests.test_jp_cash_account import calendar, market, orders
 DAY = date(2026, 9, 2)
 
 
+def economic_journal(value, field=None):
+    """Compare money exactly, retaining all identity, quantity and date fields.
+
+    Closing marks use the common float DailyBar projection; Decimal('10000.0')
+    and Decimal('10000') encode the same JPY value. Keep the complete independent
+    journal comparison, normalizing only these projected monetary fields.
+    """
+    if isinstance(value, dict):
+        return {key: economic_journal(item, key) for key, item in value.items()}
+    if isinstance(value, list):
+        return [economic_journal(item, field) for item in value]
+    if field in {"cash", "settled_cash", "market_value", "equity", "last_price"}:
+        return Decimal(value) if value is not None else None
+    return value
+
+
 def test_missing_price_row_does_not_bypass_required_security_master():
     reader = FixtureReader(calendar())
     account = DatedCashBacktestAccount.create(reader, "100000", market="JP")
@@ -114,14 +130,16 @@ def test_exact_funding_fills_and_closing_journal_match_independent_legacy_produc
     bars["JP72030"]["volume"] = volume
     requests = orders(*spec)
     before = deepcopy(requests)
-    assert current.step(DAY, bars, master, requests) == old.step(
-        DAY, bars, master, requests
-    )
-    assert current.state == old.state
+    assert economic_journal(
+        current.step(DAY, bars, master, requests)
+    ) == economic_journal(old.step(DAY, bars, master, requests))
+    assert economic_journal(current.state) == economic_journal(old.state)
     assert requests == before
     for day in [date(2026, 9, 3), date(2026, 9, 4)]:
-        assert current.step(day, bars, master, []) == old.step(day, bars, master, [])
-        assert current.state == old.state
+        assert economic_journal(
+            current.step(day, bars, master, [])
+        ) == economic_journal(old.step(day, bars, master, []))
+        assert economic_journal(current.state) == economic_journal(old.state)
 
 
 def test_restart_and_split_preserve_exact_journal_and_new_common_sellability_reason():
@@ -134,9 +152,9 @@ def test_restart_and_split_preserve_exact_journal_and_new_common_sellability_rea
     current = CashBacktestFixture.restore(calendar(), current.checkpoint())
     bars, master = market(50)
     bars["JP72030"].update(adj_factor=0.5, ex_rights_type="1")
-    assert current.step(date(2026, 9, 3), bars, master, []) == old.step(
-        date(2026, 9, 3), bars, master, []
-    )
+    assert economic_journal(
+        current.step(date(2026, 9, 3), bars, master, [])
+    ) == economic_journal(old.step(date(2026, 9, 3), bars, master, []))
     requests = orders(
         ("JP72030", "SELL", 200), ("JP72030", "BUY", 200), ("JP72030", "SELL", 200)
     )
@@ -156,7 +174,9 @@ def test_restart_and_split_preserve_exact_journal_and_new_common_sellability_rea
         previous["orders"][-1]["reason"] == "Same-funds sell->buy->sell is prohibited"
     )
     for key in current.state.keys() - {"orders"}:
-        assert current.state[key] == old.state[key], key
+        assert economic_journal(current.state[key], key) == economic_journal(
+            old.state[key], key
+        ), key
 
 
 @pytest.mark.parametrize(
@@ -226,7 +246,7 @@ def test_journal_results_and_checkpoint_do_not_expose_mutable_cash_metadata():
     checkpoint["cash"]["metadata"]["state"]["fills"].clear()
     assert account.state["positions"]["JP72030"]["lots"][0]["quantity"] == 100
     assert account.state["fills"][0]["quantity"] == 100
-    assert account.state["daily"][0]["equity"] == "10000"
+    assert Decimal(account.state["daily"][0]["equity"]) == Decimal("10000")
     assert account.checkpoint()["params"]["market"] == "JP"
 
 

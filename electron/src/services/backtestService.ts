@@ -26,6 +26,7 @@ import { normalizeStockCode } from '../utils/portfolioUtils';
 /** 回测请求配置 */
 export interface BacktestConfig {
   market?: AppMarket;
+  jp_data_version?: string;
   // 必填参数
   strategy_code?: string;
   strategy_id?: string;
@@ -806,6 +807,7 @@ class BacktestService {
     };
 
     if (config.market) payload.market = config.market;
+    if (config.market === 'JP' && config.jp_data_version) payload.jp_data_version = config.jp_data_version;
 
     if (config.model_id?.trim()) {
       payload.model_id = config.model_id;
@@ -1835,6 +1837,7 @@ class BacktestService {
     min_date: string | null;
     max_date: string | null;
     total_trading_days: number;
+    data_version?: string;
   }> {
     try {
       const userApiUrl = SERVICE_URLS.USER_SERVICE;

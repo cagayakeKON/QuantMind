@@ -46,9 +46,13 @@ class RecordingRedis:
             return 1
         if self.fail_publish:
             raise RuntimeError("controlled Redis publication failure")
-        if any(self.get(k) != v for k, v in zip(keys[2:], values[2:], strict=True)):
+        if ((self.get(keys[0]) is not None) != (values[1] == "1") or (
+            values[1] == "1" and self.get(keys[0]) != values[0]
+        )):
             return 0
-        self.values.update(zip(keys[:2], values[:2], strict=True))
+        if any(self.get(k) != v for k, v in zip(keys[2:], values[4:], strict=True)):
+            return 0
+        self.values.update(zip(keys[:2], values[2:4], strict=True))
         self.values.update(dict.fromkeys(keys[2:], "completed"))
         return 1
 
@@ -372,7 +376,11 @@ def test_native_no_signal_source_is_completed_and_expired_owner_cannot_emit(
         if not kw.get("provider"):
             return SimpleNamespace(trades=[])
         result = actual(*a, **kw)
-        redis.values[daily_scan.SIGNALS_KEY] = b"another worker completed its signals"
+        import json
+
+        redis.values[daily_scan.SIGNALS_KEY] = json.dumps({"signals": [
+            {"market": "JP", "script_sha": entry["script_sha"], "symbol": "JP72030", "reason": "another worker"}
+        ]}).encode()
         for key, value in list(redis.values.items()):
             if key.startswith("qm:lab:scan:source:") and value != "completed":
                 redis.values[key] = "another-worker"
@@ -382,4 +390,8 @@ def test_native_no_signal_source_is_completed_and_expired_owner_cannot_emit(
     failed = daily_scan.run_daily_scan()
     assert failed["signals"] == [] and failed["summary"]["failed"] == 1
     assert "another-worker" in redis.values.values()
-    assert redis.get(daily_scan.SIGNALS_KEY) == b"another worker completed its signals"
+    import json
+
+    assert json.loads(redis.get(daily_scan.SIGNALS_KEY))["signals"] == [
+        {"market": "JP", "script_sha": entry["script_sha"], "symbol": "JP72030", "reason": "another worker"}
+    ]

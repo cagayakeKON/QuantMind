@@ -13,7 +13,7 @@ async def registered_market_data_range(market: str | None) -> dict | None:
         return None
 
     def read():
-        hub = provider.open_raw()
+        hub = provider.open()
         calendar = hub.fetch_calendar()
         coverage = pd.to_datetime(
             hub._partition_dates(provider.daily_partition_dir), format="%Y%m%d"
@@ -29,6 +29,7 @@ async def registered_market_data_range(market: str | None) -> dict | None:
             "min_date": str(days.min()) if not days.empty else None,
             "max_date": str(days.max()) if not days.empty else None,
             "total_trading_days": len(days),
+            "data_version": hub.data_dir.name,
         }
 
     return await asyncio.to_thread(read)

@@ -83,6 +83,14 @@ describe('common backtest market context', () => {
     expect(calls.post.mock.calls[0][1].universe).toBe(symbol || 'all');
   });
 
+  it('forwards the advertised immutable publication only for Japan', async () => {
+    const service = new BacktestService();
+    await service.runBacktest({ ...base, market: 'JP', jp_data_version: 'execution-published-v1' });
+    expect(calls.post.mock.calls[0][1].jp_data_version).toBe('execution-published-v1');
+    await service.runBacktest({ ...base, market: 'CN', jp_data_version: 'execution-published-v1' });
+    expect(calls.post.mock.calls[1][1]).not.toHaveProperty('jp_data_version');
+  });
+
   it('rejects a foreign stock before submitting a JP request', async () => {
     await expect(new BacktestService().runBacktest({ ...base, market: 'JP', symbol: '600036.SH' })).rejects.toThrow('Invalid Japanese security code');
     expect(calls.post).not.toHaveBeenCalled();

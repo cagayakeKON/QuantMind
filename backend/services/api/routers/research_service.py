@@ -1741,6 +1741,15 @@ async def get_inference_runs(tid: str, uid: str, model_id: str) -> dict[str, Any
 async def get_research_overview(
     tid: str, uid: str, model_id: str | None, run_id: str | None, limit: int, offset: int, market: str | None = None
 ) -> dict[str, Any]:
+    selected_market = market
+    if model_id:
+        _, owned_market = await _model_market(tid, uid, model_id)
+        if owned_market == 'JP':
+            selected_market = 'JP'
+    elif run_id and await _infer_market_from_run(tid, uid, run_id) == 'JP':
+        selected_market = 'JP'
+    if str(selected_market or '').upper() == 'JP':
+        return await _jp_snapshot_universe(tid, uid, model_id, run_id, limit, offset)
     data = await _do_get_overview(tid, uid, model_id, run_id, limit, offset, market=market)
     return {"code": 200, "data": {"items": data["items"], "summary": data["summary"]}}
 
@@ -1820,6 +1829,8 @@ async def _infer_market_from_run(tid: str, uid: str, run_id: str) -> str | None:
                     market = str(context.get("market", "")).upper()
                     if market in ("CN", "HK", "JP", "US", "CRYPTO"):
                         return market
+                if str(meta.get('market', '')).upper() == 'JP':
+                    return 'JP'
     except Exception:
         pass
     return None
@@ -1828,11 +1839,13 @@ async def _infer_market_from_run(tid: str, uid: str, run_id: str) -> str | None:
 async def get_research_universe(tid: str, uid: str, run_id: str, limit: int, offset: int = 0) -> dict[str, Any]:
     cache_key = f"{tid}:{uid}:{run_id}:{limit}:{offset}"
     cached = _get_local_cache(_UNIVERSE_CACHE, cache_key, _UNIVERSE_CACHE_TTL_SECONDS)
-    if cached is not None:
+    if cached is not None and (cached.get('data') or {}).get('market') != 'JP':
         return cached
 
     # Determine market from the inference run's model
     market = await _infer_market_from_run(tid, uid, run_id)
+    if market == 'JP':
+        return await _jp_snapshot_universe(tid, uid, None, run_id, limit, offset)
 
     data = await _do_get_universe_with_sdl_redis(tid, uid, run_id, limit, offset, market=market)
     if data is None:
@@ -1967,8 +1980,76 @@ async def selected_prediction_rows(tid, uid, model_id, trade_date, run_id=None):
     return rows
 
 
+async def _jp_snapshot_universe(tid, uid, model_id, run_id, limit, offset):
+    """Owned saved runs use their recorded per-score source, never latest pred."""
+    where = "snap.tenant_id=:tid AND snap.user_id=:uid"
+    params = {"tid": tid, "uid": uid, "limit": limit, "offset": offset}
+    if model_id:
+        where += " AND snap.model_id=:mid"
+        params["mid"] = model_id
+    if run_id:
+        where += " AND snap.run_id=:rid"
+        params["rid"] = run_id
+    where += """ AND EXISTS (
+        SELECT 1 FROM qm_user_models m
+        WHERE m.tenant_id=snap.tenant_id AND m.user_id=snap.user_id
+          AND m.model_id=snap.model_id
+          AND (UPPER(m.metadata_json::jsonb->'context'->>'market')='JP'
+               OR (COALESCE(m.metadata_json::jsonb->'context'->>'market','')=''
+                   AND UPPER(m.metadata_json::jsonb->>'market')='JP')))"""
+    async with get_session(read_only=True) as session:
+        page = (
+            await session.execute(
+                text(
+                    f"SELECT snap.model_id,snap.run_id,snap.data_trade_date,snap.symbol FROM qm_research_candidate_snapshot snap WHERE {where} ORDER BY snap.score_rank,snap.run_id,snap.symbol LIMIT :limit OFFSET :offset"
+                ),
+                params,
+            )
+        ).all()
+        summary = await _fetch_summary(
+            session, where, params, include_market_stats=False
+        )
+    groups = {}
+    for mid, rid, day, symbol in page:
+        groups.setdefault((mid, rid, str(day)[:10]), set()).add(StockCodeUtil.to_prefix(symbol, market='JP'))
+    items = []
+    for (mid, rid, day), symbols in groups.items():
+        day = str(day)[:10]
+        rows = await _jp_snapshot_scores(tid, uid, mid, rid, day)
+        rows = [row for row in rows if row['symbol'] in symbols]
+        if not rows:
+            continue
+        result = await get_research_universe_by_date(
+            tid, uid, mid, day, len(rows), _snapshot_rows=rows, _snapshot_run=rid
+        )
+        for item in result["data"]["items"]:
+            item["tradeDate"] = day
+        items.extend(result["data"]["items"])
+    items.sort(key=lambda item: (item["rank"], item["runId"], item["code"]))
+    versions = {item["dataVersion"] for item in items if item.get("dataVersion")}
+    version = (
+        next(iter(versions))
+        if len(versions) == 1 and all(item.get("dataVersion") for item in items)
+        else None
+    )
+    return {
+        "code": 200,
+        "data": {
+            "items": items,
+            "summary": summary,
+            "market": "JP",
+            "currency": "JPY",
+            "dataVersion": version,
+            "sourceWarning": None
+            if version
+            else "Prediction inputs have missing or mixed provenance; resolve features per symbol",
+        },
+    }
+
+
 async def get_research_universe_by_date(
-    tid: str, uid: str, model_id: str, trade_date: str, limit: int, offset: int = 0
+    tid: str, uid: str, model_id: str, trade_date: str, limit: int, offset: int = 0,
+    *, _snapshot_rows=None, _snapshot_run=None,
 ) -> dict[str, Any]:
     """按数据日直读模型 pred.parquet 的全市场分数截面（投研宇宙主数据源）。
 
@@ -1978,19 +2059,24 @@ async def get_research_universe_by_date(
     trade_date = str(trade_date)[:10]
     cache_key = f"date:{tid}:{uid}:{model_id}:{trade_date}:{limit}:{offset}"
     cached = _get_local_cache(_UNIVERSE_CACHE, cache_key, _UNIVERSE_CACHE_TTL_SECONDS)
-    if cached is not None and (cached.get("data") or {}).get("market") != "JP":
+    if _snapshot_rows is None and cached is not None and (cached.get("data") or {}).get("market") != "JP":
         return cached
 
     storage_path, _market, metadata = await _model_market(
         tid, uid, model_id, include_metadata=True
     )
+    if _snapshot_rows is not None and _market != 'JP':
+        raise ValueError('The selected research model is not Japanese')
     if _market == "JP":
         from backend.services.engine.inference.prediction_provenance import read_pred_sources
-        pred_rows = await asyncio.to_thread(read_pred_sources, Path(storage_path) / "pred.parquet", trade_date) if storage_path else []
+        if _snapshot_rows is not None:
+            pred_rows = _snapshot_rows
+        else:
+            pred_rows = await asyncio.to_thread(read_pred_sources, Path(storage_path) / "pred.parquet", trade_date) if storage_path else []
     else:
         pred_rows = await asyncio.to_thread(_read_model_pred_day, storage_path, trade_date) if storage_path else []
-    snapshot_run = None
-    if not pred_rows:
+    snapshot_run = _snapshot_run
+    if not pred_rows and _snapshot_rows is None:
         # 兜底：该日无 parquet 分数 → 候选池快照（同日行数最多的 run）
         snap_run = await _best_snapshot_run_for_date(tid, uid, model_id, date.fromisoformat(trade_date) if _market == "JP" else trade_date)
         if snap_run:
@@ -2115,7 +2201,8 @@ async def get_research_universe_by_date(
         payload["data"].update(
             {"market": "JP", "dataVersion": jp_version, "currency": "JPY", "sourceWarning": None if jp_version else "Prediction inputs have missing or mixed provenance; resolve features per symbol"}
         )
-    _set_local_cache(_UNIVERSE_CACHE, cache_key, payload, _UNIVERSE_CACHE_MAX_ENTRIES)
+    if _snapshot_rows is None:
+        _set_local_cache(_UNIVERSE_CACHE, cache_key, payload, _UNIVERSE_CACHE_MAX_ENTRIES)
     return payload
 
 

@@ -332,10 +332,19 @@ def _run(
             for row in calendar
             if row["HolDiv"] in {"1", "2"}
         )
+        price_bounds = conn.execute(
+            "SELECT min(Date), max(Date) FROM research.daily_prices"
+        ).fetchone()
+        anchor = price_bounds[0]
+        if anchor is None or anchor not in sessions:
+            raise ValueError("JP calendar does not cover the cached history origin")
+        complete = _complete_cash_sessions(conn)
+        required = {day for day in sessions if anchor <= day <= last}
+        missing = required - complete
+        refresh = {day for day in sessions if first <= day <= last}
+        selected_sessions = sorted(missing | refresh)
         # Fetch all datasets for a day before replacing any of its cached rows.
-        for day in sessions:
-            if not first <= day <= last:
-                continue
+        for day in selected_sessions:
             bundle = {
                 table: api.rows(
                     endpoint,
@@ -356,6 +365,17 @@ def _run(
                 conn.execute("ROLLBACK")
                 raise
             downloaded += 1
+        cached_end = conn.execute(
+            "SELECT max(Date) FROM research.daily_prices"
+        ).fetchone()[0]
+        remaining = {
+            day for day in sessions if anchor <= day <= max(last, cached_end)
+        } - _complete_cash_sessions(conn)
+        if remaining:
+            raise ValueError(
+                "JP complete cash-session publication required; missing "
+                + ",".join(map(str, sorted(remaining)))
+            )
         conn.register("incoming_calendar", pa.Table.from_pylist(calendar))
         conn.execute(
             "CREATE OR REPLACE TABLE research.calendar AS SELECT CAST(Date AS DATE) AS Date, CAST(HolDiv AS VARCHAR) AS HolDiv FROM incoming_calendar"
@@ -367,10 +387,28 @@ def _run(
 
     return {
         "downloaded_sessions": downloaded,
+        "catchup_sessions": len(missing - refresh),
+        "coverage_start": str(anchor),
+        "coverage_end": str(cached_end),
         "publication": report,
         "publication_status": publication_status(target),
         **selection,
     }
+
+
+def _complete_cash_sessions(conn):
+    """Market-day completeness; individual suspensions remain native data rules."""
+    covered = []
+    for table in ("daily_prices", "master", "topix"):
+        covered.append(
+            {
+                row[0]
+                for row in conn.execute(
+                    f"SELECT DISTINCT Date FROM research.{table} WHERE Date IS NOT NULL"
+                ).fetchall()
+            }
+        )
+    return set.intersection(*covered)
 
 
 if __name__ == "__main__":

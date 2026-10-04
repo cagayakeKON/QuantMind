@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
+from pathlib import Path
 import os
 
 from fastapi import FastAPI
@@ -209,9 +210,15 @@ async def test_status_scanner_jp_aliases_never_use_cn_directory_or_calendar(
             )  # OSE holiday trading is not a cash session.
 
     monkeypatch.setattr(scanner, "datetime", Clock)
-    monkeypatch.setenv("QLIB_PROVIDER_URI", "/fake/cn_data")
+    # Normal JP resolution is market specific. The canonical writer's explicit
+    # QLIB_PROVIDER_URI override applies to every market; the scanner must follow
+    # that contract rather than report a separate, unwritten JP cache.
+    monkeypatch.delenv("QLIB_PROVIDER_URI", raising=False)
     assert scanner._resolve_qlib_dir("JP").name == "jp_data"
     assert scanner._resolve_qlib_dir("japan") == scanner._resolve_qlib_dir("JP")
+    monkeypatch.setenv("QLIB_PROVIDER_URI", "/fake/explicit-qlib-cache")
+    assert scanner._resolve_qlib_dir("JP") == Path("/fake/explicit-qlib-cache")
+    monkeypatch.delenv("QLIB_PROVIDER_URI")
     assert scanner._resolve_calendar_market("japan") == "XTKS"
     assert scanner._resolve_calendar_market("unknown") == "SSE"
     assert scanner._resolve_qlib_dir("unknown") == scanner._resolve_qlib_dir("a_share")

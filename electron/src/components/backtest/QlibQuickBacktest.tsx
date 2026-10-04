@@ -147,6 +147,7 @@ export const QlibQuickBacktest: React.FC = () => {
   
   // 数据日期范围（从后端获取）
   const [dataMinDate, setDataMinDate] = useState<string | null>(null);
+  const [dataVersion, setDataVersion] = useState<string | null>(null);
   const [dataMaxDate, setDataMaxDate] = useState<string | null>(null);
 
   // 模型选择
@@ -195,6 +196,7 @@ export const QlibQuickBacktest: React.FC = () => {
   useEffect(() => {
     let cancelled = false;
     setDataMinDate(null);
+    setDataVersion(null);
     setDataMaxDate(null);
     const fetchDataRange = async () => {
       const { backtestService } = await import('../../services/backtestService');
@@ -202,6 +204,7 @@ export const QlibQuickBacktest: React.FC = () => {
       if (!cancelled && result.exists && result.min_date && result.max_date) {
         setDataMinDate(result.min_date);
         setDataMaxDate(result.max_date);
+        setDataVersion(result.data_version ?? null);
       }
     };
     fetchDataRange();
@@ -385,6 +388,10 @@ export const QlibQuickBacktest: React.FC = () => {
   };
 
   const handleRun = async (override?: string | React.MouseEvent) => {
+    if (marketConfig.backtest?.market === 'JP' && !dataVersion) {
+      setError('请等待日本市场执行数据版本加载完成后再提交');
+      return;
+    }
     const overrideCode = typeof override === 'string' ? override : undefined;
     if (!strategyInfo && !overrideCode) {
       setError('请选择一个策略模板');
@@ -414,6 +421,7 @@ export const QlibQuickBacktest: React.FC = () => {
 
       const config: BacktestConfig = {
         market: marketConfig.backtest?.market,
+        ...(marketConfig.backtest?.market === 'JP' ? { jp_data_version: dataVersion! } : {}),
         symbol: universePath,
         start_date: startDate,
         end_date: endDate,

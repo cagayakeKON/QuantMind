@@ -217,7 +217,7 @@ class ReplayAccountManager(SimulationAccountManager):
     ) -> dict:
         fill_id = str(order_id or uuid.uuid4())
         try:
-            await asyncio.to_thread(
+            updated = await asyncio.to_thread(
                 self._mutate_cash_account,
                 lambda current: self._cash_rules.apply_fill(
                     current, trade_date, symbol, side, matched, fill_id
@@ -227,7 +227,11 @@ class ReplayAccountManager(SimulationAccountManager):
             if isinstance(error, self._cash_rules.reader.execution_data_errors):
                 raise
             return {"success": False, "reason": str(error)}
-        return {"success": True, "order_id": fill_id}
+        result = {"success": True, "order_id": fill_id}
+        fill_result = getattr(self._cash_rules, "fill_result", None)
+        if fill_result is not None:
+            result["fill_accounting"] = fill_result(updated, fill_id)
+        return result
 
     def drop(self) -> None:
         """丢弃会话时清除 Redis 账户。"""

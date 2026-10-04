@@ -92,6 +92,10 @@ describe('PortfolioService', () => {
     });
 
     describe('getFundOverview', () => {
+        it('rejects JP live funds before reading or relabeling a legacy real account', async () => {
+            await expect(portfolioService.getFundOverview('7', 'real', 'default', 'JP')).rejects.toThrow('尚未接入实盘账户');
+            expect(mocks.get).not.toHaveBeenCalled();
+        });
         it('does not borrow CNY settings for an uninitialized JP baseline', async () => {
             mocks.get.mockResolvedValueOnce({ data: { success: true, data: {
                 total_asset: 0, cash: 0, initial_equity: 0, account_not_initialized: true, currency: 'JPY', positions: {},

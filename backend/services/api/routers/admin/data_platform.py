@@ -41,7 +41,7 @@ _ALPHA_AGENT_H5_MAP: dict[str, str] = {
 }
 
 
-def _market_local_stats(market: str) -> dict | None:
+def _market_local_stats(market: str, data_version: str | None = None) -> dict | None:
     """从各市场本地 parquet 读取统计（行数/标的/日期范围）。
 
     支持 parquet 单源市场：a_share / futures / hong_kong / us_stock。
@@ -51,6 +51,7 @@ def _market_local_stats(market: str) -> dict | None:
         "futures": "quantfutures_hub.QuantFuturesDataHub",
         "hong_kong": "quanthk_hub.QuantHKDataHub",
         "us_stock": "quantus_hub.QuantUSDataHub",
+        "japan": "registered:JP",
     }
     hub_ref = hub_cls_map.get(market)
     if not hub_ref:
@@ -65,12 +66,19 @@ def _market_local_stats(market: str) -> dict | None:
             quanthk_hub,
         )
 
-        hub = {
-            "quantus_hub.QuantUSDataHub": quantus_hub.QuantUSDataHub,
-            "quanthk_hub.QuantHKDataHub": quanthk_hub.QuantHKDataHub,
-            "quantfutures_hub.QuantFuturesDataHub": quantfutures_hub.QuantFuturesDataHub,
-            "quantdb_hub.QuantDBDataHub": quantdb_hub.QuantDBDataHub,
-        }[hub_ref].get_instance()
+        if market == "japan":
+            from backend.services.engine.data_platform.market_provider import (
+                LOCAL_MARKET_PROVIDERS,
+            )
+
+            hub = LOCAL_MARKET_PROVIDERS["JP"].open(data_version)
+        else:
+            hub = {
+                "quantus_hub.QuantUSDataHub": quantus_hub.QuantUSDataHub,
+                "quanthk_hub.QuantHKDataHub": quanthk_hub.QuantHKDataHub,
+                "quantfutures_hub.QuantFuturesDataHub": quantfutures_hub.QuantFuturesDataHub,
+                "quantdb_hub.QuantDBDataHub": quantdb_hub.QuantDBDataHub,
+            }[hub_ref].get_instance()
         fwd = hub.data_dir / "1_kline_data" / "daily_forward"
         if not fwd.is_dir():
             return None
@@ -96,6 +104,7 @@ def _market_local_stats(market: str) -> dict | None:
             "start_date": str(row["start_date"])[:10],
             "end_date": str(row["end_date"])[:10],
             "file_size_mb": round(sum(p.stat().st_size for p in fwd.rglob("*.parquet")) / 1024 / 1024, 1),
+            **({"data_version": hub.data_dir.name} if market == "japan" else {}),
         }
     except Exception:
         return None
@@ -945,6 +954,7 @@ async def list_alpha_agent_markets(current_user: dict = Depends(require_admin)):
         markets = list_markets()
         for m in markets:
             mid = m["market_id"]
+            adapter = None
             try:
                 adapter = get_adapter(mid)
                 m["data_ready"] = adapter.is_data_ready()
@@ -953,8 +963,19 @@ async def list_alpha_agent_markets(current_user: dict = Depends(require_admin)):
 
             # parquet 单源市场（A股/期货/港股/美股）：数据统一从本地 Quant parquet 读取，
             # 不依赖 PostgreSQL。
-            if mid in ("a_share", "futures", "hong_kong", "us_stock"):
-                m["h5_info"] = _market_local_stats(mid)
+            if mid in ("a_share", "futures", "hong_kong", "us_stock", "japan"):
+                if mid == "japan":
+                    import asyncio
+
+                    m["h5_info"] = (
+                        await asyncio.to_thread(
+                            _market_local_stats, mid, adapter.publication.name
+                        )
+                        if adapter is not None
+                        else None
+                    )
+                else:
+                    m["h5_info"] = _market_local_stats(mid)
                 m["data_source"] = "parquet" if m["h5_info"] else None
             else:
                 # crypto 5min：仍用 H5 管线（无 5min parquet）
@@ -981,7 +1002,8 @@ async def list_alpha_agent_markets(current_user: dict = Depends(require_admin)):
             # 读取 Qlib 目录详情（路径统一由市场适配器解析，消除硬编码漂移）
             qlib_dir = None
             try:
-                adapter = get_adapter(mid)
+                if mid != "japan":
+                    adapter = get_adapter(mid)
                 qlib_dir = adapter.get_qlib_provider_uri()
             except Exception:
                 qlib_dir = None
@@ -1088,6 +1110,25 @@ async def sync_alpha_agent_market(
 
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, _do_sync)
+
+        if market == "japan":
+            ready = bool(
+                result and await loop.run_in_executor(None, adapter.is_data_ready)
+            )
+            return {
+                "success": ready,
+                "data": {
+                    "market": market,
+                    "market_name": adapter.market_name,
+                    "status": "completed" if ready else "failed",
+                    "message": (
+                        "日股固定发布的研究输入已准备（不包含在线行情同步）"
+                        if ready
+                        else "日股研究输入准备失败，请检查日志"
+                    ),
+                    "data_version": adapter.publication.name,
+                },
+            }
 
         if result:
             # 数据同步成功后，自动触发特征计算

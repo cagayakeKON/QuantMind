@@ -116,10 +116,14 @@ def run_daily_scan(*, lookback_days: int = 7) -> dict[str, Any]:
     claims = []
     redis = None
     native_seen = False
+    legacy_seen = False
+    legacy_signals = []
 
     for entry in list_watch():
         if str((entry.get("options") or {}).get("market") or "").upper() == "JP":
             native_seen = True
+        else:
+            legacy_seen = True
         summary["watched"] += 1
         code = entry.get("code") or ""
         if not code:
@@ -185,7 +189,7 @@ def run_daily_scan(*, lookback_days: int = 7) -> dict[str, Any]:
             continue
         if claim:
             try:
-                owner = redis.get(claim[0])
+                owner = _native_read(redis, claim[0])
             except Exception:
                 _release_claim(redis, claim)
                 summary["failed"] += 1
@@ -195,7 +199,6 @@ def run_daily_scan(*, lookback_days: int = 7) -> dict[str, Any]:
             if owner != claim[1]:
                 summary["failed"] += 1
                 continue
-            claims.append(claim)
         summary["ok"] += 1
         # Trades dated today_str count as fresh signals
         fresh = [
@@ -203,11 +206,25 @@ def run_daily_scan(*, lookback_days: int = 7) -> dict[str, Any]:
             for t in (result.trades or [])
             if str(getattr(t, "date", "")).startswith(str(scan_day))
         ]
-        if not fresh:
-            continue
-        summary["with_signal"] += 1
+        if fresh:
+            summary["with_signal"] += 1
+        watch_scope = (
+            hashlib.sha256(
+                json.dumps(
+                    [
+                        entry.get("tenant_id", ""),
+                        entry.get("user_id", "0"),
+                        entry.get("script_sha"),
+                    ],
+                    ensure_ascii=False,
+                ).encode()
+            ).hexdigest()
+            if claim
+            else None
+        )
+        fresh_signals = []
         for t in fresh:
-            signals.append(
+            fresh_signals.append(
                 {
                     "strategy": entry.get("name"),
                     "script_sha": entry.get("script_sha"),
@@ -222,12 +239,25 @@ def run_daily_scan(*, lookback_days: int = 7) -> dict[str, Any]:
                             "market": provider.market,
                             "data_version": provider.reader.data_version,
                             "execution_date_mode": "published_daily_delayed",
+                            "watch_scope": watch_scope,
                         }
                         if provider
                         else {}
                     ),
                 }
             )
+        signals.extend(fresh_signals)
+        if claim:
+            claims.append(
+                {
+                    "claim": claim,
+                    "scope": watch_scope,
+                    "script_sha": entry.get("script_sha"),
+                    "signals": fresh_signals,
+                }
+            )
+        else:
+            legacy_signals.extend(fresh_signals)
 
     payload = {
         "generated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
@@ -236,47 +266,108 @@ def run_daily_scan(*, lookback_days: int = 7) -> dict[str, Any]:
     }
     try:
         r = get_redis_sentinel_client()
-        if claims:
-            published = r.eval(
-                "for i=3,#KEYS do if redis.call('GET',KEYS[i]) ~= ARGV[i] then return 0 end end "
-                "redis.call('SET',KEYS[1],ARGV[1]); redis.call('SET',KEYS[2],ARGV[2]); "
-                "for i=3,#KEYS do redis.call('SET',KEYS[i],'completed') end return 1",
-                2 + len(claims),
-                SIGNALS_KEY,
-                LAST_RUN_KEY,
-                *[key for key, _ in claims],
-                json.dumps(payload, ensure_ascii=False, default=str),
-                payload["generated_at"],
-                *[token for _, token in claims],
+        if native_seen:
+            accepted = _publish_scoped_scan(
+                r, payload, claims, legacy_seen, legacy_signals
             )
-            if not published:
-                raise ValueError(
-                    "Native scan source ownership expired before publication"
-                )
-        elif not native_seen:
+            lost = [batch for batch in claims if batch["claim"][0] not in accepted]
+            summary["failed"] += len(lost)
+            summary["ok"] -= len(lost)
+            summary["with_signal"] -= sum(bool(batch["signals"]) for batch in lost)
+            payload["signals"] = legacy_signals + [
+                signal
+                for batch in claims
+                if batch["claim"][0] in accepted
+                for signal in batch["signals"]
+            ]
+        else:
             r.set(
                 SIGNALS_KEY,
                 json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"),
             )
-        if not claims:
             r.set(LAST_RUN_KEY, payload["generated_at"].encode("utf-8"))
     except Exception as e:
-        for claim in claims:
-            _release_claim(redis, claim)
-        if claims:
+        for batch in claims:
+            _release_claim(redis, batch["claim"])
+        if native_seen:
             payload["signals"] = []
             payload["persistence_error"] = str(e)
-            summary["failed"] += len(claims)
-            summary["ok"] -= len(claims)
+            summary["failed"] += summary["ok"]
+            summary["ok"] = 0
             summary["with_signal"] = 0
         logger.warning("daily_scan: persist failed: %s", e)
     return payload
 
 
+def _publish_scoped_scan(redis, payload, batches, legacy_seen, legacy_signals):
+    """Replace only owned native tasks; a native skip never suppresses legacy output."""
+    for _ in range(3):
+        accepted = [
+            batch
+            for batch in batches
+            if _native_read(redis, batch["claim"][0])
+            in (batch["claim"][1], batch["claim"][1].encode())
+        ]
+        if not legacy_seen and not accepted:
+            return set()
+        previous_raw = _native_read(redis, SIGNALS_KEY)
+        previous = json.loads(previous_raw) if previous_raw else {"signals": []}
+        retained = []
+        for signal in previous.get("signals", []):
+            native = signal.get("market") == "JP"
+            if not native and legacy_seen:
+                continue
+            if native and any(
+                signal.get("watch_scope") == batch["scope"]
+                or (
+                    not signal.get("watch_scope")
+                    and batch["script_sha"] is not None
+                    and signal.get("script_sha") == batch["script_sha"]
+                )
+                for batch in accepted
+            ):
+                continue
+            retained.append(signal)
+        merged_summary = dict(payload["summary"])
+        lost = [batch for batch in batches if batch not in accepted]
+        merged_summary["failed"] += len(lost)
+        merged_summary["ok"] -= len(lost)
+        merged_summary["with_signal"] -= sum(bool(batch["signals"]) for batch in lost)
+        merged = {
+            **payload,
+            "summary": merged_summary,
+            "signals": retained
+            + legacy_signals
+            + [signal for batch in accepted for signal in batch["signals"]],
+        }
+        published = _native_eval(
+            redis,
+            "local current=redis.call('GET',KEYS[1]); "
+            "if ARGV[2]=='0' then if current then return 0 end "
+            "elseif current ~= ARGV[1] then return 0 end; "
+            "for i=3,#KEYS do if redis.call('GET',KEYS[i]) ~= ARGV[i+2] then return 0 end end; "
+            "redis.call('SET',KEYS[1],ARGV[3]); redis.call('SET',KEYS[2],ARGV[4]); "
+            "for i=3,#KEYS do redis.call('SET',KEYS[i],'completed') end; return 1",
+            2 + len(accepted),
+            SIGNALS_KEY,
+            LAST_RUN_KEY,
+            *[batch["claim"][0] for batch in accepted],
+            previous_raw or "",
+            "1" if previous_raw is not None else "0",
+            json.dumps(merged, ensure_ascii=False, default=str),
+            payload["generated_at"],
+            *[batch["claim"][1] for batch in accepted],
+        )
+        if published:
+            return {batch["claim"][0] for batch in accepted}
+    raise ValueError("Scan publication changed during all three guarded attempts")
+
+
 def _release_claim(redis, claim):
     """Only the current scan owner may complete or release its source claim."""
     try:
-        redis.eval(
+        _native_eval(
+            redis,
             "if redis.call('GET',KEYS[1]) == ARGV[1] then "
             + "return redis.call('DEL',KEYS[1]) "
             + "end return 0",
@@ -286,6 +377,22 @@ def _release_claim(redis, claim):
         )
     except Exception:
         logger.warning("daily_scan: source claim cleanup failed", exc_info=True)
+
+
+def _native_read(redis, key):
+    # The public Sentinel wrapper exposes master pipelines, not Lua eval;
+    # ownership and CAS reads must not use its optional replica read path.
+    if not callable(getattr(redis, "eval", None)):
+        with redis.pipeline() as pipeline:
+            return pipeline.get(key).execute()[0]
+    return redis.get(key)
+
+
+def _native_eval(redis, script, count, *arguments):
+    if callable(getattr(redis, "eval", None)):
+        return redis.eval(script, count, *arguments)
+    with redis.pipeline() as pipeline:
+        return pipeline.eval(script, count, *arguments).execute()[0]
 
 
 __all__ = [

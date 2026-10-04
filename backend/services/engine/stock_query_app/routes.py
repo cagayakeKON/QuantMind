@@ -5,7 +5,7 @@
 
 import logging
 import asyncio
-from datetime import date
+from datetime import date, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -68,15 +68,103 @@ class MarketIndexRequest(BaseModel):
     indicators: list[str] | None = None
 
 
+def _registered_stock_list(market, asof=None, enrich=False):
+    """Daily immutable local source; never use another market's search index."""
+    provider = LOCAL_MARKET_PROVIDERS[market]
+    hub = provider.open_raw()
+    master = hub.fetch_stock_list(as_of=asof)
+    items = []
+    quotes, valuations = {}, {}
+    if enrich:
+        end = asof or date.today()
+        for target, frame in (
+            (
+                quotes,
+                hub.fetch_daily_kline_batch(
+                    master["symbol"].tolist() if not master.empty else [],
+                    end - timedelta(days=60),
+                    end,
+                    adjust="none",
+                ),
+            ),
+            (valuations, hub.fetch_valuation(None, end - timedelta(days=60), end)),
+        ):
+            if not frame.empty:
+                target.update(
+                    {
+                        row["symbol"]: row
+                        for row in frame.sort_values("trade_date")
+                        .drop_duplicates("symbol", keep="last")
+                        .to_dict("records")
+                    }
+                )
+    for row in master.to_dict("records"):
+        suffix = StockCodeUtil.to_suffix(row["symbol"], market=market)
+        item = {
+            "symbol": StockCodeUtil.to_prefix(suffix, market=market),
+            "name": str(row.get("stock_name") or ""),
+            "name_en": str(row.get("name_en") or ""),
+            "market": market,
+            "exchange": market,
+            "currency": provider.currency,
+        }
+        if enrich:
+            bar, valuation = quotes.get(suffix, {}), valuations.get(suffix, {})
+
+            def number(value):
+                import math
+
+                try:
+                    result = float(value)
+                    return result if math.isfinite(result) else None
+                except (TypeError, ValueError):
+                    return None
+
+            item.update(
+                {
+                    key: number(valuation.get(field))
+                    for key, field in [
+                        ("pe", "pe_ttm"),
+                        ("pb", "pb"),
+                        ("roe", "roe"),
+                        ("marketCap", "total_mv"),
+                    ]
+                }
+            )
+            item.update(
+                {
+                    "close": number(bar.get("close")),
+                    "trade_date": str(bar["trade_date"].date()) if bar else None,
+                    "valuation_date": str(valuation["trade_date"].date())
+                    if valuation
+                    else None,
+                    "floatMarketCap": None,
+                    "turnoverRate": None,
+                    "pctChange": None,
+                    "isSt": False,
+                }
+            )
+        items.append(item)
+    return sorted(items, key=lambda item: item["symbol"]), hub.data_dir.name
+
+
 @router.get("/stocks/search")
 async def search_stocks(
     q: str = Query(..., description="搜索关键词"),
     limit: int = Query(10, ge=1, le=100, description="返回结果数量限制"),
+    market: str | None = Query(None),
+    asof: date | None = Query(None),
 ):
     """搜索股票"""
     logger.info("Stock search request", extra={"query": q, "limit": limit})
 
     try:
+        market_key = str(market or '').upper()
+        if market_key in LOCAL_MARKET_PROVIDERS:
+            items, version = await asyncio.to_thread(_registered_stock_list, market_key, asof)
+            keyword = q.strip().casefold()
+            results = [item for item in items if keyword in StockCodeUtil.to_suffix(item['symbol'], market=market_key).casefold() or any(keyword in str(item.get(field) or '').casefold() for field in ('symbol', 'name', 'name_en'))][:limit]
+            return {'query': q, 'results': results, 'total': len(results), 'market': market_key, 'source': LOCAL_MARKET_PROVIDERS[market_key].source, 'data_version': version, 'frequency': 'daily', 'is_realtime': False}
         search_service = get_search_service()
         results = await search_service.search_stocks(q, limit)
 
@@ -102,6 +190,7 @@ async def get_all_stocks(
     exchange: str = Query("", description="交易所筛选: SH, SZ, BJ (仅A股有效)"),
     enrich: bool = Query(False, description="是否包含 PE/PB/市值等字段"),
     limit: int = Query(10000, ge=1, le=50000, description="返回数量限制"),
+    asof: date | None = Query(None),
 ):
     """获取指定市场的全部股票列表，A股支持按交易所筛选"""
     market_key = market.upper()
@@ -110,6 +199,10 @@ async def get_all_stocks(
     logger.info("Fetching all stocks", extra={"market": market_key, "exchange": exchange_key, "table": table, "enrich": enrich})
 
     try:
+        if market_key in LOCAL_MARKET_PROVIDERS:
+            items, version = await asyncio.to_thread(_registered_stock_list, market_key, asof, enrich)
+            items = items[:limit]
+            return {'items': items, 'total': len(items), 'market': market_key, 'exchange': exchange_key or None, 'table': None, 'source': LOCAL_MARKET_PROVIDERS[market_key].source, 'data_version': version, 'frequency': 'daily', 'is_realtime': False}
         from backend.shared.database_pool import get_db
 
         # Determine name column: CN uses stock_name, others use name

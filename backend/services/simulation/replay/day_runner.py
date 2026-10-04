@@ -926,7 +926,8 @@ class ReplayDayRunner:
                 order_id=fill_order_id,
             )
             # Exact amounts go to the dated cash rules. The common PG/response
-            # contract remains numeric, including its existing P&L calculation.
+            # contract remains numeric. Accounting below uses the registered
+            # cash adapter's consumed lot cost when that capability is supplied.
             mr = replace(
                 mr,
                 **{
@@ -964,6 +965,9 @@ class ReplayDayRunner:
             )
             return
 
+        fill_accounting = update.get("fill_accounting")
+        if fill_accounting is not None:
+            avg_cost_before = fill_accounting["avg_cost_before"]
         realized = await self._persist_fill(
             db,
             session_id,
@@ -981,6 +985,10 @@ class ReplayDayRunner:
             avg_cost_before=avg_cost_before,
             holding_days=holding_days,
             **({"order_id": fill_order_id} if fill_order_id is not None else {}),
+            **(
+                {"realized_pnl_override": fill_accounting["realized_pnl"]}
+                if fill_accounting is not None else {}
+            ),
         )
         result.realized_pnl_today += realized
         # 买入后记录首次买入日，供后续卖出算持有天数
@@ -1038,6 +1046,7 @@ class ReplayDayRunner:
         avg_cost_before: float | None = None,
         holding_days: int | None = None,
         order_id: uuid.UUID | None = None,
+        realized_pnl_override: float | None = None,
     ) -> float:
         """落库委托 + 成交，返回本笔已实现盈亏（买入返回 0.0）。
 
@@ -1066,10 +1075,14 @@ class ReplayDayRunner:
         db.add(order_row)
         await db.flush()
 
-        # 已实现盈亏仅在卖出时产生：(卖价 - 移动加权成本) × 数量 - 全部费用
+        # 原账户保留移动加权成本；注册现金规则提供实际消耗批次的已实现盈亏。
         realized_pnl: float | None = None
         if side == OrderSide.SELL and avg_cost_before is not None and avg_cost_before > 0:
-            realized_pnl = (price - avg_cost_before) * quantity - total_fee
+            realized_pnl = (
+                realized_pnl_override
+                if realized_pnl_override is not None
+                else (price - avg_cost_before) * quantity - total_fee
+            )
 
         db.add(
             ReplayTrade(

@@ -45,7 +45,7 @@ vi.mock('antd', () => ({ Modal: { confirm: vi.fn() }, DatePicker: { RangePicker:
 beforeEach(async () => {
   await import('../../../services/backtestService');
   state.market = 'JP';
-  state.range.mockReset().mockResolvedValue({ exists: true, min_date: '2026-09-28', max_date: '2026-09-30' });
+  state.range.mockReset().mockResolvedValue({ exists: true, min_date: '2026-09-28', max_date: '2026-09-30', data_version: 'execution-published-v1' });
   state.optimize.mockReset().mockResolvedValue({});
   state.history.mockReset().mockResolvedValue([]);
   state.detail.mockReset(); state.update.mockReset(); state.prefill.mockReset(); state.module.mockReset();
@@ -66,6 +66,7 @@ describe('common optimization page market context', () => {
     fireEvent.click(screen.getByRole('button', { name: '开始网格搜索' }));
     await waitFor(() => expect(state.optimize).toHaveBeenCalledWith(expect.objectContaining({
       market: 'JP', user_id: 'alice', symbol: 'all', qlib_strategy_type: 'TopkDropout',
+      jp_data_version: 'execution-published-v1',
       start_date: '2026-09-29', end_date: '2026-09-30', max_parallel: 3,
     }), expect.any(Object)));
     expect(state.optimize.mock.calls[0][0]).not.toHaveProperty('stamp_duty');
