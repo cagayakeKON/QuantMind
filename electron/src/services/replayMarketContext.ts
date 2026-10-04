@@ -9,7 +9,10 @@ export function replayContext(market: unknown) {
 
 export function replayCreateParams(params: CreateSessionParams, market: AppMarket): CreateSessionParams {
     const context = replayContext(market);
-    return context ? {...params, strategy_params: {...params.strategy_params, market: context.market}} : params;
+    if (!context) return params;
+    const strategy_params: Record<string, unknown> = {...params.strategy_params, market: context.market};
+    if (context.stopLoss === false) delete strategy_params.stop_loss_pct;
+    return {...params, strategy_params, ...(context.stopLoss === false ? {stop_loss_pct: null} : {})};
 }
 
 export function replayVisibleSessions(sessions: ReplaySession[], market: AppMarket) {

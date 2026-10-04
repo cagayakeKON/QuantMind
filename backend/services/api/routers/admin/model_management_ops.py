@@ -241,7 +241,7 @@ async def update_feature_catalog(
     if not isinstance(categories, list):
         raise HTTPException(status_code=400, detail="categories must be a list")
 
-    valid_markets = {"CN", "HK", "US", "CRYPTO", "FUTURES", "CUSTOM"}
+    valid_markets = {"CN", "JP", "HK", "US", "CRYPTO", "FUTURES", "CUSTOM"}
     # 计算总特征数 + 归一化 explanation/markets
     total_features = 0
     for cat in categories:

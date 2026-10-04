@@ -318,7 +318,9 @@ class SimulationCorporateActionService:
                 # 备查行必写（含 amount=0）：一是幂等标记（重跑靠它跳过），
                 # 二是 amount 恒为非负现金口径——合股等 value_delta<=0 时记 0，
                 # 不进现金恒等式（ledger 审计已排除本类型）。
-                account = await session.get(SimulationAccount, account_id)
+                account = (await session.get(SimulationAccount, account_id)
+                           if action_context is None
+                           else await action_context.load_account(session, account_id))
                 if account is None:
                     continue
                 delta_qty = old_qty_by_account.get(account_id, 0.0) * (

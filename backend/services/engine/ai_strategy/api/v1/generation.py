@@ -23,6 +23,10 @@ except ImportError:
 from backend.shared.qlib_paths import resolve_qlib_provider_uri
 
 MARKET_QLIB_CONFIG = {
+    "JP": {
+        "provider_uri": resolve_qlib_provider_uri("JP"),
+        "region": "us", "benchmark": "TOPIX", "label": "日本股票",
+    },
     "CN": {"provider_uri": resolve_qlib_provider_uri("CN"), "region": "cn", "benchmark": "SH000300", "label": "A股"},
     "HK": {"provider_uri": resolve_qlib_provider_uri("HK"), "region": "cn", "benchmark": "HSI", "label": "港股"},
     "US": {"provider_uri": resolve_qlib_provider_uri("US"), "region": "us", "benchmark": "SPX", "label": "美股"},

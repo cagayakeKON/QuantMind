@@ -21,9 +21,15 @@ describe('shared replay market requests', () => {
     await listStrategyTemplates(market);
     expect(calls.get).toHaveBeenCalledWith('/api/v1/replay/strategy-templates', {headers: {Authorization: 'Bearer token'}});
   });
+  it('removes unsupported stop-loss values from JP user and template inputs', () => {
+    const request = {...params, stop_loss_pct: 0.03, strategy_params: {topk: 5, stop_loss_pct: 0.08}};
+    expect(replayCreateParams(request, 'JP')).toEqual({...request, stop_loss_pct: null, strategy_params: {topk: 5, market: 'JP'}});
+    expect(replayCreateParams(request, 'CN')).toBe(request);
+    expect(request.strategy_params.stop_loss_pct).toBe(0.08);
+  });
   it('sends JP through the same session API and retains original strategy inputs', async () => {
     await createSession(replayCreateParams(params, 'JP'));
-    expect(calls.post).toHaveBeenCalledWith('/api/v1/replay/sessions', {...params, strategy_params: {topk: 5, market: 'JP'}}, {headers: {Authorization: 'Bearer token'}});
+    expect(calls.post).toHaveBeenCalledWith('/api/v1/replay/sessions', {...params, stop_loss_pct: null, strategy_params: {topk: 5, market: 'JP'}}, {headers: {Authorization: 'Bearer token'}});
     expect(params.strategy_params).toEqual({topk: 5});
     await listStrategyTemplates('JP');
     expect(calls.get).toHaveBeenCalledWith('/api/v1/replay/strategy-templates', {headers: {Authorization: 'Bearer token'}, params: {market: 'JP'}});

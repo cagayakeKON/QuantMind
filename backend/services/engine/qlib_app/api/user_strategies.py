@@ -108,6 +108,7 @@ async def _trigger_inference_after_activate(
     market_upper = (market or "A").upper()
     _MARKET_XCAL = {"A": "XSHG", "HK": "XHKG", "US": "XNYS"}
     _MARKET_TZ = {
+        "JP": "Asia/Tokyo",
         "A": "Asia/Shanghai",
         "HK": "Asia/Hong_Kong",
         "US": "America/New_York",
@@ -117,7 +118,17 @@ async def _trigger_inference_after_activate(
     tz_name = _MARKET_TZ.get(market_upper, "Asia/Shanghai")
     now_local = datetime.now(ZoneInfo(tz_name))
 
-    if market_upper == "CRYPTO":
+    if market_upper == "JP":
+        from backend.services.engine.data_platform.jp_calendar import (
+            resolve_cash_session,
+        )
+        data_trade_date_obj = resolve_cash_session(
+            now_local.date(),
+            direction=("previous" if now_local.hour < 15
+                       or (now_local.hour == 15 and now_local.minute < 30)
+                       else "on_or_before"),
+        )
+    elif market_upper == "CRYPTO":
         # 加密货币 7×24，每天都交易
         data_trade_date_obj = now_local.date()
     else:
@@ -129,7 +140,11 @@ async def _trigger_inference_after_activate(
             else now_local.date()
         )
     data_trade_date = data_trade_date_obj.isoformat()
-    if market_upper == "CRYPTO":
+    if market_upper == "JP":
+        prediction_trade_date = resolve_cash_session(
+            data_trade_date_obj, direction="next"
+        ).isoformat()
+    elif market_upper == "CRYPTO":
         prediction_trade_date = (data_trade_date_obj + timedelta(days=1)).isoformat()
     else:
         prediction_trade_date = cal.next_session(data_trade_date_obj).date().isoformat()

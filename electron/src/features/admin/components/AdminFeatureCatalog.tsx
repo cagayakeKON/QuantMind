@@ -41,6 +41,7 @@ import type { AdminModelFeatureCatalog, AdminModelFeatureCategory, AdminModelFea
 const { Title, Text } = Typography;
 
 const MARKET_OPTIONS = [
+  { value: 'JP', label: '日股', color: 'gold' },
   { value: 'CN', label: 'A股', color: 'red' },
   { value: 'HK', label: '港股', color: 'blue' },
   { value: 'US', label: '美股', color: 'green' },

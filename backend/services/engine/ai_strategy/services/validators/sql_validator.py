@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 # 允许的表名白名单
 ALLOWED_TABLES = {
+    "stock_daily_latest_jp",
     "stock_daily_latest",
     "stock_daily_latest_hk",
     "stock_daily_latest_us",

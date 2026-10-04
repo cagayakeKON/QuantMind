@@ -484,6 +484,7 @@ function CreateSessionForm({ onCreate }: { onCreate: (s: ReplaySession) => void 
                         <input
                             type="number"
                             value={stopLossPct}
+                            disabled={replayContext(currentMarket)?.stopLoss === false}
                             onChange={e => setStopLossPct(e.target.value)}
                             placeholder={selectedTemplate?.replay_params.stop_loss_pct != null
                                 ? `${(Number(selectedTemplate.replay_params.stop_loss_pct) * 100).toFixed(1)}`
@@ -493,6 +494,7 @@ function CreateSessionForm({ onCreate }: { onCreate: (s: ReplaySession) => void 
                             step={0.5}
                             className={inputClass}
                         />
+                        {replayContext(currentMarket)?.stopLoss === false && <p className="mt-1 text-[10px] text-slate-400">当前市场日线回放暂不支持止损</p>}
                     </div>
                 </div>
 

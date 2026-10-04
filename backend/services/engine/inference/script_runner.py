@@ -513,6 +513,8 @@ class InferenceScriptRunner:
 
     @staticmethod
     def _resolve_primary_active_data_source(primary_meta: dict[str, object]) -> str:
+        if str((primary_meta.get("context") or {}).get("market") or "").upper() == "JP":
+            return _resolve_market_factor_data_dir(primary_meta)
         data_source = str(primary_meta.get("data_source") or "").lower()
         if data_source == "parquet":
             return str(
@@ -1005,7 +1007,9 @@ class InferenceScriptRunner:
         expected_dim = self._resolve_expected_feature_dim()
 
         # 判断数据源：针对不同存储引擎执行对应的就绪检查
-        if data_source == "parquet":
+        if model_market == "JP":
+            readiness = self._query_quantdb_readiness(trade_date=date)
+        elif data_source == "parquet":
             readiness = self._query_parquet_readiness(trade_date=date)
         elif data_source == "quantdb_factors":
             readiness = self._query_quantdb_readiness(trade_date=date)
@@ -1049,11 +1053,14 @@ class InferenceScriptRunner:
         primary_meta = self._read_primary_metadata()
         parquet_data_dir = (
             _resolve_market_factor_data_dir(primary_meta)
-            if data_source == "quantdb_factors" else str(
+            if data_source == "quantdb_factors" or model_market == "JP" else str(
                 primary_meta.get("data_dir")
                 or os.getenv("MODEL_TRAINING_DATA_DIR", "/app/db/feature_snapshots")
             )
         )
+        if model_market == "JP":
+            from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+            parquet_data_dir = str(QuantJPDataHub(parquet_data_dir).data_dir)
         env.update(
             {
                 "MODEL_DIR": str(self.primary_model_dir),
@@ -1079,7 +1086,7 @@ class InferenceScriptRunner:
             ]
             # 把 legacy "A" 归一化为 "CN"，其余市场原样传给推理脚本
             cli_market = model_market if model_market != "A" else "CN"
-            if cli_market in ("US", "HK", "CRYPTO", "FUTURES"):
+            if cli_market in ("JP", "US", "HK", "CRYPTO", "FUTURES"):
                 cmd += ["--market", cli_market]
             proc = subprocess.run(
                 cmd,

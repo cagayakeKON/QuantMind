@@ -6,7 +6,7 @@ is published after commit; cache loss never reconstructs funding from balances.
 """
 
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from functools import wraps
 import inspect
@@ -17,7 +17,11 @@ from sqlalchemy import event, select
 
 from backend.services.simulation.models.account import SimulationAccount
 from backend.services.simulation.models.trade import SimTrade
-from backend.services.simulation.services.ledger_service import SimulationLedgerService
+from backend.services.simulation.services.ledger_service import (
+    SimulationLedgerService,
+    MarketLedgerScope,
+)
+from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
 from backend.services.simulation.services.dated_corporate_actions import (
     apply_dated_inventory_actions,
 )
@@ -27,6 +31,15 @@ from backend.shared.stock_utils import StockCodeUtil
 
 logger = logging.getLogger(__name__)
 METADATA_KEY = "_market_cash_rules"
+
+
+def require_market_ledger_scope(checkpoint, account_id, market):
+    metadata = checkpoint.get("metadata")
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("state"), dict):
+        raise ValueError("Invalid registered account rule metadata")
+    fills = metadata["state"].get("fills")
+    if fills and checkpoint.get("ledger_scope") != f"{account_id}:{market}":
+        raise ValueError("Registered fills require native-currency ledger migration")
 
 
 def _require_dated_mutation(operation):
@@ -100,6 +113,21 @@ class DatedSimulationAccountManager(SimulationAccountManager):
     def account_id(self):
         return SimulationLedgerService.build_account_id(self.tenant_id, self.user_id)
 
+    @property
+    def ledger_account_id(self):
+        return f"{self.account_id}:{self.execution_market}"
+
+    def ledger_scope(self):
+        if not self._checkpoint_staged or self._account is None:
+            raise ValueError(
+                "Persist cash checkpoint before its native-currency ledger"
+            )
+        return MarketLedgerScope(
+            self.ledger_account_id,
+            LOCAL_MARKET_PROVIDERS[self.execution_market].currency,
+            deepcopy(self._account),
+        )
+
     def _require_owner(self, user_id, tenant_id):
         if str(user_id) != self.user_id or tenant_id != self.tenant_id:
             raise ValueError("Dated account belongs to another order owner")
@@ -151,10 +179,11 @@ class DatedSimulationAccountManager(SimulationAccountManager):
                 account_id=self.account_id,
                 tenant_id=self.tenant_id,
                 user_id=self.user_id,
-                account_snapshot=account,
+                account_snapshot={},
             )
         states = self._states(row)
         states[self.execution_market] = self.rules.checkpoint(account)
+        states[self.execution_market]["ledger_scope"] = self.ledger_account_id
         row.market_state = states
         await self.db.flush()
         self._publish = deepcopy(account)
@@ -166,6 +195,7 @@ class DatedSimulationAccountManager(SimulationAccountManager):
             raise ValueError(
                 "Registered cash state is missing; initialize or migrate it"
             )
+        require_market_ledger_scope(checkpoint, self.account_id, self.execution_market)
         saved_day = (checkpoint.get("metadata") or {}).get("prepared_date")
         if not isinstance(saved_day, str):
             raise ValueError("Registered cash checkpoint has no prepared date")
@@ -216,6 +246,7 @@ class DatedSimulationAccountManager(SimulationAccountManager):
 
     def _checkpoint(self):
         checkpoint = self.rules.checkpoint(self._account)
+        checkpoint["ledger_scope"] = self.ledger_account_id
         if self.cycle_inputs is not None:
             checkpoint["cycle_inputs"] = deepcopy(self.cycle_inputs)
         elif self._row is not None:
@@ -276,6 +307,10 @@ class DatedSimulationAccountManager(SimulationAccountManager):
             raise ValueError("Registered cash checkpoint does not match this fill")
         fills = self.rules.checkpoint(self._account)["metadata"]["state"]["fills"]
         fill = next(item for item in fills if item["order_id"] == self._pending_order)
+        executed_at = datetime.fromisoformat(fill["executed_at"].replace("Z", "+00:00"))
+        if executed_at.tzinfo is None:
+            raise ValueError("Dated fill execution time must be aware UTC")
+        result.executed_at = executed_at.astimezone(timezone.utc)
         if (
             StockCodeUtil.to_prefix(order.symbol, market=self.execution_market)
             != fill["symbol"]

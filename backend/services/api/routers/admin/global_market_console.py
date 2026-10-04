@@ -935,8 +935,13 @@ def make_market_router(
                     features = None
                     if market == "JP":
                         from backend.services.engine.data_platform.jp_features import build_jp_features_in_process
+                        from backend.services.engine.data_platform.quantjp_hub import (
+                            _resolve_quantjp_data_dir,
+                        )
                         _job_update(job_id, stage="jp_features")
-                        features = build_jp_features_in_process(_root())
+                        features = build_jp_features_in_process(
+                            _resolve_quantjp_data_dir()
+                        )
                     provider_uri = ensure_qlib_cache(market=qlib_market)
                     qlib_cache = {"status": "ok", "provider_uri": provider_uri}
                     if features:
@@ -950,6 +955,8 @@ def make_market_router(
                         exc_info=True,
                     )
                     qlib_cache = {"status": "error", "reason": str(exc)}
+                    if market == "JP":
+                        raise
 
             _job_update(
                 job_id,

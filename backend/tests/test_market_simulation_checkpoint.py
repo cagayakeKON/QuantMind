@@ -5,7 +5,7 @@ account, alias, equity aggregation or financial projection is repaired.
 """
 
 from copy import deepcopy
-from datetime import date
+from datetime import date, datetime
 import json
 import os
 from pathlib import Path
@@ -260,14 +260,43 @@ async def test_shared_match_commit_original_ledger_and_cache_loss_recovery(pg):
         assert row.status == OrderStatus.FILLED
         assert trade.symbol == "JP72030"
         root = await db.get(SimulationAccount, ROOT)
-        # Preserve the existing global projection formula, including its fields.
-        expected = SimulationLedgerService.apply_trade_to_account_snapshot(
-            trade=trade, account_snapshot=before, order=row
-        )
-        assert root.cash == expected["cash"] == 20000
-        assert root.total_asset == expected["total_asset"] == 30000
+        assert before["cash"] == 30000
+        assert root.cash == root.available_cash == 250000
+        assert root.total_asset == root.initial_equity == 250000
         assert root.base_currency == "CNY"
         checkpoint = deepcopy(root.market_state["JP"])
+        assert trade.executed_at.isoformat() == "2026-09-28T00:00:00+00:00"
+        native_cash = (await db.execute(select(SimulationCashLedger))).scalar_one()
+        assert native_cash.account_id == ROOT + ":JP"
+        assert native_cash.currency == "JPY" and native_cash.balance_after == 20000
+        assert native_cash.occurred_at == datetime(2026, 9, 28)
+        from backend.services.simulation.services.projection_service import (
+            SimulationProjectionService,
+        )
+
+        async def price(symbol):
+            assert symbol == "SH600036"
+            return 50
+
+        original_projection = await SimulationProjectionService(db).load_projection(
+            tenant_id="test",
+            user_id=7,
+            latest_price_loader=price,
+        )
+        assert set(original_projection.positions) == {"SH600036"}
+        assert original_projection.account.cash == 250000
+        standard_fill = (await db.execute(select(SimulationFill))).scalar_one()
+        assert standard_fill.account_id == ROOT + ":JP"
+        assert standard_fill.executed_at == native_cash.occurred_at
+        native_lot = (
+            await db.execute(
+                select(SimulationPositionLot).where(
+                    SimulationPositionLot.symbol == "JP72030"
+                )
+            )
+        ).scalar_one()
+        assert native_lot.account_id == ROOT + ":JP"
+        assert native_lot.open_date == native_cash.occurred_at
         assert checkpoint["metadata"]["state"]["fills"][-1]["order_id"] == str(
             row.order_id
         )
@@ -292,7 +321,10 @@ async def test_shared_match_commit_original_ledger_and_cache_loss_recovery(pg):
             recovered["cash"] == 20000
             and recovered["positions"]["72030.JP"]["volume"] == 100
         )
-        assert fresh.rules.checkpoint(recovered) == checkpoint
+        assert {
+            **fresh.rules.checkpoint(recovered),
+            "ledger_scope": ROOT + ":JP",
+        } == checkpoint
 
 
 @pytest.mark.asyncio
@@ -524,7 +556,10 @@ async def test_new_user_uses_original_root_identity_without_market_account_split
         await account.initialize(30000, DAY)
         await db.commit()
         root = await db.get(SimulationAccount, "sim:test:8")
-        assert root.user_id == "8" and root.cash == 30000
+        assert root.user_id == "8" and root.cash == 0
+        assert (await account.get_account(8, tenant_id="test", market="JP"))[
+            "cash"
+        ] == 30000
         assert root.market_state["JP"]["market"] == "JP"
         assert await db.get(SimulationAccount, "sim:test:8:JP") is None
 

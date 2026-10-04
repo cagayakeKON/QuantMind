@@ -968,7 +968,9 @@ return tostring(granted)
             total_fee=total_fee,
             # sim_trades.executed_at 是 TIMESTAMPTZ，必须写 aware UTC。
             # naive UTC 会在旧库 timestamptz 上被 asyncpg 拒绝，整笔成交回滚。
-            executed_at=utc_now(),
+            executed_at=(result.executed_at
+                         if getattr(self.manager, "uses_market_cash_checkpoint", False)
+                         else utc_now()),
             price_source=result.price_source,
         )
         self.db.add(trade)
@@ -987,6 +989,8 @@ return tostring(granted)
         order.status = OrderStatus.PENDING if partial else OrderStatus.FILLED
         order.submitted_at = order.submitted_at or datetime.now(timezone.utc)
         order.filled_at = None if partial else datetime.now(timezone.utc)
+        if not partial and getattr(self.manager, "uses_market_cash_checkpoint", False):
+            order.filled_at = trade.executed_at
         old_filled_quantity = float(order.filled_quantity or 0.0)
         old_filled_value = float(order.filled_value or 0.0)
         new_filled_quantity = old_filled_quantity + result.quantity
@@ -1028,6 +1032,9 @@ return tostring(granted)
                 order=order,
                 trade=trade,
                 account_snapshot=before_snapshot,
+                **({"market_scope": self.manager.ledger_scope()}
+                   if getattr(self.manager, "uses_market_cash_checkpoint", False)
+                   else {}),
             )
             from sqlalchemy import select
 
@@ -1044,6 +1051,8 @@ return tostring(granted)
                 )
             ).scalar_one_or_none()
             if projection_order is not None:
+                if getattr(self.manager, "uses_market_cash_checkpoint", False):
+                    projection_order.account_id = self.manager.ledger_account_id
                 if partial:
                     projection_order.quantity = max(
                         0.0, requested_quantity - result.quantity
@@ -1078,7 +1087,12 @@ return tostring(granted)
                         commission=result.commission,
                         stamp_duty=result.stamp_duty,
                         transfer_fee=transfer_fee,
-                        executed_at=utc_now().replace(tzinfo=None),
+                        executed_at=(
+                            trade.executed_at.replace(tzinfo=None)
+                            if getattr(
+                                self.manager, "uses_market_cash_checkpoint", False
+                            ) else utc_now().replace(tzinfo=None)
+                        ),
                         price_source=result.price_source,
                     )
                 )

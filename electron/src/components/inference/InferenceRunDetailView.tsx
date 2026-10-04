@@ -10,6 +10,9 @@ import {
 import type { InferenceRankingResult, InferenceRankingItem } from '../../services/modelTrainingService';
 import { StockScoreChart } from './StockScoreChart';
 import { splitInferenceLogs, exportRankingCsv } from './inferenceDetailUtils';
+import { useAppSelector } from '../../store';
+import { selectCurrentMarket } from '../../store/slices/uiSlice';
+import { getMarketConfig } from '../../config/marketConfig';
 
 const { Text } = Typography;
 
@@ -71,6 +74,7 @@ const RankRow: React.FC<{ item: InferenceRankingItem; onOpen: (item: InferenceRa
 };
 
 export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading, onBack, onRetry, onNavigateDate }) => {
+  const currentMarket = useAppSelector(selectCurrentMarket);
   // 日期导航：从 runId（run_YYYYMMDD_xxx）解析当前推理日期。
   // DatePicker 的 value 直接由它派生，±1 天切换后也会跟着变（原先只在手动选择时写入，
   // 切完前后一天输入框仍显示旧日期）。
@@ -586,7 +590,7 @@ export const InferenceRunDetailView: React.FC<Props> = ({ runId, result, loading
               <StockScoreChart
                 symbol={stockModal.symbol}
                 name={stockModal.name}
-                market="A"
+                market={getMarketConfig(currentMarket).stockTerminal?.market ?? 'A'}
                 days={3650}
                 height={380}
                 stockInfo={{

@@ -8,6 +8,7 @@ and those writes share the caller's locked root transaction.
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
+from types import SimpleNamespace
 import hashlib
 import math
 
@@ -41,10 +42,21 @@ class DatedCorporateActionContext:
     user_id: str
     event: DatedShareAction
     reader: object
+    cash: float
 
     @property
     def currency(self):
         return LOCAL_MARKET_PROVIDERS[self.event.market].currency
+
+    async def load_account(self, session, account_id):
+        if account_id != self.account_id:
+            raise ValueError("Corporate action differs from its market ledger")
+        return SimpleNamespace(
+            account_id=account_id,
+            tenant_id=self.tenant_id,
+            user_id=self.user_id,
+            cash=self.cash,
+        )
 
     def validate(self, action, applied_at):
         event = self.event
@@ -89,7 +101,7 @@ async def _inventory(manager):
         (
             await manager.db.execute(
                 select(SimulationPositionLot).where(
-                    SimulationPositionLot.account_id == manager.account_id,
+                    SimulationPositionLot.account_id == manager.ledger_account_id,
                     SimulationPositionLot.status == "open",
                     SimulationPositionLot.quantity_remaining > 0,
                 )
@@ -158,11 +170,12 @@ async def apply_dated_inventory_actions(manager, previous, prepared, trade_date)
     publication = hashlib.sha256(manager.execution_data_version.encode()).hexdigest()
     for event in events:
         context = DatedCorporateActionContext(
-            manager.account_id,
+            manager.ledger_account_id,
             manager.tenant_id,
             manager.user_id,
             event,
             manager.rules.reader,
+            float(prepared["cash"]),
         )
         action = SimulationCorporateAction(
             symbol=StockCodeUtil.to_prefix(event.symbol, market=event.market),

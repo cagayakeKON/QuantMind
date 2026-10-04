@@ -195,7 +195,7 @@ async def test_reset_runs_original_cleanup_settings_stops_and_user_aggregate(
     async with pg.sessions() as db:
         root = await db.get(SimulationAccount, ROOT)
         assert root.base_currency == "CNY"  # original user root policy
-        assert root.initial_equity == root.cash == 300000
+        assert root.initial_equity == root.cash == 0
         assert (
             root.market_state["JP"]["metadata"]["state"]["initial_cash"] == "300000.0"
         )

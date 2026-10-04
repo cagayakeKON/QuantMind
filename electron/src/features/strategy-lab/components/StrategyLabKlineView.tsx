@@ -15,6 +15,8 @@ import axios from 'axios';
 import { authService } from '../../auth/services/authService';
 import { SERVICE_ENDPOINTS } from '../../../config/services';
 import type { StrategyLabRunResult, StrategyLabTradeRecord } from '../types';
+import { normalizeStockCode, toSuffixCode } from '../../../utils/portfolioUtils';
+import { getMarketConfig } from '../../../config/marketConfig';
 
 const { Text } = Typography;
 
@@ -36,8 +38,12 @@ const baseURL =
   (import.meta as any).env?.VITE_USER_API_URL || SERVICE_ENDPOINTS.USER_SERVICE;
 
 /** Convert SDK symbol (sh600519 / 00700.HK / AAPL) → kline API format. */
-function toKlineParams(sdkSymbol: string): { symbol: string; market: 'A' | 'HK' | 'US' } {
+export function toKlineParams(sdkSymbol: string, marketContext?: unknown): { symbol: string; market: string } {
   const s = sdkSymbol.trim();
+  const normalized = normalizeStockCode(s, typeof marketContext === 'string' ? marketContext : undefined);
+  if (getMarketConfig('JP').stockCodePattern?.test(normalized)) {
+    return {symbol: toSuffixCode(normalized, 'JP'), market: 'JP'};
+  }
   const lower = s.toLowerCase();
   if (lower.startsWith('sh') || lower.startsWith('sz') || lower.startsWith('bj')) {
     const prefix = lower.slice(0, 2).toUpperCase();
@@ -52,7 +58,7 @@ function toKlineParams(sdkSymbol: string): { symbol: string; market: 'A' | 'HK' 
   return { symbol: s.toUpperCase(), market: 'US' };
 }
 
-async function fetchKline(symbol: string, market: 'A' | 'HK' | 'US', start: string, end: string): Promise<KlineItem[]> {
+async function fetchKline(symbol: string, market: string, start: string, end: string): Promise<KlineItem[]> {
   const token = authService.getAccessToken();
   // Cap range to 3 yrs but also pad ±30 days so the latest trade marker isn't clipped at the edge.
   const days = Math.max(
@@ -174,7 +180,7 @@ export const StrategyLabKlineView: React.FC<Props> = ({
     const cfg = (result.config || {}) as Record<string, unknown>;
     const start = String(cfg.start || result.equity?.[0]?.date || '2026-01-05').slice(0, 10);
     const end = String(cfg.end || result.equity?.[result.equity.length - 1]?.date || '2026-06-12').slice(0, 10);
-    const { symbol: apiSym, market } = toKlineParams(selected);
+    const { symbol: apiSym, market } = toKlineParams(selected, cfg.market);
     let cancelled = false;
     setLoading(true);
     fetchKline(apiSym, market, start, end)

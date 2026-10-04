@@ -119,6 +119,23 @@ def _resolve_parquet_path(data_dir: Path, trade_date: str, market: str = "CN") -
 
 def load_day_data(trade_date: str, data_dir: Path, market: str = "CN") -> pd.DataFrame | None:
     """加载指定交易日的全市场特征数据。"""
+    if str(market).upper() == "JP":
+        from backend.services.engine.data_platform.quantdb_factor_reader import (
+            QuantDBFactorReader,
+        )
+        from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+        reader = QuantDBFactorReader(QuantJPDataHub(data_dir).data_dir, market="JP")
+        frame = reader.read_day(
+            "l1_factors", features=reader.factor_columns("l1_factors"),
+            trade_date=trade_date,
+        )
+        if frame.empty:
+            return None
+        frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.strftime(
+            "%Y-%m-%d"
+        )
+        return frame[(pd.to_numeric(frame["close"], errors="coerce") > 0)
+                     & (pd.to_numeric(frame["volume"], errors="coerce") > 0)].copy()
     parquet_path = _resolve_parquet_path(data_dir, trade_date, market=market)
     if parquet_path is None:
         logger.warning("找不到 parquet 文件 (data_dir=%s)", data_dir)
@@ -390,9 +407,26 @@ def predict_with_model(model, meta: dict, day_df: pd.DataFrame) -> dict[str, flo
     if _leaky:
         day_df = day_df.drop(columns=_leaky, errors="ignore")
 
+    if str((meta.get("context") or {}).get("market") or "").upper() == "JP":
+        # Apply each member's training field mapping to the shared raw snapshot.
+        sources = meta.get("factor_field_sources") or {}
+        for feature in feature_cols:
+            source = sources.get(feature, feature)
+            if source not in day_df.columns:
+                raise ValueError(
+                    "JP ensemble source is missing published model features: "
+                    + str(source)
+                )
+            day_df[feature] = day_df[source]
+
     # 缺失列补 0
     missing = [c for c in feature_cols if c not in day_df.columns]
     if missing:
+        if str((meta.get("context") or {}).get("market") or "").upper() == "JP":
+            raise ValueError(
+                "JP ensemble source is missing published model features: "
+                + ", ".join(missing)
+            )
         logger.warning("源模型缺 %d 个特征列，填 0: %s", len(missing), missing[:8])
         for c in missing:
             day_df[c] = 0.0
@@ -657,7 +691,7 @@ def parse_args():
     p.add_argument("--model-dir", type=str, default=os.getenv("MODEL_DIR", ""))
     p.add_argument("--data-dir", type=str, default=os.getenv("MODEL_TRAINING_DATA_DIR", _DEFAULT_DATA_DIR))
     p.add_argument("--market", type=str, default=os.getenv("MARKET", "CN"),
-                   choices=["CN", "US", "HK", "CRYPTO", "FUTURES"],
+                   choices=["CN", "JP", "US", "HK", "CRYPTO", "FUTURES"],
                    help="目标市场，用于选择对应 parquet 数据")
     return p.parse_args()
 
@@ -719,6 +753,14 @@ def main():
 
         try:
             model, meta = load_source_model(m_dir)
+            if market == "JP" and (
+                str((meta.get("context") or {}).get("market") or "").upper() != "JP"
+                or meta.get("data_source") != "quantdb_factors"
+                or meta.get("factor_source") != "l1_factors"
+            ):
+                raise ValueError(
+                    "JP ensemble members require their registered JP l1_factors source"
+                )
             if isinstance(model, dict) and model.get("__dl_member__"):
                 # DL 源模型：委派成员推理脚本（窗口截断 + 全流程兼容）
                 scores = _predict_dl_source_model(

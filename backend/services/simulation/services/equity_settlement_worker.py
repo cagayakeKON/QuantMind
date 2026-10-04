@@ -408,6 +408,13 @@ class SimulationEquitySettlementWorker:
             tenant_id = parts[2].strip() or "default"
             user_id = parts[3].strip()
             market = parts[4].strip().upper() if len(parts) > 4 else "CN"
+            from backend.services.engine.data_platform.market_provider import (
+                LOCAL_MARKET_PROVIDERS,
+            )
+            provider = LOCAL_MARKET_PROVIDERS.get(market)
+            if provider and provider.simulation_account_input_adapter:
+                # Dated native-currency cash is marked by its pinned cycle.
+                continue
             try:
                 raw = self.redis.client.get(key)
                 if not raw:
@@ -417,6 +424,9 @@ class SimulationEquitySettlementWorker:
                     continue
                 # 市场以账户字段优先（多市场重估选择对应行情源）
                 market = str(account.get("market") or market or "CN").upper()
+                provider = LOCAL_MARKET_PROVIDERS.get(market)
+                if provider and provider.simulation_account_input_adapter:
+                    continue
             except Exception as exc:
                 logger.debug("Equity settle parse account failed %s: %s", key, exc)
                 continue
@@ -585,6 +595,12 @@ class SimulationEquitySettlementWorker:
         # 同一 (tenant, user) 只取一个账户（CN 优先，与台账 account_id 口径一致）
         chosen: dict[tuple[str, str], dict[str, Any]] = {}
         for item in accounts:
+            from backend.services.engine.data_platform.market_provider import (
+                LOCAL_MARKET_PROVIDERS,
+            )
+            provider = LOCAL_MARKET_PROVIDERS.get(item["market"])
+            if provider and provider.simulation_account_input_adapter:
+                continue
             if not item["user_id"].isdigit():
                 continue
             k = (item["tenant_id"], item["user_id"])

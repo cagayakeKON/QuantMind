@@ -21,6 +21,7 @@ from backend.services.simulation.models.account import SimulationAccount
 from backend.services.simulation.services.dated_account import (
     DatedSimulationAccountManager,
     METADATA_KEY,
+    require_market_ledger_scope,
 )
 from backend.services.simulation.services.ledger_service import SimulationLedgerService
 from backend.shared.database_manager_v2 import get_session
@@ -177,6 +178,7 @@ async def read_registered_simulation_account(
             return True, None
         if not isinstance(checkpoint, dict):
             raise RegisteredAccountUnavailable("Invalid registered account checkpoint")
+        require_market_ledger_scope(checkpoint, root.account_id, market)
         metadata = checkpoint.get("metadata")
         if not isinstance(metadata, dict) or not isinstance(
             metadata.get("state"), dict

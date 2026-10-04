@@ -236,6 +236,7 @@ LATEST_TABLE = "stock_daily_latest"
 
 # Market-specific table mapping
 MARKET_TABLE_MAP: dict[str, str] = {
+    "JP": "stock_daily_latest_jp",
     "CN": "stock_daily_latest",
     "HK": "stock_daily_latest_hk",
     "US": "stock_daily_latest_us",

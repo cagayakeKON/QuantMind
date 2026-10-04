@@ -485,7 +485,12 @@ async def test_original_admin_aliases_keep_one_root_and_one_duplicate(boundary):
                 "virtual" if index == 0 else "duplicate_skipped"
             )
         root = await db.get(SimulationAccount, "sim:test:10000001")
-        assert root.cash == 20000 and root.base_currency == "CNY"
+        assert root.cash == 0 and root.base_currency == "CNY"
+        assert (
+            await context.accounts(db, pg.setup.redis).get_account(
+                10000001, tenant_id="test", market="JP"
+            )
+        )["cash"] == 20000
         assert (await db.get(SimulationAccount, ROOT)).cash == 250000
     assert (await counts(pg))["sim_trades"] == 1
 

@@ -1130,6 +1130,22 @@ async def query_pool(dsl: str, user_id: str, market: str | None = None, exchange
     market_table = get_latest_table(market)
     market_upper = str(market or "").upper()
 
+    from backend.services.engine.data_platform.market_provider import (
+        LOCAL_MARKET_PROVIDERS,
+    )
+    provider = LOCAL_MARKET_PROVIDERS.get(market_upper)
+    if provider and provider.stock_pool_input_factory:
+        from backend.services.engine.data_platform.local_stock_pool import (
+            query_local_stock_pool,
+        )
+        items, as_of_date, universe_total = query_local_stock_pool(
+            dsl, market_upper, exchange=exchange,
+        )
+        summary, charts = _build_pool_summary(
+            items, as_of_date, universe_total=universe_total
+        )
+        return QueryPoolResponse(items=items, summary=summary, charts=charts)
+
     # 非 A 股市场：优先从本地 parquet hub 加载标的池（PG latest 表可能不存在）
     if market_upper not in ("", "CN", "A"):
         # 检查 PG 表是否存在；不存在则走 parquet
