@@ -31,7 +31,7 @@ description: "QuantMind 模型训练配置文件生成器：把自然语言需�
 schema_version: 1                                  # 固定 1
 kind: quantmind-model-training-config              # 固定值
 exported_at: "2026-09-22T00:00:00.000Z"            # 元数据
-market: CN                                         # CN|HK|US|CRYPTO|FUTURES
+market: CN                                         # CN|HK|US|JP|CRYPTO|FUTURES
 factor_source: l1_l2_factors                       # 可选：QuantDB 直读源
 factor_catalog_version: qdb-cn-l1_l2_factors-xxxx  # 可选：仅作版本提示
 factor_filter:
@@ -54,7 +54,7 @@ configuration:
     # …见 references/schema.md 的白名单键
   context:
     initialCapital: 1000000
-    benchmark: SH000300                            # CN=SH000300 HK=HSI US=SPX CRYPTO=BTC FUTURES=CL.FUT
+    benchmark: SH000300                            # CN=SH000300 HK=HSI US=SPX JP=TOPIX CRYPTO=BTC FUTURES=CL.FUT
     commissionRate: 0.00025
     slippage: 0.0005
     dealPrice: open                                # open|close
@@ -69,6 +69,7 @@ configuration:
    训练/验证/测试时间范围？股票池？若用户没说，用 §3 的默认值并**在交付时说明所选默认**。
 2. **定市场与因子源**：CN/HK/US/FUTURES/CRYPTO 是 QuantDB 直读市场。
    要 L2 微观特征就 `l1_l2_factors`；只要日频用 `l1_factors`；纯高频用 `l2_factors`。
+   JP 使用已发布的原生日线 `l1_factors`，基准 TOPIX、JPY、`region=us`，目前只允许本地训练节点。必须从当前 JP 因子目录选择真实字段，不复制 CN 的 L2、财务或资金流 key；日期范围须在日本已发布日历与标签覆盖内。
 3. **选因子**：按 [references/factor-families.md](references/factor-families.md) 的 recipe 挑
    40~120 个，家族均衡；优先用其中列出的 key（已在本地目录验证）。
 4. **定时间切分**：三段都要，且 `train_end < val_start`、`val_end < test_start`；
@@ -87,7 +88,7 @@ configuration:
 | 时间切分（T+3） | 同上，但 val 起 `2023-06-23`、test 起 `2025-01-26`（满足 gap≥4） |
 | factor_filter | `enabled:true, n_top:80, ic:0.01, icir:0.15, corr:0.9` |
 | LightGBM 稳健档 | `lr 0.01 / num_leaves 15 / max_depth 6 / min_data 500 / l1 2 / l2 5 / ff 0.5 / bag 0.7 / rounds 3000 / es 100` |
-| 基准 | CN `SH000300`、HK `HSI`、US `SPX`、CRYPTO `BTC`、FUTURES `CL.FUT` |
+| 基准 | CN `SH000300`、HK `HSI`、US `SPX`、JP `TOPIX`、CRYPTO `BTC`、FUTURES `CL.FUT` |
 
 ## 4. 导入后前端会做什么（务必转告用户）
 

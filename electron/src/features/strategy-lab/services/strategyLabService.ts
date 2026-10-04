@@ -51,7 +51,7 @@ export const strategyLabService = {
   },
 
   /** Day 11-12: 4-gate overfit detection report. */
-  async runOverfitCheck(code: string, params?: Record<string, unknown>): Promise<{
+  async runOverfitCheck(code: string, params?: Record<string, unknown>, context?: Record<string, unknown>): Promise<{
     gate1?: { passed: boolean; score: number; note: string };
     gate2?: { passed: boolean; score: number; note: string };
     gate3?: { passed: boolean; score: number; note: string };
@@ -59,21 +59,21 @@ export const strategyLabService = {
     total_score: number;
     warnings: string[];
   }> {
-    return (await client.post('/overfit-check', { code, params: params || {} })) as any;
+    return (await client.post('/overfit-check', { code, params: params || {}, ...context })) as any;
   },
 
   /** Day 15: Translate SDK script → strategy template; returns saved strategy_name + id. */
-  async translateToTemplate(code: string): Promise<{
+  async translateToTemplate(code: string, context?: Record<string, unknown>): Promise<{
     strategy_name: string;
     strategy_id: string;
     template: Record<string, unknown>;
   }> {
-    return (await client.post('/translate', { code })) as any;
+    return (await client.post('/translate', { code, ...context })) as any;
   },
 
   /** Day 16: Watch list management. */
-  async addWatch(code: string, name: string): Promise<{ script_sha: string; registered: boolean }> {
-    return (await client.post('/watch', { code, name })) as any;
+  async addWatch(code: string, name: string, context?: Record<string, unknown>): Promise<{ script_sha: string; registered: boolean }> {
+    return (await client.post('/watch', { code, name, ...context })) as any;
   },
 
   async listWatch(): Promise<{ items: Array<{ script_sha: string; name: string; registered_at: string }> }> {

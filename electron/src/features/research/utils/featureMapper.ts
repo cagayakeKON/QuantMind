@@ -1,9 +1,11 @@
 import type { ResearchStockRow } from '../types';
+import { toSuffixCode } from '../../../utils/portfolioUtils';
 
 /** 转为后端规范 suffix 代码（600036.SH），batch-features 响应以此为键。 */
 export const toSuffixSymbol = (raw: string): string => {
   const s = (raw || '').trim().toUpperCase();
   if (!s) return s;
+  if (/^JP[0-9][A-Z0-9]{3}[0-9]$/.test(s) || /^[0-9][A-Z0-9]{3}[0-9]\.JP$/.test(s)) return toSuffixCode(s, 'JP');
   if (/^\d{6}\.(SH|SZ|BJ)$/.test(s)) return s;
   const prefixMatch = s.match(/^(SH|SZ|BJ)(\d{6})$/);
   if (prefixMatch) return `${prefixMatch[2]}.${prefixMatch[1]}`;

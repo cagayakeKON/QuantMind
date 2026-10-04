@@ -126,7 +126,9 @@ def _resolve_market_factor_data_dir(meta: dict) -> str:
         return _resolve_quantdb_data_dir()
 
 
-def _load_close_price_map(trade_date: str, market: str = "CN") -> dict[str, float]:
+def _load_close_price_map(
+    trade_date: str, market: str = "CN", *, publication_data_dir: str | None = None
+) -> dict[str, float]:
     """从 QuantDB 日线 parquet 一次加载当日收盘价。
 
     返回 {纯数字代码: close}，与 engine_signal_scores.symbol 口径一致。
@@ -139,7 +141,10 @@ def _load_close_price_map(trade_date: str, market: str = "CN") -> dict[str, floa
         day = date.fromisoformat(str(trade_date)[:10])
         if market.upper() == "JP":
             from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
-            hub = QuantJPDataHub()
+            hub = (
+                QuantJPDataHub(publication_data_dir)
+                if publication_data_dir else QuantJPDataHub()
+            )
             frame = hub._read("1_kline_data/daily_unadjusted", day, day)
             return {
                 StockCodeUtil.to_prefix(row.symbol, market="JP"): float(row.close)
@@ -535,11 +540,15 @@ class InferenceScriptRunner:
         except Exception:
             return str(os.getenv("QLIB_PRIMARY_DATA_PATH", "db/qlib_data"))
 
-    def _query_quantdb_readiness(self, trade_date: str) -> dict:
+    def _query_quantdb_readiness(
+        self, trade_date: str, *, publication_data_dir: str | None = None
+    ) -> dict:
         meta = self._read_primary_metadata()
         try:
             from backend.services.engine.data_platform.quantdb_factor_reader import QuantDBFactorReader
-            data_dir = Path(_resolve_market_factor_data_dir(meta))
+            data_dir = Path(
+                publication_data_dir or _resolve_market_factor_data_dir(meta)
+            )
             market = str((meta.get("context") or {}).get("market") or "CN").upper()
             reader = (
                 QuantDBFactorReader(data_dir, market="JP")
@@ -714,7 +723,10 @@ class InferenceScriptRunner:
         return min(required, total_rows)
 
     @staticmethod
-    def _resolve_prediction_trade_date(data_trade_date: str, market: str = "A") -> str:
+    def _resolve_prediction_trade_date(
+        data_trade_date: str, market: str = "A", *,
+        publication_data_dir: str | None = None,
+    ) -> str:
         """
         统一口径：
         - data_trade_date：用于读取特征的数据交易日 (T)
@@ -725,8 +737,10 @@ class InferenceScriptRunner:
         market_upper = (market or "A").upper()
         if market_upper == "JP":
             from backend.services.engine.data_platform.jp_calendar import resolve_cash_session
+            from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
             day = _date.fromisoformat(str(data_trade_date)[:10])
-            return resolve_cash_session(day, direction="next").isoformat()
+            hub = QuantJPDataHub(publication_data_dir) if publication_data_dir else None
+            return resolve_cash_session(day, direction="next", hub=hub).isoformat()
 
         # 加密货币 7×24，T+1 自然日
         if market_upper == "CRYPTO":
@@ -952,9 +966,28 @@ class InferenceScriptRunner:
         script_path = self.primary_model_dir / self.primary_script_name
         primary_meta = self._read_primary_metadata()
         model_market = str((primary_meta.get("context") or {}).get("market") or "A").upper()
-        prediction_trade_date = self._resolve_prediction_trade_date(date, market=model_market)
+        publication_data_dir = None
+        if model_market == "JP":
+            from backend.services.engine.data_platform.market_provider import (
+                LOCAL_MARKET_PROVIDERS,
+            )
+
+            # One immutable research publication per execution, including the
+            # raw reference prices and calendar stored in that publication.
+            publication_data_dir = str(LOCAL_MARKET_PROVIDERS["JP"].open().data_dir)
+        prediction_trade_date = self._resolve_prediction_trade_date(
+            date,
+            market=model_market,
+            **(
+                {"publication_data_dir": publication_data_dir}
+                if model_market == "JP" else {}
+            ),
+        )
         data_source = str(primary_meta.get("data_source") or "").lower()
-        active_data_source = self._resolve_primary_active_data_source(primary_meta)
+        active_data_source = (
+            publication_data_dir
+            or self._resolve_primary_active_data_source(primary_meta)
+        )
         if not script_path.is_file():
             # parquet 数据源模型：自动写入模板脚本，无需手动部署
             if data_source in ("parquet", "quantdb_factors") and self._try_deploy_parquet_template(
@@ -1014,7 +1047,9 @@ class InferenceScriptRunner:
 
         # 判断数据源：针对不同存储引擎执行对应的就绪检查
         if model_market == "JP":
-            readiness = self._query_quantdb_readiness(trade_date=date)
+            readiness = self._query_quantdb_readiness(
+                trade_date=date, publication_data_dir=publication_data_dir
+            )
         elif data_source == "parquet":
             readiness = self._query_parquet_readiness(trade_date=date)
         elif data_source == "quantdb_factors":
@@ -1058,15 +1093,12 @@ class InferenceScriptRunner:
         # to model_features_*.parquet.
         primary_meta = self._read_primary_metadata()
         parquet_data_dir = (
-            _resolve_market_factor_data_dir(primary_meta)
+            publication_data_dir or _resolve_market_factor_data_dir(primary_meta)
             if data_source == "quantdb_factors" or model_market == "JP" else str(
                 primary_meta.get("data_dir")
                 or os.getenv("MODEL_TRAINING_DATA_DIR", "/app/db/feature_snapshots")
             )
         )
-        if model_market == "JP":
-            from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
-            parquet_data_dir = str(QuantJPDataHub(parquet_data_dir).data_dir)
         env.update(
             {
                 "MODEL_DIR": str(self.primary_model_dir),
@@ -1270,6 +1302,10 @@ class InferenceScriptRunner:
                 active_model_id=self.primary_model_id,
                 data_trade_date=date,
                 partial=(partial_applied or pool_scoped),
+                **(
+                    {"publication_data_dir": publication_data_dir}
+                    if model_market == "JP" else {}
+                ),
             )
 
         # 写 Redis 完成标记
@@ -1533,6 +1569,7 @@ class InferenceScriptRunner:
         active_model_id: str | None = None,
         data_trade_date: str | None = None,
         partial: bool = False,
+        publication_data_dir: str | None = None,
     ) -> None:
         """
         将推理结果写入 engine_signal_scores 并发布到 Redis Stream。
@@ -1564,6 +1601,8 @@ class InferenceScriptRunner:
         # 推理日期默认等于预测日期（兼容旧调用）
         inference_date = data_trade_date or prediction_trade_date
         model_market = str((self._read_primary_metadata().get("context") or {}).get("market") or "CN").upper()
+        if model_market == "JP" and not publication_data_dir:
+            raise ValueError("JP inference persistence requires its pinned publication")
 
         # shared.database 的 SessionLocal 在 asyncpg URL 下会触发 greenlet 错误，
         # 这里显式构造一个同步驱动会话，仅用于脚本写库链路。
@@ -1600,6 +1639,10 @@ class InferenceScriptRunner:
                     signal_sides=signal_sides,
                     raw_symbols=raw_symbols,
                     partial=partial,
+                    **(
+                        {"publication_data_dir": publication_data_dir}
+                        if model_market == "JP" else {}
+                    ),
                 )
             # 信号落库后：按当日截面算 position_score（凯利仓位建议）写回 quality JSONB。
             # 失败不影响主流程（信号已落库），仅告警。
@@ -1756,6 +1799,7 @@ class InferenceScriptRunner:
         confidence_list: list[float] | None = None,
         raw_symbols: list[str] | None = None,
         partial: bool = False,
+        publication_data_dir: str | None = None,
     ) -> None:
         """写库逻辑（在 _INFER_PERSIST_LOCK 保护下执行）。
 
@@ -1763,6 +1807,11 @@ class InferenceScriptRunner:
         qm_research_candidate_snapshot。PostgreSQL 对并发 DELETE+INSERT 大量行会
         发生锁竞争甚至卡死，因此把整个写库串行化。推理子进程仍并发执行，仅写库串行。
         """
+        model_market = str(
+            (self._read_primary_metadata().get("context") or {}).get("market") or "CN"
+        ).upper()
+        if model_market == "JP" and not publication_data_dir:
+            raise ValueError("JP inference persistence requires its pinned publication")
         prediction_day = date.fromisoformat(prediction_trade_date)
         retention_floor = (
             prediction_day - timedelta(days=max(1, _PREDICTION_RETENTION_DAYS))
@@ -1895,7 +1944,9 @@ class InferenceScriptRunner:
         _ = raw_symbols  # 保留签名兼容；价格已不再依赖 Redis 前缀键
         model_market = str((self._read_primary_metadata().get("context") or {}).get("market") or "CN").upper()
         price_map = (
-            _load_close_price_map(inference_date, market="JP")
+            _load_close_price_map(
+                inference_date, market="JP", publication_data_dir=publication_data_dir
+            )
             if model_market == "JP" else _load_close_price_map(inference_date)
         )
 

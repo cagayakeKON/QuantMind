@@ -250,7 +250,13 @@ export const ModelTrainingPage: React.FC = () => {
   const effectiveTradeDate = useMemo(() => buildEffectiveTradeDate(target, timePeriods.test[0], currentMarket), [target, timePeriods.test, currentMarket]);
 
   // 市场切换
+  const previousPoolMarket = useRef(currentMarket);
   useEffect(() => {
+    if (previousPoolMarket.current !== currentMarket
+      && (previousPoolMarket.current === 'JP' || currentMarket === 'JP')) {
+      dispatch({ type: 'SET_POOL', payload: { ref: null, name: null, id: null } });
+    }
+    previousPoolMarket.current = currentMarket;
     const mc = getMarketConfig(currentMarket);
     dispatch({ type: 'SET_MARKET_CONTEXT', payload: { market: currentMarket, benchmark: mc.benchmark } });
     dispatch({ type: 'SET_FEATURES', payload: currentMarket === 'CN' ? [] : getDefaultFeaturesForMarket(currentMarket) });
@@ -479,6 +485,12 @@ export const ModelTrainingPage: React.FC = () => {
     if (!saved) { dispatch({ type: 'HYDRATE', payload: null }); return; }
     try {
       const parsed = JSON.parse(saved) as TrainingDraft;
+      const draftMarket = parsed.context?.market || 'CN';
+      if (draftMarket !== currentMarket && (draftMarket === 'JP' || currentMarket === 'JP')) {
+        parsed.poolRef = null;
+        parsed.poolName = null;
+        parsed.poolId = null;
+      }
       dispatch({ type: 'HYDRATE', payload: parsed });
       if (Array.isArray(parsed.selectedFeatures)) {
         restoredDraftFeaturesRef.current = parsed.selectedFeatures;
@@ -1150,7 +1162,7 @@ export const ModelTrainingPage: React.FC = () => {
         open={poolPickerOpen}
         onClose={() => setPoolPickerOpen(false)}
         selectedPoolId={formState.poolId}
-        market={currentMarket === 'CN' ? 'CN' : undefined}
+        market={currentMarket === 'CN' || currentMarket === 'JP' ? currentMarket : undefined}
         title="训练股票池"
         onSelect={(pool: StockPoolOption) => {
           dispatch({ type: 'SET_POOL', payload: { ref: `pool:${pool.code}`, name: pool.name, id: pool.pool_id } });

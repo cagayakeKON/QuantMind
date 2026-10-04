@@ -200,7 +200,7 @@ export const InferenceCenterPage: React.FC = () => {
         modelTrainingService.listUserModels(false, marketUpper).catch(() => ({ items: [], total: 0 })),
         modelTrainingService.listSystemModels(marketUpper).catch(() => []),
       ]);
-      if (activeMarket.current !== currentMarket) return;
+      if ((currentMarket === 'JP' || activeMarket.current === 'JP') && activeMarket.current !== currentMarket) return;
       const activeUser = (uRes.items || []).filter((m) => m.status !== 'archived');
       const activeSys = (sList || []).map(systemModelToUserModel);
       const combined = [...activeUser, ...activeSys];
@@ -483,7 +483,7 @@ export const InferenceCenterPage: React.FC = () => {
       // 实际走势对照预测；数字口径（基准价/扇形）仍按基准日截断，无前视泄露
       const startStr = singleStockDate ? singleStockDate.subtract(100, 'day').format('YYYY-MM-DD') : undefined;
       const klineData = await inferenceCenterService.getStockKline(sym, 60, undefined, startStr);
-      if (activeMarket.current !== currentMarket) return;
+      if ((currentMarket === 'JP' || activeMarket.current === 'JP') && activeMarket.current !== currentMarket) return;
       if (klineData && klineData.length > 0) {
         setKline(klineData);
       }
@@ -497,7 +497,7 @@ export const InferenceCenterPage: React.FC = () => {
         consensus_model_ids: consensusModelIds.length ? consensusModelIds : undefined,
         execute: Boolean(targetSymbol === undefined && targetModelId === undefined),
       });
-      if (activeMarket.current !== currentMarket) return;
+      if ((currentMarket === 'JP' || activeMarket.current === 'JP') && activeMarket.current !== currentMarket) return;
 
       if (res && res.status === 'success') {
         setPrediction(res);

@@ -421,7 +421,7 @@ class PortfolioService {
 
             // /simulation/account 已写入 initial_equity（来自 settings）；
             // 仅在缺失时再打 settings，避免资金概览多一次串行 RTT。
-            if (useSimulation && initialCapital <= 0) {
+            if (useSimulation && market !== 'JP' && initialCapital <= 0) {
                 try {
                     const settings = await realTradingService.getSimulationSettings();
                     const configuredInitialCash = this.pickFirstNumber(
@@ -504,7 +504,7 @@ class PortfolioService {
             const accountOnline = useSimulation
                 ? undefined
                 : Boolean(account.is_online === true);
-            const initialCapitalAvailable = useSimulation || (
+            const initialCapitalAvailable = useSimulation ? (market !== 'JP' || initialCapital > 0) : (
                 this.pickFirstNumber([account.initial_equity], 0) > 0 ||
                 (totalAsset > 0 && Number.isFinite(totalPnL))
             );

@@ -2,7 +2,7 @@
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestResult
@@ -214,7 +214,13 @@ class QlibBacktestServiceQueryMixin:
             if all(existing.backtest_id != item.backtest_id for existing in results):
                 results.append(item)
 
-        results.sort(key=lambda r: r.created_at or datetime.min, reverse=True)
+        def created_at_key(result):
+            value = result.created_at or datetime.min
+            if value.tzinfo is not None:
+                return value.astimezone(timezone.utc).replace(tzinfo=None)
+            return value
+
+        results.sort(key=created_at_key, reverse=True)
         results = results[:history_limit]
 
         if self._cache and results:

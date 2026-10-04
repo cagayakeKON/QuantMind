@@ -149,7 +149,9 @@ class BacktestPersistence:
                     ON CONFLICT(backtest_id) DO UPDATE SET
                       status = EXCLUDED.status,
                       completed_at = EXCLUDED.completed_at,
-                      task_id = EXCLUDED.task_id,
+                      task_id = CASE WHEN EXCLUDED.config_json->>'market' = 'JP'
+                          THEN COALESCE(EXCLUDED.task_id, qlib_backtest_runs.task_id)
+                          ELSE EXCLUDED.task_id END,
                       tenant_id = EXCLUDED.tenant_id,
                       config_json = EXCLUDED.config_json,
                       result_json = EXCLUDED.result_json,
@@ -665,7 +667,7 @@ class BacktestPersistence:
 
     async def _prune_user_history(self, session, user_id: str, tenant_id: str) -> None:
         """
-        JP 与原市场分别保留每个 user_id + tenant_id 最近 HISTORY_RETENTION_LIMIT 条记录，
+        每个 user_id + tenant_id 合计保留最近 HISTORY_RETENTION_LIMIT 条记录，
         避免回测历史无限增长导致查询和存储压力持续升高。
 
         注意：本地结果文件（trades/equity_curve 等大字段的唯一副本）
@@ -682,9 +684,7 @@ class BacktestPersistence:
                     SELECT
                         backtest_id,
                         ROW_NUMBER() OVER (
-                            PARTITION BY user_id, tenant_id,
-                                CASE WHEN config_json->>'market' = 'JP'
-                                     THEN 'JP' ELSE 'legacy' END
+                            PARTITION BY user_id, tenant_id
                             ORDER BY created_at DESC, backtest_id DESC
                         ) AS rn
                     FROM qlib_backtest_runs

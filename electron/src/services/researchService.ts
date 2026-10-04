@@ -97,6 +97,8 @@ interface ResearchUniverseResponse {
     summary: ResearchOverviewData['summary'];
     items: ResearchStockRow[];
     pagination?: ResearchOverviewData['pagination'];
+    market?: string;
+    dataVersion?: string;
   };
 }
 
@@ -252,14 +254,17 @@ class ResearchService {
   async getProjectedQuantDbFeatures(
     symbols: string[],
     fields: string[],
-    tradeDate?: string | null
+    tradeDate?: string | null,
+    options?: { market?: string; dataVersion?: string }
   ): Promise<Record<string, Record<string, number>>> {
     if (!symbols?.length || !fields?.length) return {};
     try {
       const resp = await this.client.post<{
         code: number;
         data: { items: Array<{ symbol: string; values: Record<string, number> }> };
-      }>('/research/batch-features', { symbols, fields, trade_date: tradeDate || undefined });
+      }>('/research/batch-features', { symbols, fields, trade_date: tradeDate || undefined,
+        ...(options?.market === 'JP' ? { market: 'JP', data_version: options.dataVersion } : {}),
+      });
       const items = resp.data?.data?.items || [];
       return items.reduce<Record<string, Record<string, number>>>((acc, item) => {
         if (item?.symbol) acc[item.symbol] = item.values || {};
@@ -316,13 +321,14 @@ class ResearchService {
   }
 
   /** 按数据日直读模型 pred.parquet 的全市场分数截面（B 套，与批次日历/分数曲线同源） */
-  async getResearchUniverseByDate(modelId: string, tradeDate: string, limit: number = 2000, offset: number = 0): Promise<{ candidates: any[], summary: any }> {
+  async getResearchUniverseByDate(modelId: string, tradeDate: string, limit: number = 2000, offset: number = 0): Promise<{ candidates: any[], summary: any, market?: string, dataVersion?: string }> {
     const resp = await this.client.get<ResearchUniverseResponse>(
       `/research/universe?model_id=${encodeURIComponent(modelId)}&date=${encodeURIComponent(tradeDate)}&limit=${limit}&offset=${offset}`
     );
     const data = resp.data.data;
     return {
       candidates: data.items || [],
+      ...(data.market === 'JP' ? { market: data.market, dataVersion: data.dataVersion } : {}),
       summary: data.summary || { total: 0, avgScore: 0, highConfidenceCount: 0, strongCount: 0, lastUpdatedAt: null }
     };
   }

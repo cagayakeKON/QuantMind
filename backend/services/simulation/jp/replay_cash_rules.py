@@ -127,6 +127,31 @@ class JapanReplayCashRules:
         # after a consolidation. Keep cash orders on the dated board lot grid.
         return converted.numerator // unit * unit
 
+    def signal_cash_value(self, symbol, signal_day, quantity, *, side):
+        """Known close cost/proceeds for SDK sizing; never a future fill quote."""
+        from .rules import round_price
+
+        canonical = StockCodeUtil.to_prefix(symbol, market=self.market)
+        bars, master = self.reader.day(signal_day, [canonical])
+        if canonical not in bars or canonical not in master:
+            raise RuleDataMissing(
+                f"Exact signal cash-sizing inputs unavailable: {canonical}"
+            )
+        raw, metadata = bars[canonical], master[canonical]
+        close = money(raw["close"])
+        slip = money(self.match_config.slippage_bps) / 10000
+        price = round_price(
+            close * (1 + slip if side == "BUY" else 1 - slip),
+            side,
+            signal_day,
+            metadata,
+        )
+        fees = JapanDailyMatchRules(metadata, raw).fees(
+            quantity, price, side.lower(), self.match_config
+        )[-1]
+        gross = price * quantity
+        return gross + fees if side == "BUY" else gross - fees
+
     def validate_initial_cash(self, account, initial_cash):
         state = self._metadata(account)["state"]
         if money(state["initial_cash"]) != money(initial_cash):

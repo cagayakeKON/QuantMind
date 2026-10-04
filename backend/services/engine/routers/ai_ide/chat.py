@@ -515,6 +515,9 @@ async def chat_completions(request: Request, item: ChatRequest):
         ),
         **(item.extra_context or {}),
     }
+    if str(item.market or "").upper().strip() == "JP":
+        # The skill dispatcher reads this key, while market_context is prompt text.
+        context["market"] = "JP"
 
     async def event_generator():
         try:

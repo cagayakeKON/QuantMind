@@ -28,7 +28,11 @@ from backend.shared.trade_account_cache import (
     write_trade_account_cache,
 )
 from backend.services.simulation.services.dated_account import checkpointed_simulation_fill
-from backend.services.simulation.services.dated_execution import execute_registered_bar
+from backend.services.simulation.services.dated_execution import (
+    execute_registered_bar,
+    ordinary_cash_order_rejection,
+    registered_cash_market,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -590,6 +594,9 @@ return tostring(granted)
         """按当日不复权日 K 走 ashare_matcher（托管/周期调仓与回放同口径）。"""
         if self.execution_context is not None:
             return await execute_registered_bar(self, order, bar, market)
+        rejection = ordinary_cash_order_rejection(order.symbol, market)
+        if rejection:
+            return ExecutionResult(success=False, message=rejection)
         from backend.services.simulation.services.ashare_matcher import (
             MatchConfig,
             match_order,
@@ -686,6 +693,9 @@ return tostring(granted)
         requested_quantity: float | None = None,
         allow_stale_market_fill: bool = False,
     ) -> ExecutionResult:
+        rejection = ordinary_cash_order_rejection(order.symbol, market)
+        if rejection:
+            return ExecutionResult(success=False, message=rejection)
         if self.execution_context is not None:
             raise NotImplementedError(
                 "Registered cash execution needs a dated quote adapter"
@@ -949,6 +959,13 @@ return tostring(granted)
 
     @checkpointed_simulation_fill
     async def apply_filled(self, order: SimOrder, result: ExecutionResult) -> SimTrade:
+        cash_market = registered_cash_market(order.symbol, result.market)
+        if cash_market and (
+            self.execution_context is None
+            or self.execution_context.market != cash_market
+            or not getattr(self.manager, "uses_market_cash_checkpoint", False)
+        ):
+            raise ValueError(ordinary_cash_order_rejection(order.symbol, cash_market))
         trade_value = result.quantity * result.price
         transfer_fee = float(getattr(result, "transfer_fee", 0.0) or 0.0)
         total_fee = result.commission + result.stamp_duty + transfer_fee
@@ -1220,6 +1237,15 @@ return tostring(granted)
 
         from backend.services.simulation.services.market_rules import infer_market
 
+        rejection = ordinary_cash_order_rejection(getattr(order, "symbol", None))
+        if rejection:
+            return SimpleNamespace(
+                can_execute=False,
+                target_trade_date=None,
+                final_state="rejected",
+                retryable=False,
+                message=rejection,
+            )
         market = infer_market(str(getattr(order, "symbol", "") or ""))
         if market.value == "CRYPTO":
             return SimpleNamespace(

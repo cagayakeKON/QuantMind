@@ -18,6 +18,7 @@ from backend.services.simulation.services.execution_engine import (
     SimulationExecutionEngine,
 )
 from backend.services.simulation.services.order_service import SimOrderService
+from backend.services.simulation.services.dated_execution import ordinary_cash_order_rejection
 from backend.services.simulation.services.simulation_manager import (
     SimulationAccountManager,
 )
@@ -86,6 +87,11 @@ class SimulationPendingOrderWorker:
                 }:
                     projection_order.status = legacy_status
                     await session.commit()
+                    processed += 1
+                    continue
+                rejection = ordinary_cash_order_rejection(runtime_order.symbol)
+                if rejection:
+                    await engine.mark_rejected(runtime_order, rejection)
                     processed += 1
                     continue
                 expires_at = engine._normalize_runtime_datetime(

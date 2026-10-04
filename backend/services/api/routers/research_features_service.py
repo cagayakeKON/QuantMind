@@ -89,11 +89,21 @@ def _get_hub():
     return QuantDBDataHub.get_instance()
 
 
-def normalize_symbols(symbols: list[str]) -> list[str]:
+def normalize_symbols(symbols: list[str], market: str = "CN") -> list[str]:
     """将任意格式股票代码归一化为规范 suffix 格式并去重（保持入参顺序）。"""
     seen: set[str] = set()
     result: list[str] = []
     for raw in symbols:
+        if market.upper() == "JP":
+            try:
+                suffix = StockCodeUtil.to_suffix(str(raw or "").strip(), market="JP")
+            except ValueError:
+                continue
+            if suffix in seen:
+                continue
+            seen.add(suffix)
+            result.append(suffix)
+            continue
         suffix = StockCodeUtil.to_suffix(str(raw or "").strip())
         if not _SYMBOL_RE.match(suffix) or suffix in seen:
             continue
@@ -705,7 +715,11 @@ def _normalize_dt(trade_date: str | None) -> int | None:
 
 
 def get_batch_full_features_sync(
-    symbols: list[str], fields: list[str] | None = None, trade_date: str | None = None
+    symbols: list[str],
+    fields: list[str] | None = None,
+    trade_date: str | None = None,
+    market: str = "CN",
+    data_version: str | None = None,
 ) -> dict[str, Any]:
     """批量股票投影特征的同步实现（唯一实现）。
 
@@ -713,7 +727,7 @@ def get_batch_full_features_sync(
     上限 MAX_BATCH_SYMBOLS_PROJECTED 覆盖整个候选池以支持全池筛选。
     trade_date 传入时投影按「不晚于该日的最新截面」读取（投研历史日期回看）。
     """
-    normalized = normalize_symbols(symbols or [])
+    normalized = normalize_symbols(symbols or [], market)
     if not normalized:
         return {"code": 200, "data": {"items": [], "total": 0, "missing": []}}
 
@@ -727,7 +741,20 @@ def get_batch_full_features_sync(
 
     cap = MAX_BATCH_SYMBOLS_PROJECTED
     truncated = normalized[:cap]
-    features = _load_projected_features(truncated, wanted, _normalize_dt(trade_date))
+    from backend.services.engine.data_platform.market_provider import (
+        LOCAL_MARKET_PROVIDERS,
+    )
+
+    provider = LOCAL_MARKET_PROVIDERS.get(market.upper())
+    if provider and provider.research_feature_loader:
+        import importlib
+
+        module, function = provider.research_feature_loader.rsplit(".", 1)
+        features = getattr(importlib.import_module(module), function)(
+            truncated, wanted, trade_date, data_version
+        )
+    else:
+        features = _load_projected_features(truncated, wanted, _normalize_dt(trade_date))
 
     items = [features[s] for s in truncated if features.get(s, {}).get("sources")]
     missing = [s for s in truncated if not features.get(s, {}).get("sources")]
@@ -744,7 +771,13 @@ def get_batch_full_features_sync(
 
 
 async def get_batch_full_features(
-    symbols: list[str], fields: list[str] | None = None, trade_date: str | None = None
+    symbols: list[str],
+    fields: list[str] | None = None,
+    trade_date: str | None = None,
+    market: str = "CN",
+    data_version: str | None = None,
 ) -> dict[str, Any]:
     """批量股票的 QuantDB 特征投影（线程池卸载版，用于表格增强）。"""
-    return await _offload(get_batch_full_features_sync, symbols, fields, trade_date)
+    return await _offload(
+        get_batch_full_features_sync, symbols, fields, trade_date, market, data_version
+    )

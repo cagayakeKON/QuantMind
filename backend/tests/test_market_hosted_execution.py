@@ -72,7 +72,7 @@ def status_service(monkeypatch):
     getter = AsyncMock(return_value=default)
     monkeypatch.setattr(inputs.model_registry_service, "get_default_model", getter)
     monkeypatch.setattr(
-        service, "_load_latest_default_model_inference_run", AsyncMock(return_value=run)
+        service, "_load_default_model_inference_run_for_session", AsyncMock(return_value=run)
     )
     monkeypatch.setattr(
         service,

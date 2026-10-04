@@ -117,6 +117,8 @@ async def test_activation_uses_japanese_published_holidays_without_china_calenda
 ):
     from backend.services.engine.qlib_app.api import user_strategies as activation
     from backend.services.engine.inference import router_service
+    from backend.shared.model_registry import ResolvedModel, model_registry_service
+    from unittest.mock import AsyncMock
 
     class FixedDateTime(datetime):
         @classmethod
@@ -127,6 +129,15 @@ async def test_activation_uses_japanese_published_holidays_without_china_calenda
         raise AssertionError("JP activation must not open XSHG")
 
     recorded = []
+    monkeypatch.setattr(
+        model_registry_service,
+        "resolve_effective_model",
+        AsyncMock(return_value=ResolvedModel(
+            effective_model_id="model-jp", model_source="user_default",
+            storage_path=str(native), model_file="", fallback_used=False,
+            fallback_reason="", status="ready",
+        )),
+    )
     monkeypatch.setattr(activation, "datetime", FixedDateTime)
     monkeypatch.setattr(activation.xcals, "get_calendar", forbidden)
     monkeypatch.setattr(

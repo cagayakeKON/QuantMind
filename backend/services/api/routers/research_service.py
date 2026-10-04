@@ -1863,7 +1863,9 @@ async def _best_snapshot_run_for_date(tid: str, uid: str, model_id: str, trade_d
         return str(row[0]) if row and row[0] else None
 
 
-async def _model_market(tid: str, uid: str, model_id: str) -> tuple[str, str | None]:
+async def _model_market(
+    tid: str, uid: str, model_id: str, *, include_metadata: bool = False
+):
     """返回 (storage_path, market)。market 取模型 metadata.context.market。"""
     async with get_session(read_only=True) as session:
         row = (
@@ -1876,18 +1878,21 @@ async def _model_market(tid: str, uid: str, model_id: str) -> tuple[str, str | N
             )
         ).first()
     if not row:
-        return "", None
+        return ("", None, {}) if include_metadata else ("", None)
     storage_path = str(row[0] or "")
     market: str | None = None
+    meta = {}
     if row[1]:
         try:
             meta = row[1] if isinstance(row[1], dict) else json.loads(row[1])
             m = str((meta.get("context") or {}).get("market", "")).upper()
+            if not m and str(meta.get("market", "")).upper() == "JP":
+                m = "JP"
             if m in ("CN", "HK", "JP", "US", "CRYPTO"):
                 market = m
         except Exception:
             market = None
-    return storage_path, market
+    return (storage_path, market, meta) if include_metadata else (storage_path, market)
 
 
 _EMPTY_UNIVERSE_SUMMARY = {
@@ -1905,6 +1910,36 @@ _EMPTY_UNIVERSE_SUMMARY = {
 }
 
 
+async def _jp_snapshot_scores(tid, uid, model_id, run_id, trade_date):
+    """Snapshot-only JP models use the same light score skeleton and model pin."""
+    async with get_session(read_only=True) as session:
+        rows = (
+            await session.execute(
+                text(
+                    "SELECT symbol, fusion_score, score_rank FROM qm_research_candidate_snapshot "
+                    "WHERE tenant_id=:tid AND user_id=:uid AND model_id=:mid AND run_id=:rid "
+                    "AND data_trade_date=CAST(:day AS DATE) ORDER BY score_rank ASC"
+                ),
+                {
+                    "tid": tid,
+                    "uid": uid,
+                    "mid": model_id,
+                    "rid": run_id,
+                    "day": trade_date,
+                },
+            )
+        ).all()
+    return [
+        {
+            "symbol": StockCodeUtil.to_prefix(row[0], market="JP"),
+            "score": float(row[1]),
+            "rank": int(row[2] or 0),
+        }
+        for row in rows
+        if row[1] is not None and math.isfinite(float(row[1]))
+    ]
+
+
 async def get_research_universe_by_date(
     tid: str, uid: str, model_id: str, trade_date: str, limit: int, offset: int = 0
 ) -> dict[str, Any]:
@@ -1919,40 +1954,79 @@ async def get_research_universe_by_date(
     if cached is not None:
         return cached
 
-    storage_path, _market = await _model_market(tid, uid, model_id)
+    storage_path, _market, metadata = await _model_market(
+        tid, uid, model_id, include_metadata=True
+    )
     pred_rows = await asyncio.to_thread(_read_model_pred_day, storage_path, trade_date) if storage_path else []
+    snapshot_run = None
     if not pred_rows:
         # 兜底：该日无 parquet 分数 → 候选池快照（同日行数最多的 run）
         snap_run = await _best_snapshot_run_for_date(tid, uid, model_id, trade_date)
         if snap_run:
-            return await get_research_universe(tid, uid, snap_run, limit, offset)
-        payload = {"code": 200, "data": {"items": [], "summary": dict(_EMPTY_UNIVERSE_SUMMARY)}}
-        _set_local_cache(_UNIVERSE_CACHE, cache_key, payload, _UNIVERSE_CACHE_MAX_ENTRIES)
-        return payload
+            if _market == "JP":
+                pred_rows = await _jp_snapshot_scores(
+                    tid, uid, model_id, snap_run, trade_date
+                )
+                snapshot_run = snap_run
+            else:
+                return await get_research_universe(tid, uid, snap_run, limit, offset)
+        if not pred_rows:
+            payload = {
+                "code": 200,
+                "data": {"items": [], "summary": dict(_EMPTY_UNIVERSE_SUMMARY)},
+            }
+            _set_local_cache(
+                _UNIVERSE_CACHE, cache_key, payload, _UNIVERSE_CACHE_MAX_ENTRIES
+            )
+            return payload
 
     try:
         date.fromisoformat(trade_date)
     except ValueError:
-        payload = {"code": 200, "data": {"items": [], "summary": dict(_EMPTY_UNIVERSE_SUMMARY)}}
+        payload = {
+            "code": 200,
+            "data": {"items": [], "summary": dict(_EMPTY_UNIVERSE_SUMMARY)},
+        }
         return payload
 
     # 页面减负：不再合并 PG stock_daily_latest（该表已 0 行，合并查询纯开销），
     # 选中日期后个股数据只加载 QuantDB 50 维宽表（前端 batch-features 投影，
     # 已按 selectedDate 读同日截面）。这里只返回 分数 + 排名 + 简称 的轻量骨架，
     # 响应体从 ~5.3MB（54 字段×5194 只）降到几十 KB 级别。
-    pseudo_run_id = f"pred_{trade_date.replace('-', '')}"
-    try:
-        quantdb_names = await asyncio.to_thread(_get_quantdb_stock_names)
-    except Exception:  # noqa: BLE001
-        quantdb_names = {}
-    # 行业/概念/指数静态标签（进程内缓存，读 instrument_list + sector_members + index_weights 各一次）
-    try:
-        quantdb_labels = await asyncio.to_thread(_load_quantdb_labels)
-        quantdb_meta = await asyncio.to_thread(_load_quantdb_name_industry)
-    except Exception:  # noqa: BLE001
-        logger.warning("读取 QuantDB 行业/概念/指数标签失败", exc_info=True)
+    pseudo_run_id = snapshot_run or f"pred_{trade_date.replace('-', '')}"
+    jp_version = None
+    if _market == "JP":
+        from backend.services.engine.data_platform.market_provider import (
+            LOCAL_MARKET_PROVIDERS,
+        )
+        from backend.services.simulation.jp.research_features import (
+            dated_metadata,
+            model_publication,
+        )
+
+        jp_version = model_publication(metadata)
+        hub = LOCAL_MARKET_PROVIDERS["JP"].open(jp_version)
+        quantdb_meta = await asyncio.to_thread(
+            dated_metadata, hub, date.fromisoformat(trade_date)
+        )
+        quantdb_names = {
+            StockCodeUtil.to_suffix(symbol, market="JP"): row["stock_name"]
+            for symbol, row in quantdb_meta.items()
+        }
         quantdb_labels = {}
-        quantdb_meta = {}
+    else:
+        try:
+            quantdb_names = await asyncio.to_thread(_get_quantdb_stock_names)
+        except Exception:  # noqa: BLE001
+            quantdb_names = {}
+        # 行业/概念/指数静态标签（进程内缓存，读 instrument_list + sector_members + index_weights 各一次）
+        try:
+            quantdb_labels = await asyncio.to_thread(_load_quantdb_labels)
+            quantdb_meta = await asyncio.to_thread(_load_quantdb_name_industry)
+        except Exception:  # noqa: BLE001
+            logger.warning("读取 QuantDB 行业/概念/指数标签失败", exc_info=True)
+            quantdb_labels = {}
+            quantdb_meta = {}
     items = [
         {
             "key": f"{pseudo_run_id}:{r['symbol']}",
@@ -2000,6 +2074,10 @@ async def get_research_universe_by_date(
     }
 
     payload = {"code": 200, "data": {"items": items, "summary": summary}}
+    if _market == "JP":
+        payload["data"].update(
+            {"market": "JP", "dataVersion": jp_version, "currency": "JPY"}
+        )
     _set_local_cache(_UNIVERSE_CACHE, cache_key, payload, _UNIVERSE_CACHE_MAX_ENTRIES)
     return payload
 

@@ -55,7 +55,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({
     let active = true;
     setUniverses([]);
     getUniverses(universeMarket)
-      .then((res) => { if (active) setUniverses(res.data?.universes ?? []); });
+      .then((res) => { if (active) setUniverses(res.data?.universes ?? []); })
+      .catch(() => {});
     return () => { active = false; };
   }, [universeMarket]);
 

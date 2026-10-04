@@ -6,7 +6,7 @@ import { PlayCircleOutlined, StopOutlined, RobotOutlined, SaveOutlined, ReloadOu
 import { motion } from 'framer-motion';
 import Editor, { OnMount } from '@monaco-editor/react';
 import { strategyLabService } from '../services/strategyLabService';
-import { STRATEGY_LAB_SNIPPETS } from '../components/snippets';
+import { getStrategyLabSnippets } from '../components/snippets';
 import type {
   StrategyLabPhase,
   StrategyLabRunResult,
@@ -36,8 +36,10 @@ const phaseLabel: Record<StrategyLabPhase, string> = {
 
 const StrategyLabPage: React.FC = () => {
   const currentMarket = useAppSelector(selectCurrentMarket);
-  const [code, setCode] = useState<string>(STRATEGY_LAB_SNIPPETS[0].code);
-  const [activeSnippet, setActiveSnippet] = useState<string>(STRATEGY_LAB_SNIPPETS[0].id);
+  const snippets = useMemo(() => getStrategyLabSnippets(currentMarket), [currentMarket]);
+  const previousMarket = useRef(currentMarket);
+  const [code, setCode] = useState<string>(snippets[0].code);
+  const [activeSnippet, setActiveSnippet] = useState<string>(snippets[0].id);
   const [running, setRunning] = useState(false);
   const [pct, setPct] = useState(0);
   const [phase, setPhase] = useState<StrategyLabPhase>('queued');
@@ -52,19 +54,30 @@ const StrategyLabPage: React.FC = () => {
   const [currentStrategyName, setCurrentStrategyName] = useState<string | null>(null);
   const [currentStrategyId, setCurrentStrategyId] = useState<string | null>(null);
   const [stockPool, setStockPool] = useState<StockPoolSelection | null>(null);
+  useEffect(() => {
+    const before = previousMarket.current;
+    previousMarket.current = currentMarket;
+    if (before !== currentMarket && (before === 'JP' || currentMarket === 'JP')) {
+      setStockPool(null);
+      if (code === getStrategyLabSnippets(before).find(s => s.id === activeSnippet)?.code) {
+        setCode((snippets.find(s => s.id === activeSnippet) || snippets[0]).code);
+      }
+      if (!snippets.some(s => s.id === activeSnippet)) setActiveSnippet(snippets[0].id);
+    }
+  }, [currentMarket, snippets, activeSnippet, code]);
 
   const handleEditorMount: OnMount = useCallback((editor) => {
     editorRef.current = editor;
   }, []);
 
   const handleSnippetSelect = useCallback((id: string) => {
-    const s = STRATEGY_LAB_SNIPPETS.find((x) => x.id === id);
+    const s = snippets.find((x) => x.id === id);
     if (!s) return;
     setActiveSnippet(id);
     setCode(s.code);
     setCurrentStrategyName(null);
     setCurrentStrategyId(null);
-  }, []);
+  }, [snippets]);
 
   const handleStrategyLoad = useCallback((loadedCode: string, name: string, id: string) => {
     setCode(loadedCode);
@@ -206,6 +219,7 @@ const StrategyLabPage: React.FC = () => {
       <Layout style={{ height: '100%', background: 'transparent' }} hasSider>
         <div style={{ width: 260, flexShrink: 0 }}>
           <StrategyLabSidebar
+            market={currentMarket}
             activeSnippetId={activeSnippet}
             onSnippetSelect={handleSnippetSelect}
             onStrategyLoad={handleStrategyLoad}
@@ -231,6 +245,7 @@ const StrategyLabPage: React.FC = () => {
                     使用 Python SDK · 子进程沙箱 · Redis 进度
                   </Text>
                   <StockPoolSelectField
+                    market={currentMarket === 'JP' ? 'JP' : undefined}
                     value={stockPool}
                     onChange={setStockPool}
                     title="Strategy Lab 股票池"

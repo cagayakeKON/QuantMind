@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
+from pathlib import Path
 
 import httpx
 import exchange_calendars as xcals
@@ -175,6 +176,25 @@ async def _trigger_inference_after_activate(
 
     try:
         router_service = InferenceRouterService()
+        inference_inputs = {}
+        if market_upper == "JP":
+            from backend.shared.model_registry import model_registry_service
+
+            resolved = await model_registry_service.resolve_effective_model(
+                tenant_id=tenant_id,
+                user_id=user_id,
+                strategy_id=strategy_id,
+                market="JP",
+            )
+            if (
+                not resolved.effective_model_id
+                or not resolved.storage_path
+                or not Path(resolved.storage_path).is_dir()
+            ):
+                raise ValueError("No ready Japanese model is configured for this strategy")
+            # The synchronous routing default is deliberately the old global
+            # default. A market-scoped resolution must reach that boundary.
+            inference_inputs["resolved_model"] = resolved.to_dict()
         result = await asyncio.to_thread(
             router_service.run_daily_inference_script,
             date=data_trade_date,
@@ -182,6 +202,7 @@ async def _trigger_inference_after_activate(
             user_id=user_id,
             strategy_id=strategy_id,
             redis_client=redis,
+            **inference_inputs,
         )
         StructuredTaskLogger(
             logger,

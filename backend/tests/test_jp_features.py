@@ -261,8 +261,16 @@ def test_saved_sync_updates_features_before_cache_and_reports_failure(
             "research_update_pending": feature_failure,
         },
     )
-    report = run_market_sync("JP", {"with_qlib": True})
-    assert report["qlib"]["status"] == ("error" if feature_failure else "ok")
+    if feature_failure:
+        # JP must fail the public scheduled task instead of returning a report
+        # that its caller would persist as a completed synchronization.
+        with pytest.raises(TimeoutError, match="feature calculation timed out"):
+            run_market_sync("JP", {"with_qlib": True})
+    else:
+        report = run_market_sync("JP", {"with_qlib": True})
+        assert report["qlib"]["status"] == "ok"
+        assert report["qlib"]["features"]["version"] == "features-test"
+        assert not report["publication_status"]["research_update_pending"]
     assert calls == (
         ["prices", "features"] if feature_failure else ["prices", "features", "cache"]
     )

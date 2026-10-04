@@ -13,6 +13,7 @@ from backend.services.engine.qlib_app.api.task_info import _sanitize_task_info
 from backend.services.engine.qlib_app.schemas.backtest import HealthCheckResponse
 from backend.services.engine.qlib_app.websocket.connection_manager import ws_manager
 from backend.shared.utils import normalize_user_id
+from backend.shared.utc_datetime import utc_now
 from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
 
 router = APIRouter(tags=["qlib"])
@@ -140,7 +141,7 @@ async def stop_task(request: Request, task_id: str) -> dict[str, Any]:
         async with get_session() as session:
             row = await session.execute(
                 text(
-                    "SELECT backtest_id, user_id, tenant_id "
+                    "SELECT backtest_id, user_id, tenant_id, config_json "
                     "FROM qlib_backtest_runs WHERE task_id = :task_id"
                 ),
                 {"task_id": task_id},
@@ -160,7 +161,9 @@ async def stop_task(request: Request, task_id: str) -> dict[str, Any]:
                     {
                         "task_id": task_id,
                         "status": "cancelled",
-                        "completed_at": datetime.now(),
+                        "completed_at": utc_now()
+                        if (data.get("config_json") or {}).get("market") == "JP"
+                        else datetime.now(),
                     },
                 )
                 cancelled = True

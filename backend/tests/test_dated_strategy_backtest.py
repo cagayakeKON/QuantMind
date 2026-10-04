@@ -57,6 +57,7 @@ def test_common_order_boundary_keeps_native_decision_and_dated_identity(
             "side": "BUY",
             "quantity": 100,
             "signal_date": str(signal),
+            "quantity_basis_date": str(signal),
             "execution_date": str(execution),
             "order_type": "MARKET",
         }

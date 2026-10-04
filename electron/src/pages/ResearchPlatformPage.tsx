@@ -1042,7 +1042,13 @@ export const ResearchPlatformPage: React.FC = () => {
    * 传 selectedDate：涨跌幅/收盘价/return_*（T 后 N 日真实收益）等字段
    * 只有按 T 所在行读取才有值，读最新行 return_* 永远是 NaN。
    */
+  const projectionMarket = currentMarket === 'JP' ? 'JP' : 'legacy';
   React.useEffect(() => {
+    if (projectionMarket === 'JP' && (overview?.market !== 'JP' || !overview?.dataVersion)) {
+      setUniverseFeatures({});
+      setUniverseFeaturesLoading(false);
+      return;
+    }
     const symbols = Array.from(
       new Set(candidatePool.map((item) => toSuffixSymbol(item.code)).filter(Boolean))
     );
@@ -1062,8 +1068,11 @@ export const ResearchPlatformPage: React.FC = () => {
 
     let cancelled = false;
     setUniverseFeaturesLoading(true);
-    void researchService
-      .getProjectedQuantDbFeatures(symbols, QUANTDB_PROJECTION_FIELDS, selectedDate)
+    const request = projectionMarket === 'JP'
+      ? researchService.getProjectedQuantDbFeatures(symbols, QUANTDB_PROJECTION_FIELDS, selectedDate,
+        { market: 'JP', dataVersion: overview?.dataVersion })
+      : researchService.getProjectedQuantDbFeatures(symbols, QUANTDB_PROJECTION_FIELDS, selectedDate);
+    void request
       .then((bySymbol) => {
         if (cancelled) return;
         const next: Record<string, Partial<ResearchStockRow>> = {};
@@ -1083,7 +1092,7 @@ export const ResearchPlatformPage: React.FC = () => {
         if (!cancelled) setUniverseFeaturesLoading(false);
       });
     return () => { cancelled = true; };
-  }, [candidatePool, selectedDate, selectedModelId]);
+  }, [candidatePool, selectedDate, selectedModelId, projectionMarket, overview?.market, overview?.dataVersion]);
 
   /** 参与筛选/排序的池：universe 基础字段优先，QuantDB 投影仅补空缺 */
 

@@ -34,8 +34,8 @@ logger = logging.getLogger(__name__)
 class TranslatedTemplate:
     name: str
     description: str
-    code: str           # Qlib-runnable strategy code (STRATEGY_CONFIG block)
-    sdk_source: str     # original Strategy Lab SDK script (kept for reference)
+    code: str  # Qlib-runnable strategy code (STRATEGY_CONFIG block)
+    sdk_source: str  # original Strategy Lab SDK script (kept for reference)
     config: dict[str, Any]  # Qlib-style config
     params: dict[str, Any]
     needs_review: bool = False
@@ -74,14 +74,24 @@ def _extract_via_regex(code: str) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for m in _RE_CTX_ASSIGN.finditer(code):
         key = m.group(1)
-        if key in {"params", "param", "buy", "sell", "stop_loss", "take_profit", "log", "plot_line", "plot_marker"}:
+        if key in {
+            "params",
+            "param",
+            "buy",
+            "sell",
+            "stop_loss",
+            "take_profit",
+            "log",
+            "plot_line",
+            "plot_marker",
+        }:
             continue
         val = _safe_eval(m.group(2))
         out[key] = val
     return out
 
 
-def _extract_via_exec(code: str) -> dict[str, Any]:
+def _extract_via_exec(code: str, provider=None) -> dict[str, Any]:
     """Run setup() in-process to get authoritative ctx fields."""
     try:
         from .runner.worker import _build_user_globals
@@ -90,28 +100,50 @@ def _extract_via_exec(code: str) -> dict[str, Any]:
         compiled = compile(code, "<translate>", "exec")
         exec(compiled, g, g)
         ctx = Context()
+        if provider is not None:
+            from .engine.local_provider import (
+                bind_registered_context,
+                seed_registered_params,
+            )
+
+            seed_registered_params(ctx, getattr(provider, "run_params", {}))
+            bind_registered_context(ctx, provider)
         if "setup" in g and callable(g["setup"]):
             try:
                 g["setup"](ctx)
             except Exception as e:
-                logger.warning("setup() raised during translate (using defaults): %s", e)
+                if provider is not None:
+                    raise
+                logger.warning(
+                    "setup() raised during translate (using defaults): %s", e
+                )
+        if provider is not None:
+            ctx.assert_ready()
+            if ctx.benchmark != provider.benchmark:
+                raise ValueError(
+                    "Template benchmark differs from the registered market"
+                )
         cfg = ctx.to_config_dict() if hasattr(ctx, "to_config_dict") else {}
         # Also collect params from ctx
         params = dict(getattr(ctx, "_param_values", {}))
         return {"config": cfg, "params": params}
     except Exception as e:
+        if provider is not None:
+            raise
         logger.warning("_extract_via_exec failed: %s", e)
         return {}
 
 
-def translate_sdk_to_template(code: str, *, run_id: str | None = None) -> TranslatedTemplate:
+def translate_sdk_to_template(
+    code: str, *, run_id: str | None = None, provider=None
+) -> TranslatedTemplate:
     """Translate user SDK code into a savable strategy template."""
     assert_safe(code)
 
     notes: list[str] = []
     needs_review = False
 
-    extracted = _extract_via_exec(code)
+    extracted = _extract_via_exec(code, provider)
     if extracted:
         cfg_dict = extracted.get("config") or {}
         params = extracted.get("params") or {}
@@ -157,12 +189,24 @@ def translate_sdk_to_template(code: str, *, run_id: str | None = None) -> Transl
         "_sdk_source": True,
         "_sdk_run_id": run_id,
     }
+    if provider is not None:
+        qlib_config.update(cfg_dict)
+        qlib_config.update(
+            market=provider.market,
+            currency=provider.currency,
+            data_version=provider.reader.data_version,
+            benchmark=provider.benchmark,
+            event_price_basis="raw",
+            history_price_basis="raw",
+            research_history_adjust="qfq",
+        )
 
     name_seed = (run_id or "lab").replace("-", "")[:8]
     name = f"Strategy Lab → 模板 {name_seed}"
-    description = (
-        "由 Strategy Lab SDK 脚本一键转模板而来；"
-        + ("需要在策略向导中校对参数。" if needs_review else "已自动填充全部字段，可直接试跑。")
+    description = "由 Strategy Lab SDK 脚本一键转模板而来；" + (
+        "需要在策略向导中校对参数。"
+        if needs_review
+        else "已自动填充全部字段，可直接试跑。"
     )
 
     # Generate Qlib-runnable wrapper code so the backtest center's

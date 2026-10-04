@@ -6,6 +6,33 @@ from backend.shared.stock_utils import StockCodeUtil
 from .data_provider import InMemoryProvider
 
 
+def seed_registered_params(ctx, params):
+    """Bind supplied values before setup declares its SDK parameter specs."""
+    for name, value in (params or {}).items():
+        if not isinstance(name, str) or not name.isidentifier():
+            raise ValueError("Lab parameter names must be valid Python identifiers")
+        ctx._param_values[name] = value
+
+
+def bind_registered_context(ctx, provider):
+    """Apply only a registered Lab provider's defaults before SDK setup."""
+    if not getattr(provider, "market", None):
+        return
+    ctx.market, ctx.benchmark = provider.market, provider.benchmark
+    ctx.tax_sell = ctx.transfer_fee = 0
+    ctx._bind_universe_names(provider.named_universes)
+    latest = provider.reader.latest_trade_date()
+    sessions = [day for day in provider.reader.calendar.sessions if day <= latest]
+    if sessions:
+        ctx.start, ctx.end = (
+            str(sessions[max(0, len(sessions) - 252)]),
+            str(sessions[-1]),
+        )
+    ctx.cash = 1_000_000
+    if getattr(provider, "run_stock_pool", None):
+        ctx.stock_pool = provider.run_stock_pool
+
+
 class LocalLabProvider(InMemoryProvider):
     def __init__(self, reader, *, market, currency, benchmark):
         super().__init__({})
@@ -16,6 +43,7 @@ class LocalLabProvider(InMemoryProvider):
         self.universe_loader = None
         self.is_active_on = None
         self.named_universes = frozenset({"all"})
+        self.history_adjustments = frozenset({"raw", "qfq"})
 
     def calendar(self, start, end):
         return [
@@ -35,7 +63,7 @@ class LocalLabProvider(InMemoryProvider):
             for symbol in frame.symbol
         ]
 
-    def _slice(self, symbol, today, n):
+    def _slice(self, symbol, today, n, adjust="raw"):
         if today is None:
             raise ValueError("Native market history requires an as-of session")
         suffix = StockCodeUtil.to_suffix(symbol, market=self.market)
@@ -43,20 +71,34 @@ class LocalLabProvider(InMemoryProvider):
             suffix,
             today.date() - timedelta(days=max(n * 3, 60)),
             today.date(),
-            adjust="qfq",
+            adjust=adjust,
         )
         if frame.empty:
             return pd.DataFrame()
         return frame.set_index(pd.to_datetime(frame.trade_date)).sort_index().tail(n)
 
     def history(
-        self, symbol=None, n=20, field="close", fields=None, symbols=None, today=None
+        self,
+        symbol=None,
+        n=20,
+        field="close",
+        fields=None,
+        symbols=None,
+        today=None,
+        adjust="raw",
     ):
+        if adjust not in self.history_adjustments:
+            raise ValueError(
+                "Native Lab history supports raw execution or qfq research prices"
+            )
         if symbols:
             return pd.DataFrame(
-                {s: self.history(s, n, field, today=today) for s in symbols}
+                {
+                    s: self.history(s, n, field, today=today, adjust=adjust)
+                    for s in symbols
+                }
             )
-        frame = self._slice(symbol, today, n)
+        frame = self._slice(symbol, today, n, adjust)
         if frame.empty:
             return pd.DataFrame() if fields else pd.Series(dtype=float)
         return frame[list(fields)] if fields else frame[field]
@@ -72,7 +114,7 @@ class LocalLabProvider(InMemoryProvider):
         return pd.DataFrame(rows).T
 
     def current_bar(self, symbol, today):
-        """Exact event-day research bar; as-of history remains unchanged."""
+        """Exact raw event-day bar, matching cash inventory and cost units."""
         frame = self._slice(symbol, today, 1)
         if frame.empty or frame.index[-1].date() != today.date():
             return pd.DataFrame()

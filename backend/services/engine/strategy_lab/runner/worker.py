@@ -91,6 +91,9 @@ def run_request(req: dict[str, Any]) -> int:
 
         ctx = Context()
         if getattr(provider, "market", None):
+            from ..engine.local_provider import seed_registered_params
+
+            seed_registered_params(ctx, params)
             ctx.market = provider.market
             ctx.benchmark = provider.benchmark
             ctx.tax_sell = 0
@@ -139,9 +142,10 @@ def run_request(req: dict[str, Any]) -> int:
 
         result.run_id = run_id
         result.script_sha = compute_script_sha(code, params)
-        result.config = ctx.to_config_dict()
+        if not getattr(provider, "market", None):
+            result.config = ctx.to_config_dict()
         if getattr(provider, "market", None):
-            result.config.update(market=provider.market, currency=provider.currency, data_version=provider.reader.data_version, execution_model="dated_cash")
+            result.config.update(market=provider.market, currency=provider.currency, data_version=provider.reader.data_version, execution_model="dated_cash", run_params=params)
         # Re-attach data_snapshot_at via provider helper if present
         try:
             from ..engine.data_provider import data_snapshot_at

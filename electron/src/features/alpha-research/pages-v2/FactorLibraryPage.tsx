@@ -63,7 +63,7 @@ export const FactorLibraryPage: React.FC<{ onNavigate?: (page: string) => void }
     let active = true;
     setUniverseFilter('all');
     setUniverses([]);
-    getUniverses(universeMarket).then((res) => { if (active) setUniverses(res.data?.universes ?? []); });
+    getUniverses(universeMarket).then((res) => { if (active) setUniverses(res.data?.universes ?? []); }).catch(() => {});
     return () => { active = false; };
   }, [universeMarket]);
 

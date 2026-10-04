@@ -107,7 +107,7 @@ def _run_one(
     publisher: ProgressPublisher | None = None,
 ) -> RunResult | None:
     """Run a backtest with date overrides; return None on failure."""
-    ctx = _fresh_ctx(params)
+    ctx = _fresh_ctx({**getattr(provider, "run_params", {}), **(params or {})})
     g = _exec_user_code(code, ctx)
     if start:
         ctx.start = start
@@ -117,6 +117,24 @@ def _run_one(
         from ..engine.data_provider import QlibProvider
 
         provider = QlibProvider()
+    elif getattr(provider, "market", None):
+        from ..engine.local_provider import seed_registered_params
+
+        seed_registered_params(
+            ctx, {**getattr(provider, "run_params", {}), **(params or {})}
+        )
+        # Registered runs retain SDK setup, then apply the gate/scan interval.
+        # Original Qlib-provider timing remains unchanged.
+        setup = g.get("setup")
+
+        def dated_setup(current):
+            setup(current)
+            if start:
+                current.start = start
+            if end:
+                current.end = end
+
+        g["setup"] = dated_setup
     pub = publisher or ProgressPublisher(run_id="_overfit")
     try:
         return run_backtest(ctx=ctx, provider=provider, user_globals=g, publisher=pub)
@@ -155,7 +173,9 @@ def gate1_train_test(code: str, *, provider: Any | None = None) -> GateReport:
     # Probe baseline once to learn start/end
     base = _run_one(code, provider=provider)
     if base is None or not base.equity:
-        return GateReport("train_test", False, 0, note="基线回测未产出净值，无法分割训测")
+        return GateReport(
+            "train_test", False, 0, note="基线回测未产出净值，无法分割训测"
+        )
 
     start = base.equity[0].date
     end = base.equity[-1].date
@@ -170,7 +190,10 @@ def gate1_train_test(code: str, *, provider: Any | None = None) -> GateReport:
             False,
             10,
             note="训练或测试段未跑通，可能区间过短或数据缺失",
-            detail={"train_window": [train_s, train_e], "test_window": [test_s, test_e]},
+            detail={
+                "train_window": [train_s, train_e],
+                "test_window": [test_s, test_e],
+            },
         )
 
     s_train = train.metrics.sharpe
@@ -293,10 +316,14 @@ def gate3_param_sense(code: str, *, provider: Any | None = None) -> GateReport:
             elif isinstance(default, (int, float)):
                 lo = default * 0.8
                 hi = default * 1.2
-                declared[name] = sorted(set([type(default)(lo), default, type(default)(hi)]))
+                declared[name] = sorted(
+                    set([type(default)(lo), default, type(default)(hi)])
+                )
     if not declared:
         return GateReport(
-            "param_sense", True, 75,
+            "param_sense",
+            True,
+            75,
             note="未声明 ctx.param()，跳过参敏检测（视为 75 分）",
         )
 
@@ -305,7 +332,11 @@ def gate3_param_sense(code: str, *, provider: Any | None = None) -> GateReport:
     sample_detail: list[dict[str, Any]] = []
     for name, choices in declared.items():
         # Test up to 3 alternative values (skip baseline)
-        test_choices = [c for c in choices[:5] if c != base.config.get("params", {}).get(name, {}).get("default")][:3]
+        test_choices = [
+            c
+            for c in choices[:5]
+            if c != base.config.get("params", {}).get(name, {}).get("default")
+        ][:3]
         for v in test_choices:
             r = _run_one(code, params={name: v}, provider=provider)
             sh = r.metrics.sharpe if r is not None else 0.0
@@ -347,7 +378,9 @@ def gate3_param_sense(code: str, *, provider: Any | None = None) -> GateReport:
     )
 
 
-def gate4_monte_carlo(code: str, *, provider: Any | None = None, n_sims: int = 100) -> GateReport:
+def gate4_monte_carlo(
+    code: str, *, provider: Any | None = None, n_sims: int = 100
+) -> GateReport:
     """Bootstrap shuffle daily returns; rank baseline."""
     base = _run_one(code, provider=provider)
     if base is None or not base.equity:
@@ -356,7 +389,9 @@ def gate4_monte_carlo(code: str, *, provider: Any | None = None, n_sims: int = 1
     rets = _equity_to_returns(base.equity)
     if len(rets) < 30:
         return GateReport(
-            "monte_carlo", True, 70,
+            "monte_carlo",
+            True,
+            70,
             note=f"样本仅 {len(rets)} 个交易日，蒙卡跳过（70 分）",
         )
 
@@ -415,10 +450,24 @@ def run_overfit_check(
 
     warnings: list[str] = []
 
-    g1 = _safe_gate("gate1_train_test", lambda: gate1_train_test(code, provider=provider), warnings)
-    g2 = _safe_gate("gate2_walkforward", lambda: gate2_walkforward(code, provider=provider), warnings)
-    g3 = _safe_gate("gate3_param_sense", lambda: gate3_param_sense(code, provider=provider), warnings)
-    g4 = _safe_gate("gate4_monte_carlo", lambda: gate4_monte_carlo(code, provider=provider), warnings)
+    g1 = _safe_gate(
+        "gate1_train_test", lambda: gate1_train_test(code, provider=provider), warnings
+    )
+    g2 = _safe_gate(
+        "gate2_walkforward",
+        lambda: gate2_walkforward(code, provider=provider),
+        warnings,
+    )
+    g3 = _safe_gate(
+        "gate3_param_sense",
+        lambda: gate3_param_sense(code, provider=provider),
+        warnings,
+    )
+    g4 = _safe_gate(
+        "gate4_monte_carlo",
+        lambda: gate4_monte_carlo(code, provider=provider),
+        warnings,
+    )
 
     total = int(g1.score * 0.30 + g2.score * 0.30 + g3.score * 0.20 + g4.score * 0.20)
     return OverfitReport(g1, g2, g3, g4, total_score=total, warnings=warnings)

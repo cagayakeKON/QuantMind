@@ -329,10 +329,22 @@ class Context:
         field: str = "close",
         fields: Sequence[str] | None = None,
         symbols: Sequence[str] | None = None,
+        adjust: str | None = None,
     ) -> pd.Series | pd.DataFrame:
+        """History in the provider's default basis; JP defaults to raw cash prices.
+
+        JP research can explicitly request adjust='qfq'; its adjusted series must
+        not be compared directly with raw inventory costs or event bars.
+        """
         provider = self._require_provider()
+        kwargs = {}
+        if adjust is not None:
+            if adjust not in getattr(provider, "history_adjustments", ()):
+                raise ValueError("This provider does not support the requested history adjustment")
+            kwargs["adjust"] = adjust
         return provider.history(
-            symbol=symbol, n=n, field=field, fields=fields, symbols=symbols, today=self._today
+            symbol=symbol, n=n, field=field, fields=fields, symbols=symbols, today=self._today,
+            **kwargs,
         )
 
     def feature(self, symbol: str, name: str, n: int = 1) -> float | pd.Series:

@@ -274,19 +274,22 @@ async def test_jp_pending_saved_before_fast_worker_and_not_cached(monkeypatch):
     from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestResult
 
     saved = []
+    pending_task_ids = []
 
     class Store:
         async def save_run(self, **kwargs):
             saved.append(kwargs["status"])
+            pending_task_ids.append(kwargs["task_id"])
 
     def enqueue(**kwargs):
         assert saved == ["pending"]
+        assert pending_task_ids == [kwargs["task_id"]]
         payload = kwargs["args"][0]
         assert "stamp_duty" not in payload and "min_commission" not in payload
         worker_request = QlibBacktestRequest(**payload)
         assert "commission" not in worker_request.model_fields_set
         saved.append("completed-by-worker")
-        return SimpleNamespace(id="task-jp")
+        return SimpleNamespace(id=kwargs["task_id"])
 
     monkeypatch.setattr(storage, "BacktestPersistence", Store)
     monkeypatch.setattr(tasks.run_backtest_async, "apply_async", enqueue)
@@ -294,7 +297,7 @@ async def test_jp_pending_saved_before_fast_worker_and_not_cached(monkeypatch):
         api, "_identity_from_request", lambda *args, **kwargs: ("u", "default")
     )
     pending = await api.run_backtest(None, QlibBacktestRequest(market="JP"), None, True)
-    assert pending.task_id == "task-jp" and saved == ["pending", "completed-by-worker"]
+    assert pending.task_id == pending_task_ids[0] and saved == ["pending", "completed-by-worker"]
 
     complete = QlibBacktestResult(
         backtest_id=pending.backtest_id,

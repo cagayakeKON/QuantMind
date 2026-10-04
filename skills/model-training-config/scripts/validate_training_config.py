@@ -27,8 +27,8 @@ MODEL_TYPES = {
     "lightgbm", "xgboost", "catboost", "linear", "random_forest",
     "gru", "lstm", "alstm", "transformer", "tabnet", "tcn", "nativetft", "mlp",
 }
-MARKETS = {"CN", "HK", "US", "CRYPTO", "FUTURES"}
-SAFE_MARKETS = {"CN", "HK", "US", "FUTURES", "CRYPTO", "CUSTOM"}  # QuantDB 直读市场
+MARKETS = {"CN", "HK", "US", "JP", "CRYPTO", "FUTURES"}
+SAFE_MARKETS = {"CN", "HK", "US", "JP", "FUTURES", "CRYPTO", "CUSTOM"}  # Native/QuantDB 直读市场
 TARGET_MODES = {"return", "classification"}
 DISPLAY_NAME_MODES = {"auto", "manual"}
 PREDICTION_MODES = {"point", "quantile"}

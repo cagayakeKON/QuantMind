@@ -24,13 +24,22 @@ from ..runner.ast_checker import assert_safe
 
 logger = logging.getLogger(__name__)
 
-WATCH_LIST_KEY = "qm:lab:watch"        # set of script_sha values
-WATCH_HASH_KEY = "qm:lab:watch:meta"   # sha -> JSON {user_id, name, code, registered_at}
+WATCH_LIST_KEY = "qm:lab:watch"  # set of script_sha values
+WATCH_HASH_KEY = "qm:lab:watch:meta"  # sha -> JSON {user_id, name, code, registered_at}
 SIGNALS_KEY = "qm:lab:signals:latest"  # JSON list of latest scan output
 LAST_RUN_KEY = "qm:lab:scan:last_run"
 
 
-def add_watch(*, script_sha: str, user_id: str, name: str, code: str) -> None:
+def add_watch(
+    *,
+    script_sha: str,
+    user_id: str,
+    name: str,
+    code: str,
+    options=None,
+    params=None,
+    stock_pool=None,
+) -> None:
     r = get_redis_sentinel_client()
     r.sadd(WATCH_LIST_KEY, script_sha.encode("utf-8"))
     payload = {
@@ -39,6 +48,8 @@ def add_watch(*, script_sha: str, user_id: str, name: str, code: str) -> None:
         "code": code,
         "registered_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
     }
+    if options:
+        payload.update(options=options, params=params or {}, stock_pool=stock_pool)
     r.hset(WATCH_HASH_KEY, script_sha, json.dumps(payload, ensure_ascii=False))
 
 
@@ -110,31 +121,62 @@ def run_daily_scan(*, lookback_days: int = 7) -> dict[str, Any]:
             logger.warning("daily_scan: AST failed for %s: %s", entry.get("name"), e)
             continue
         try:
-            result = _run_one(code, start=start_str, end=today_str)
+            from ..runtime_context import auxiliary_context
+
+            options, params, pool, provider = auxiliary_context(
+                options=entry.get("options"),
+                params=entry.get("params"),
+                stock_pool=entry.get("stock_pool"),
+            )
+            scan_day = provider.reader.latest_trade_date(today) if provider else today
+            if scan_day is None:
+                raise ValueError("No covered native scan session")
+            scan_start = scan_day - _dt.timedelta(days=lookback_days)
+            result = _run_one(
+                code,
+                start=str(scan_start) if provider else start_str,
+                end=str(scan_day) if provider else today_str,
+                **({"provider": provider, "params": params} if provider else {}),
+            )
         except Exception as e:
             summary["failed"] += 1
             logger.warning("daily_scan: run failed for %s: %s", entry.get("name"), e)
             continue
-        if result is None:
+        if result is None or (provider is not None and result.status != "success"):
             summary["failed"] += 1
             continue
         summary["ok"] += 1
         # Trades dated today_str count as fresh signals
-        fresh = [t for t in (result.trades or []) if str(getattr(t, "date", "")).startswith(today_str)]
+        fresh = [
+            t
+            for t in (result.trades or [])
+            if str(getattr(t, "date", "")).startswith(str(scan_day))
+        ]
         if not fresh:
             continue
         summary["with_signal"] += 1
         for t in fresh:
-            signals.append({
-                "strategy": entry.get("name"),
-                "script_sha": entry.get("script_sha"),
-                "symbol": getattr(t, "symbol", None),
-                "direction": getattr(t, "direction", None),
-                "price": getattr(t, "price", None),
-                "qty": getattr(t, "qty", None),
-                "reason": getattr(t, "reason", None),
-                "date": getattr(t, "date", today_str),
-            })
+            signals.append(
+                {
+                    "strategy": entry.get("name"),
+                    "script_sha": entry.get("script_sha"),
+                    "symbol": getattr(t, "symbol", None),
+                    "direction": getattr(t, "direction", None),
+                    "price": getattr(t, "price", None),
+                    "qty": getattr(t, "qty", None),
+                    "reason": getattr(t, "reason", None),
+                    "date": getattr(t, "date", today_str),
+                    **(
+                        {
+                            "market": provider.market,
+                            "data_version": provider.reader.data_version,
+                            "execution_date_mode": "published_daily_delayed",
+                        }
+                        if provider
+                        else {}
+                    ),
+                }
+            )
 
     payload = {
         "generated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
@@ -143,7 +185,10 @@ def run_daily_scan(*, lookback_days: int = 7) -> dict[str, Any]:
     }
     try:
         r = get_redis_sentinel_client()
-        r.set(SIGNALS_KEY, json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
+        r.set(
+            SIGNALS_KEY,
+            json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"),
+        )
         r.set(LAST_RUN_KEY, payload["generated_at"].encode("utf-8"))
     except Exception as e:
         logger.warning("daily_scan: persist failed: %s", e)

@@ -25,8 +25,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import {
-  STRATEGY_LAB_SNIPPETS,
-  SNIPPETS_BY_CATEGORY,
+  getStrategyLabSnippets,
   CATEGORY_LABELS,
   type SnippetCategory,
   type SnippetSpec,
@@ -51,6 +50,7 @@ interface SavedStrategy {
 }
 
 interface Props {
+  market?: string;
   activeSnippetId: string;
   onSnippetSelect: (id: string) => void;
   /** Called when user picks a saved strategy — parent loads code into editor. */
@@ -88,11 +88,13 @@ const CATEGORY_COLOR: Record<SnippetCategory, { ring: string; chip: string; text
 // ---------------------------------------------------------------------------
 
 export const StrategyLabSidebar: React.FC<Props> = ({
+  market,
   activeSnippetId,
   onSnippetSelect,
   onStrategyLoad,
   onNewStrategy,
 }) => {
+  const snippets = useMemo(() => getStrategyLabSnippets(market), [market]);
   const [activeTab, setActiveTab] = useState<ModuleTab>('examples');
   const [query, setQuery] = useState('');
   const [openCats, setOpenCats] = useState<Record<string, boolean>>(() => ({ basic: true, trend: true }));
@@ -173,8 +175,8 @@ export const StrategyLabSidebar: React.FC<Props> = ({
 
   const filteredByCat = useMemo(() => {
     const cats: SnippetCategory[] = ['basic', 'trend', 'reversal', 'timing', 'volume', 'cross', 'factor'];
-    return cats.map((cat) => ({ cat, list: SNIPPETS_BY_CATEGORY[cat].filter(matches) }));
-  }, [query]);
+    return cats.map((cat) => ({ cat, list: snippets.filter(s => s.category === cat).filter(matches) }));
+  }, [query, snippets]);
 
   const isSearching = query.trim().length > 0;
   const toggleCat = (cat: SnippetCategory) => {
@@ -201,7 +203,7 @@ export const StrategyLabSidebar: React.FC<Props> = ({
           <ModuleButton
             icon={BookOpen}
             name="示例策略"
-            description={`${STRATEGY_LAB_SNIPPETS.length} 个可运行示例 · 7 大类别`}
+            description={`${snippets.length} 个可运行示例 · 7 大类别${market === 'JP' ? ' · 已过滤盘中风险和做空能力' : ''}`}
             color="text-blue-400"
             isActive={activeTab === 'examples'}
             onClick={() => setActiveTab('examples')}

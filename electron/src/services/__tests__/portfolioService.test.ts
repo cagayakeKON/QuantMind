@@ -59,6 +59,7 @@ vi.mock('axios', () => {
 });
 
 import { portfolioService } from '../portfolioService';
+import { realTradingService } from '../realTradingService';
 
 describe('PortfolioService', () => {
     beforeEach(() => {
@@ -91,6 +92,20 @@ describe('PortfolioService', () => {
     });
 
     describe('getFundOverview', () => {
+        it('does not borrow CNY settings for an uninitialized JP baseline', async () => {
+            mocks.get.mockResolvedValueOnce({ data: { success: true, data: {
+                total_asset: 0, cash: 0, initial_equity: 0, account_not_initialized: true, currency: 'JPY', positions: {},
+            } } });
+            const settings = vi.spyOn(realTradingService, 'getSimulationSettings').mockResolvedValue({ initial_cash: 2000000 } as any);
+            const result = await portfolioService.getFundOverview('7', 'simulation', 'default', 'JP');
+            expect(result.data.currency).toBe('JPY');
+            expect(result.data.initialCapital).toBe(0);
+            expect(result.data.initialCapitalAvailable).toBe(false);
+            expect(result.data.totalReturnAvailable).toBe(false);
+            expect(settings).not.toHaveBeenCalled();
+            expect(mocks.get.mock.calls.some(([url]) => String(url).includes('/settings'))).toBe(false);
+            settings.mockRestore();
+        });
         it('后端不可用时应抛出错误，由上层保留上次成功数据', async () => {
             mocks.get.mockRejectedValue(new Error('Network Error'));
 

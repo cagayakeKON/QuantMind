@@ -1110,6 +1110,35 @@ class ManualExecutionService:
         deadline = _shift_trading_sessions(data_trade_date, max(1, target_horizon_days))
         return start_date, deadline
 
+    async def _load_default_model_inference_run_for_session(
+        self, *, tenant_id: str, user_id: str, model_id: str, trade_date: date
+    ) -> dict[str, Any] | None:
+        """A dated next-open cycle consumes its exact prediction session."""
+        async with get_session(read_only=True) as session:
+            row = (
+                (
+                    await session.execute(
+                        text("""
+                        SELECT * FROM qm_model_inference_runs
+                        WHERE tenant_id = :tenant_id AND user_id = :user_id
+                          AND model_id = :model_id AND status = 'completed'
+                          AND prediction_trade_date = :trade_date
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """),
+                        {
+                            "tenant_id": tenant_id,
+                            "user_id": user_id,
+                            "model_id": model_id,
+                            "trade_date": trade_date,
+                        },
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        return dict(row) if row else None
+
     async def _persist_task(
         self,
         *,
@@ -1300,9 +1329,18 @@ class ManualExecutionService:
         if target_horizon_days <= 0:
             target_horizon_days = 5
 
-        latest_run = await self._load_latest_default_model_inference_run(
-            tenant_id=tenant, user_id=uid, model_id=default_model_id
-        )
+        if str(market or "").strip().upper() == "JP":
+            target_day = trade_date or datetime.now(schedule.timezone).date()
+            latest_run = await self._load_default_model_inference_run_for_session(
+                tenant_id=tenant,
+                user_id=uid,
+                model_id=default_model_id,
+                trade_date=target_day,
+            )
+        else:
+            latest_run = await self._load_latest_default_model_inference_run(
+                tenant_id=tenant, user_id=uid, model_id=default_model_id
+            )
         if not latest_run:
             return {
                 "available": False,

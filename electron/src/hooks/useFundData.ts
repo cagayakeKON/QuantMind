@@ -33,6 +33,7 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
 
   const tradingMode = useAppSelector((state) => state.ui.tradingMode);
   const currentMarket = useAppSelector((state) => state.ui.currentMarket);
+  const fundMarket = currentMarket === 'JP' ? 'JP' : 'CN';
   const [data, setData] = useState<FundData | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +60,8 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
     (import.meta as any).env?.VITE_TENANT_ID ||
     'default'
   ).trim() || 'default';
+  const accountScope = fundMarket === 'JP' ? `JP:${tradingMode}:${resolvedUserId}:${resolvedTenantId}` : 'legacy';
+  const previousScope = useRef(accountScope);
 
   const fetchData = useCallback(async (params?: { silent?: boolean }) => {
     const silent = params?.silent ?? true;
@@ -71,7 +74,9 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
       }
       setError(null);
 
-      const result = await portfolioService.getFundOverview(resolvedUserId, tradingMode, resolvedTenantId, currentMarket);
+      const result = fundMarket === 'JP'
+        ? await portfolioService.getFundOverview(resolvedUserId, tradingMode, resolvedTenantId, 'JP')
+        : await portfolioService.getFundOverview(resolvedUserId, tradingMode, resolvedTenantId);
 
       // 已有更新的请求发出，丢弃本次过期响应（否则会把新数据覆盖回旧值）
       if (seq !== requestSeqRef.current) {
@@ -116,14 +121,17 @@ export const useFundData = (options: UseFundDataOptions = {}): UseFundDataReturn
         setLoading(false);
       }
     }
-  }, [resolvedUserId, resolvedTenantId, tradingMode, currentMarket]);
+  }, [resolvedUserId, resolvedTenantId, tradingMode, fundMarket]);
 
   useEffect(() => {
+    if (previousScope.current === accountScope) return;
+    previousScope.current = accountScope;
+    requestSeqRef.current += 1;
     dataRef.current = null;
     fingerprintRef.current = null;
     setData(null);
     setLastUpdate(null);
-  }, [currentMarket, resolvedUserId, resolvedTenantId]);
+  }, [accountScope]);
 
   const refresh = useCallback(async () => {
     await fetchData({ silent: true });

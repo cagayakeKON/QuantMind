@@ -22,6 +22,7 @@ from backend.services.simulation.services.execution_engine import (
     SimulationExecutionEngine,
 )
 from backend.services.simulation.services.order_service import SimOrderService
+from backend.services.simulation.services.dated_execution import ordinary_cash_order_rejection
 from backend.services.simulation.services.simulation_manager import (
     SimulationAccountManager,
     require_sim_user_id,
@@ -50,6 +51,10 @@ async def create_order(
             status_code=400,
             detail="Simulation service only accepts trading_mode=simulation",
         )
+
+    rejection = ordinary_cash_order_rejection(data.symbol)
+    if rejection:
+        raise HTTPException(status_code=422, detail=rejection)
 
     order_service = SimOrderService(db)
     manager = SimulationAccountManager(redis)

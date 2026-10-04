@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import importlib
+import json
 from collections.abc import Callable
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -22,6 +24,49 @@ from backend.shared.inference_coverage import find_inference_gap_dates
 logger = logging.getLogger(__name__)
 
 ProgressCb = Callable[[dict[str, Any]], None]
+
+
+def _model_market(metadata, storage_path="", market="CN"):
+    meta = metadata if isinstance(metadata, dict) else {}
+    context = meta.get("context") if isinstance(meta.get("context"), dict) else {}
+    selected = str(
+        context.get("market") or meta.get("market") or market or "CN"
+    ).upper()
+    # A missing/stale registry metadata must not enable copied predictions for
+    # a model whose actual artifact declares Japanese execution inputs.
+    if storage_path:
+        artifact = Path(storage_path) / "metadata.json"
+        if artifact.is_file():
+            try:
+                disk = json.loads(artifact.read_text(encoding="utf-8"))
+                if (
+                    str(
+                        (disk.get("context") or {}).get("market")
+                        or disk.get("market")
+                        or ""
+                    ).upper()
+                    == "JP"
+                ):
+                    return "JP"
+            except (OSError, ValueError, AttributeError):
+                if selected == "JP":
+                    raise
+    return selected
+
+
+def _registered_inference_calendar(market):
+    from backend.services.engine.data_platform.market_provider import (
+        LOCAL_MARKET_PROVIDERS,
+    )
+
+    provider = LOCAL_MARKET_PROVIDERS.get(market)
+    factory = getattr(provider, "inference_calendar_factory", None)
+    if not factory:
+        if market == "JP":
+            raise ValueError("JP inference calendar is not registered")
+        return None
+    module, name = factory.rsplit(".", 1)
+    return getattr(importlib.import_module(module), name)()
 
 
 def _resolve_backfill_model_lineage(
@@ -158,7 +203,9 @@ def compute_coverage(
 ) -> dict[str, Any]:
     """与 API GET /models/{id}/inference/coverage 同口径。"""
     storage_path = str(storage_path or "").strip()
-    latest = latest_trading_date()
+    mkt = _model_market(metadata, storage_path, market)
+    calendar = _registered_inference_calendar(mkt)
+    latest = calendar.latest_trading_date() if calendar else latest_trading_date()
     if not storage_path:
         return {
             "model_id": model_id,
@@ -178,7 +225,6 @@ def compute_coverage(
     factor_source = str(
         meta.get("factor_source") or ctx.get("factor_source") or "l1_factors"
     )
-    mkt = str(ctx.get("market") or meta.get("market") or market or "CN")
 
     if not parquet_file:
         quantdb_fallback_dates: list[str] | None = None
@@ -201,15 +247,23 @@ def compute_coverage(
                 import exchange_calendars as xcals
                 import pandas as pd
 
-                cal = xcals.get_calendar("XSHG")
                 start = pd.Timestamp(max_date) + pd.Timedelta(days=1)
                 end = pd.Timestamp(gap_end)
-                gap = (
-                    [d.strftime("%Y-%m-%d") for d in cal.sessions_in_range(start, end)]
-                    if start <= end
-                    else []
-                )
+                if calendar:
+                    gap = calendar.sessions_between(start.date(), end.date())
+                else:
+                    cal = xcals.get_calendar("XSHG")
+                    gap = (
+                        [
+                            d.strftime("%Y-%m-%d")
+                            for d in cal.sessions_in_range(start, end)
+                        ]
+                        if start <= end
+                        else []
+                    )
             except Exception:
+                if calendar:
+                    raise
                 gap = []
             return {
                 "model_id": model_id,
@@ -247,7 +301,15 @@ def compute_coverage(
         }
     min_date, max_date = dates[0], dates[-1]
     gap_end = min(latest, quantdb_latest_factor_date(mkt) or latest)
-    gap = find_inference_gap_dates(dates, gap_end)
+    if calendar:
+        covered = set(dates)
+        gap = [
+            day
+            for day in calendar.sessions_between(min_date, gap_end)
+            if day not in covered
+        ]
+    else:
+        gap = find_inference_gap_dates(dates, gap_end)
     return {
         "model_id": model_id,
         "min_date": min_date,
@@ -418,6 +480,10 @@ async def backfill_model_gaps(
 ) -> dict[str, Any]:
     """对单个模型执行一键补全。gaps 为空时自动算缺口。"""
     storage_path = str(storage_path or "").strip()
+    if _model_market(metadata, storage_path) == "JP":
+        # A failed Japanese inference is missing model output. Relabeling an
+        # old cross-section is never a successful prediction for another day.
+        allow_template_copy = False
     if gaps is None:
         cov = compute_coverage(
             model_id=model_id, storage_path=storage_path, metadata=metadata

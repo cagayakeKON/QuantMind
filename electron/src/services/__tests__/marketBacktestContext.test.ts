@@ -64,10 +64,16 @@ describe('common backtest market context', () => {
     expect(calls.post.mock.calls[0][1].deal_price).toBe('close');
   });
 
+  it('uses TOPIX for a JP public request without an explicit benchmark', async () => {
+    await new BacktestService().runBacktest({ ...base, market: 'JP' });
+    expect(calls.post.mock.calls[0][1].benchmark).toBe('TOPIX');
+  });
+
   it.each([undefined, 'CN', 'HK', 'US', 'CRYPTO', 'FUTURES'] as const)
   ('retains legacy request defaults and strategy-id behavior for %s', async market => {
     await new BacktestService().runBacktest({ ...base, market, strategy_id: 'legacy-strategy' });
     expect(calls.post.mock.calls[0][1].deal_price).toBe('close');
+    expect(calls.post.mock.calls[0][1].benchmark).toBe('SH000300');
     expect(calls.post.mock.calls[0][1]).not.toHaveProperty('strategy_id');
   });
 

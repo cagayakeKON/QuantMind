@@ -183,6 +183,10 @@ async def get_batch_features(
 ):
     """批量 QuantDB 特征投影：按 fields 返回指定字段（按需加载）。"""
     _ = current_user
+    if req.market.upper() == "JP":
+        return await get_batch_full_features_service(
+            req.symbols, req.fields, req.trade_date, req.market, req.data_version
+        )
     return await get_batch_full_features_service(req.symbols, req.fields, req.trade_date)
 
 

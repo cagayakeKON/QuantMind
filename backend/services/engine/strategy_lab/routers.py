@@ -91,7 +91,11 @@ async def get_run_status(
     async def gen() -> Any:
         reader = ProgressReader(run_id=run_id)
         idx = last_index
-        terminal = {RunStatus.success.value, RunStatus.failed.value, RunStatus.cancelled.value}
+        terminal = {
+            RunStatus.success.value,
+            RunStatus.failed.value,
+            RunStatus.cancelled.value,
+        }
         while True:
             events = reader.fetch_events(start=idx, end=-1)
             for evt in events:
@@ -111,7 +115,9 @@ async def get_run_status(
 async def get_run_result(run_id: str) -> dict[str, Any]:
     result = fetch_result(run_id)
     if result is None:
-        raise HTTPException(status_code=404, detail=f"run_id={run_id} not found or expired")
+        raise HTTPException(
+            status_code=404, detail=f"run_id={run_id} not found or expired"
+        )
     return result.to_dict()
 
 
@@ -121,6 +127,9 @@ async def get_run_result(run_id: str) -> dict[str, Any]:
 class OverfitBody(BaseModel):
     code: str = Field(..., description="Python script source")
     params: dict[str, Any] = Field(default_factory=dict)
+    run_id: str | None = None
+    options: dict[str, Any] = Field(default_factory=dict)
+    stock_pool: str | None = None
 
 
 @router.post("/overfit-check")
@@ -131,7 +140,18 @@ async def post_overfit_check(body: OverfitBody) -> dict[str, Any]:
     """
     try:
         # Run synchronously in a thread so the event loop isn't blocked.
-        report = await asyncio.to_thread(run_overfit_check, body.code)
+        from .runtime_context import auxiliary_context
+
+        _, _, _, provider = await asyncio.to_thread(
+            auxiliary_context,
+            run_id=body.run_id,
+            options=body.options,
+            params=body.params,
+            stock_pool=body.stock_pool,
+        )
+        report = await asyncio.to_thread(
+            run_overfit_check, body.code, **({"provider": provider} if provider else {})
+        )
     except ASTCheckError as e:
         raise HTTPException(status_code=400, detail=f"AST 检查未通过：{e}")
     except Exception as e:
@@ -146,13 +166,26 @@ async def post_overfit_check(body: OverfitBody) -> dict[str, Any]:
 class TranslateBody(BaseModel):
     code: str = Field(..., description="Python script source")
     run_id: str | None = None
+    options: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.post("/translate")
 async def post_translate(body: TranslateBody, request: Request) -> dict[str, Any]:
     """Translate SDK script → savable strategy template; persist via storage."""
     try:
-        template = await asyncio.to_thread(translate_sdk_to_template, body.code, run_id=body.run_id)
+        from .runtime_context import auxiliary_context
+
+        _, _, _, provider = await asyncio.to_thread(
+            auxiliary_context,
+            run_id=body.run_id,
+            options=body.options,
+        )
+        template = await asyncio.to_thread(
+            translate_sdk_to_template,
+            body.code,
+            run_id=body.run_id,
+            **({"provider": provider} if provider else {}),
+        )
     except ASTCheckError as e:
         raise HTTPException(status_code=400, detail=f"AST 检查未通过：{e}")
     except Exception as e:
@@ -205,13 +238,34 @@ async def post_translate(body: TranslateBody, request: Request) -> dict[str, Any
 # ---------------------------------------------------------------------------
 class WatchBody(BaseModel):
     code: str = Field(..., description="Python script to register for daily scan")
-    name: str = Field(..., description="Display name shown in the dashboard signal card")
+    name: str = Field(
+        ..., description="Display name shown in the dashboard signal card"
+    )
+    run_id: str | None = None
+    options: dict[str, Any] = Field(default_factory=dict)
+    params: dict[str, Any] = Field(default_factory=dict)
+    stock_pool: str | None = None
 
 
 @router.post("/watch")
 async def post_watch(body: WatchBody, request: Request) -> dict[str, Any]:
     """Register a Lab script for the every-evening cron scan."""
-    sha = compute_script_sha(body.code, {})
+    from .runtime_context import auxiliary_context
+
+    try:
+        options, params, pool, provider = await asyncio.to_thread(
+            auxiliary_context,
+            run_id=body.run_id,
+            options=body.options,
+            params=body.params,
+            stock_pool=body.stock_pool,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    sha = compute_script_sha(
+        body.code,
+        {"options": options, "params": params, "stock_pool": pool} if provider else {},
+    )
     user_id = "0"
     try:
         user_id = str(getattr(request.state, "user_id", None) or "0")
@@ -220,7 +274,17 @@ async def post_watch(body: WatchBody, request: Request) -> dict[str, Any]:
     if user_id == "0":
         _user = getattr(request.state, "user", None) or {}
         user_id = str(_user.get("user_id") or "0")
-    add_watch(script_sha=sha, user_id=user_id, name=body.name, code=body.code)
+    add_watch(
+        script_sha=sha,
+        user_id=user_id,
+        name=body.name,
+        code=body.code,
+        **(
+            {"options": options, "params": params, "stock_pool": pool}
+            if provider
+            else {}
+        ),
+    )
     return {"script_sha": sha, "registered": True}
 
 

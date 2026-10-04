@@ -33,6 +33,8 @@ class LocalMarketProvider:
     raw_hub_factory: str | None = None
     model_feature_snapshot_loader: str | None = None
     strategy_runner_date_loader: str | None = None
+    inference_calendar_factory: str | None = None
+    research_feature_loader: str | None = None
 
     def open_raw(self, data_version: str | None = None):
         """Latest daily quotes; research open() keeps its complete publication."""
@@ -89,6 +91,8 @@ LOCAL_MARKET_PROVIDERS = {
             "backend.services.simulation.jp.model_snapshot.read_model_snapshot"
         ),
         strategy_runner_date_loader="backend.services.simulation.jp.runner_context.default_dates",
+        inference_calendar_factory="backend.services.engine.data_platform.jp_calendar.open_inference_calendar",
+        research_feature_loader="backend.services.simulation.jp.research_features.read_projection",
     ),
 }
 

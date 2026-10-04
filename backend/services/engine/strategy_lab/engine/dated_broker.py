@@ -84,6 +84,12 @@ class DatedLabBroker:
                     cost=position["cost"] * position["volume"],
                     market_value=position["market_value"],
                     last_price=position["price"],
+                    holding_days=sum(
+                        str(position.get("first_buy_date") or today.date())
+                        < str(day)
+                        <= str(today.date())
+                        for day in self.provider.reader.calendar.sessions
+                    ),
                 )
             )
 
@@ -162,6 +168,33 @@ class DatedLabBroker:
                 raise ValueError(f"Unsupported SDK cash order intent: {order.side}")
         # Stable sell-before-buy ordering matches the existing cash backtest contract.
         self.pending = sorted(requests, key=lambda order: order["side"] != "SELL")
+        # Preserve the original broker's affordable-buy contract without looking
+        # at tomorrow's opening price. Reserve known signal-day fees/slippage.
+        estimate = self.executor.rules.signal_cash_value
+        budget = Decimal(str(self.ctx.cash))
+        for request in self.pending:
+            symbol, quantity, side = (
+                request["symbol"],
+                request["quantity"],
+                request["side"],
+            )
+            if side == "SELL":
+                budget += estimate(symbol, today.date(), quantity, side=side)
+                continue
+            unit = self.provider.reader.matching_rules(symbol, today.date()).lot_size(
+                self.provider.reader.get_bar(symbol, today.date())
+            )
+            lo, hi = 0, quantity // unit
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if estimate(symbol, today.date(), mid * unit, side=side) <= budget:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            request["quantity"] = lo * unit
+            if lo:
+                budget -= estimate(symbol, today.date(), request["quantity"], side=side)
+        self.pending = [request for request in self.pending if request["quantity"]]
         benchmark = self.provider.benchmark_history(self.ctx.benchmark, 1, today)
         self._equity.append(
             EquityPoint(

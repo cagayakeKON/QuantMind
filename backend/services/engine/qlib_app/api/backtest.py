@@ -88,6 +88,7 @@ async def run_backtest(
                 from backend.services.engine.qlib_app.tasks import run_backtest_async
 
                 persistence = BacktestPersistence()
+                jp_task_id = str(uuid4()) if is_jp else None
                 if is_jp:
                     # Persist before queueing so a fast worker cannot have its
                     # completed/failed result overwritten by a pending record.
@@ -95,9 +96,13 @@ async def run_backtest(
                         backtest_id=backtest_id, user_id=request.user_id,
                         tenant_id=request.tenant_id, status="pending",
                         created_at=utc_now(), config=request_dict, result=None,
+                        task_id=jp_task_id,
                     )
                 try:
-                    task = run_backtest_async.apply_async(args=[request_dict])
+                    task = run_backtest_async.apply_async(
+                        args=[request_dict],
+                        **({"task_id": jp_task_id} if is_jp else {}),
+                    )
                 except Exception as exc:
                     if is_jp:
                         failed = QlibBacktestResult(
@@ -105,11 +110,13 @@ async def run_backtest(
                             tenant_id=request.tenant_id, market="JP", currency="JPY",
                             status="failed", config=request_dict, created_at=utc_now(),
                             completed_at=utc_now(), error_message=str(exc),
+                            task_id=jp_task_id,
                         )
                         await persistence.save_run(
                             backtest_id, request.user_id, request.tenant_id, "failed",
                             failed.created_at, request_dict, failed,
                             completed_at=failed.completed_at,
+                            task_id=jp_task_id,
                         )
                     raise
                 if not is_jp:

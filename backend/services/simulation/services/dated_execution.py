@@ -5,6 +5,34 @@ import math
 from backend.shared.stock_utils import StockCodeUtil
 
 
+def registered_cash_market(symbol, market=None):
+    """Identify cash-checkpoint securities independently of caller overrides."""
+    from backend.services.engine.data_platform.market_provider import (
+        LOCAL_MARKET_PROVIDERS,
+    )
+    from .market_rules import infer_market
+
+    candidates = (
+        infer_market(str(symbol or "")).value,
+        str(getattr(market, "value", market) or "").strip().upper(),
+    )
+    for candidate in candidates:
+        provider = LOCAL_MARKET_PROVIDERS.get(candidate)
+        if provider and provider.simulation_account_input_adapter:
+            return candidate
+    return None
+
+
+def ordinary_cash_order_rejection(symbol, market=None):
+    cash_market = registered_cash_market(symbol, market)
+    if cash_market:
+        return (
+            f"{cash_market} orders require the registered dated cash execution "
+            "context; ordinary live-quote simulation orders are unsupported"
+        )
+    return None
+
+
 def match_registered_cash_order(
     context, rules, account, *, symbol, side, quantity, bar, used_volume
 ):

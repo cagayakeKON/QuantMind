@@ -786,7 +786,8 @@ class BacktestService {
       start_date: config.start_date,
       end_date: config.end_date,
       initial_capital: config.initial_capital,
-      benchmark: config.benchmark_symbol || 'SH000300',
+      benchmark: config.benchmark_symbol ||
+        (config.market === 'JP' ? getMarketConfig(config.market).benchmark : undefined) || 'SH000300',
       universe: this.buildUniverse(config.symbol, config.market),
       // 基础费率，后端会据此计算详细费用
       commission: config.commission ?? 0.00025,

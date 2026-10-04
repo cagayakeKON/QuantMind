@@ -22,7 +22,9 @@ from .broker import SimpleBroker
 logger = logging.getLogger(__name__)
 
 
-def _build_calendar(provider: Any, start: pd.Timestamp, end: pd.Timestamp) -> list[pd.Timestamp]:
+def _build_calendar(
+    provider: Any, start: pd.Timestamp, end: pd.Timestamp
+) -> list[pd.Timestamp]:
     """Pull trading dates between [start, end] from the data provider.
 
     The provider is expected to expose either ``calendar(start, end)`` or
@@ -64,13 +66,21 @@ def run_backtest(
     setup_fn = user_globals.get("setup")
     if not callable(setup_fn):
         raise RuntimeError("setup(ctx) is required")
+    from .local_provider import bind_registered_context
+
+    bind_registered_context(ctx, provider)
     ctx._bind_universe_names(getattr(provider, "named_universes", ()))
     setup_fn(ctx)
     ctx.assert_ready()
+    setup_config = ctx.to_config_dict()
 
     cash = float(ctx.cash) if ctx.cash is not None else 1_000_000.0
     factory = getattr(provider, "make_broker", None)
-    broker = factory(ctx, cash) if factory else SimpleBroker(ctx=ctx, provider=provider, cash=cash)
+    broker = (
+        factory(ctx, cash)
+        if factory
+        else SimpleBroker(ctx=ctx, provider=provider, cash=cash)
+    )
     ctx._attach(data_provider=provider, broker=broker, cash=cash)
 
     on_bar = user_globals.get("on_bar")
@@ -101,6 +111,7 @@ def run_backtest(
 
     if getattr(provider, "market", None):
         from backend.shared.stock_utils import StockCodeUtil
+
         symbols = [StockCodeUtil.to_prefix(s, market=provider.market) for s in symbols]
 
     # 全局股票池（P5）：ctx.stock_pool 非空时与 universe 取交集。
@@ -110,21 +121,33 @@ def run_backtest(
     if isinstance(pool_ref, str) and pool_ref.strip():
         from backend.shared.stock_pool.strategy import apply_pool_to_universe
 
-        pool_out = apply_pool_to_universe(symbols, pool_ref, strict=True,
-            **({"market": provider.market} if getattr(provider, "market", None) else {}))
+        pool_out = apply_pool_to_universe(
+            symbols,
+            pool_ref,
+            strict=True,
+            **(
+                {"market": provider.market} if getattr(provider, "market", None) else {}
+            ),
+        )
         symbols = pool_out.symbols
         if publisher:
             publisher.publish(
-                Phase.load_data, 15.0,
+                Phase.load_data,
+                15.0,
                 f"pool={pool_out.pool_id} kept={len(symbols)} "
                 f"dropped={pool_out.dropped}",
             )
 
     if publisher:
         publisher.publish(
-            Phase.load_data, 15.0,
+            Phase.load_data,
+            15.0,
             f"calendar={len(calendar)} days, universe={len(symbols)} symbols",
         )
+    if getattr(provider, "market", None):
+        # SDK callbacks consume actual members, while setup_config retains the
+        # declared pool for reproducibility and template translation.
+        ctx.universe = symbols
 
     n_days = len(calendar)
     last_emit_pct = 15.0
@@ -151,7 +174,8 @@ def run_backtest(
                         df = event_bar(sym, today)
                     else:
                         df = provider.history(
-                            symbol=sym, n=1,
+                            symbol=sym,
+                            n=1,
                             fields=["open", "high", "low", "close", "volume"],
                             today=today,
                         )
@@ -169,14 +193,18 @@ def run_backtest(
                         low=float(row.get("low", 0.0) or 0.0),
                         close=float(row.get("close", 0.0) or 0.0),
                         volume=float(row.get("volume", 0.0) or 0.0),
-                        adj_close=float(row.get("adj_close", row.get("close", 0.0)) or 0.0),
+                        adj_close=float(
+                            row.get("adj_close", row.get("close", 0.0)) or 0.0
+                        ),
                     )
                 except Exception:
                     continue
                 try:
                     on_bar(ctx, bar)
                 except Exception as e:
-                    ctx.log(f"on_bar error {sym} @ {today.date()}: {e}", level="warning")
+                    ctx.log(
+                        f"on_bar error {sym} @ {today.date()}: {e}", level="warning"
+                    )
 
         orders = ctx._drain_orders()
         rules = ctx._drain_risk_rules()
@@ -187,7 +215,8 @@ def run_backtest(
         pct = 15.0 + (i + 1) * 75.0 / max(n_days, 1)
         if publisher and (pct - last_emit_pct) >= progress_every:
             publisher.publish(
-                Phase.backtest, pct,
+                Phase.backtest,
+                pct,
                 f"day {i + 1}/{n_days} — equity={broker.equity:,.0f}",
             )
             last_emit_pct = pct
@@ -218,6 +247,17 @@ def run_backtest(
         started_at=started_at,
         finished_at=finished_at,
     )
+    if getattr(provider, "market", None):
+        result.config = setup_config
+        result.config.update(
+            market=provider.market,
+            currency=provider.currency,
+            data_version=provider.reader.data_version,
+            execution_model="dated_cash",
+            event_price_basis="raw",
+            history_price_basis="raw",
+            research_history_adjust="qfq",
+        )
     return result
 
 

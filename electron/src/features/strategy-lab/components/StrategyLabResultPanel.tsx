@@ -164,7 +164,8 @@ export const StrategyLabResultPanel: React.FC<Props> = ({ result, loading, code,
     }
     setOverfitLoading(true);
     try {
-      const report = await strategyLabService.runOverfitCheck(code);
+      const report = await strategyLabService.runOverfitCheck(code, undefined,
+        result.config.market === 'JP' ? {run_id: result.run_id, options: {market: 'JP'}} : undefined);
       setOverfitReport(report);
     } catch (e: any) {
       message.error(`4 关卡检测失败: ${e?.response?.data?.detail || e?.message || e}`);
@@ -180,7 +181,8 @@ export const StrategyLabResultPanel: React.FC<Props> = ({ result, loading, code,
     }
     setTranslateLoading(true);
     try {
-      const out = await strategyLabService.translateToTemplate(code);
+      const out = await strategyLabService.translateToTemplate(code,
+        result.config.market === 'JP' ? {run_id: result.run_id, options: {market: 'JP'}} : undefined);
       message.success(`已转换为模板：${out.strategy_name}（可在策略向导中查看）`);
     } catch (e: any) {
       message.error(`转模板失败: ${e?.response?.data?.detail || e?.message || e}`);
@@ -198,7 +200,8 @@ export const StrategyLabResultPanel: React.FC<Props> = ({ result, loading, code,
     if (!name) return;
     setWatchLoading(true);
     try {
-      const out = await strategyLabService.addWatch(code, name);
+      const out = await strategyLabService.addWatch(code, name,
+        result.config.market === 'JP' ? {run_id: result.run_id, options: {market: 'JP'}} : undefined);
       message.success(`已加入每日扫描（sha=${out.script_sha.slice(0, 8)}…）`);
     } catch (e: any) {
       message.error(`加入失败: ${e?.response?.data?.detail || e?.message || e}`);
