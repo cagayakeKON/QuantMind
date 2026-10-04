@@ -29,23 +29,38 @@ const SimulationExecutionInputForm: React.FC<Props> = ({
   const sequence = useRef(0);
   const savedKey = JSON.stringify(savedContext);
 
-  const load = useCallback(async (context?: DatedExecutionContext) => {
+  const load = useCallback(async (context?: DatedExecutionContext, useLatest = false) => {
     const request = ++sequence.current;
     onChange(undefined);
     setLoading(true);
     setError(undefined);
     try {
-      const next = await realTradingService.getSimulationExecutionInputs(market, context?.trade_date, context?.data_version);
+      let next = await realTradingService.getSimulationExecutionInputs(market,
+        useLatest ? undefined : context?.trade_date, useLatest ? undefined : context?.data_version);
       if (request !== sequence.current) return;
       if (!next || next.market !== market || next.execution_context.market !== market) {
         throw new Error('当前市场没有可用的模拟执行输入');
       }
-      if (context && (next.execution_context.trade_date !== context.trade_date || next.execution_context.data_version !== context.data_version)) {
+      if (useLatest && context && next.trade_dates.includes(context.trade_date)
+        && next.execution_context.trade_date !== context.trade_date) {
+        const version = next.execution_context.data_version;
+        next = await realTradingService.getSimulationExecutionInputs(market, context.trade_date, version);
+        if (request !== sequence.current) return;
+        if (!next || next.market !== market || next.execution_context.market !== market
+          || next.execution_context.trade_date !== context.trade_date || next.execution_context.data_version !== version) {
+          throw new Error('模拟执行日期或数据版本与请求不一致');
+        }
+      }
+      if (!useLatest && context && (next.execution_context.trade_date !== context.trade_date || next.execution_context.data_version !== context.data_version)) {
         throw new Error('模拟执行日期或数据版本与请求不一致');
       }
       const prepared = context ? {
         ...next,
-        execution_context: { ...next.execution_context, ...context },
+        execution_context: useLatest ? {
+          ...next.execution_context,
+          commission_rate: context.commission_rate,
+          slippage_bps: context.slippage_bps,
+        } : { ...next.execution_context, ...context },
       } : next;
       setInputs(prepared);
       setCommissionRate(Number(prepared.execution_context.commission_rate));
@@ -64,7 +79,7 @@ const SimulationExecutionInputForm: React.FC<Props> = ({
     const context = savedKey ? JSON.parse(savedKey) as DatedExecutionContext : undefined;
     void load(context?.market === market ? context : undefined);
     return () => { sequence.current += 1; };
-  }, [load, market, savedKey]);
+  }, [load, market, savedKey, runtimeActive]);
 
   const updateFees = (field: 'commission_rate' | 'slippage_bps', value: number | null) => {
     if (!inputs) return;
@@ -139,6 +154,11 @@ const SimulationExecutionInputForm: React.FC<Props> = ({
             </label>
           </div>
           <div className="text-xs text-slate-500">日线开盘价模拟（历史） · 自动托管使用已发布日线延迟模拟，执行计划日期之前的完整交易日日线 · 费用须与已初始化的模拟资金一致 · 数据版本 {inputs.execution_context.data_version}</div>
+          <div className="flex flex-wrap items-center gap-3">
+            <Button disabled={runtimeActive || loading || resetting || !feesReady}
+              onClick={() => void load(inputs.execution_context, true)}>选择最新发布</Button>
+            <span className="text-xs text-slate-500">保留账户费用；发布兼容性在调仓预案和执行前校验，选择操作不更改资金或持仓。</span>
+          </div>
           <div className="flex flex-wrap items-center gap-3">
             <InputNumber aria-label="初始模拟资金" placeholder={`初始资金（${inputs.currency}）`} className="!w-60"
               min={100000} step={100000} value={initialCash} disabled={loading || resetting}

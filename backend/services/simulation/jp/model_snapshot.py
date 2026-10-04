@@ -1,47 +1,58 @@
-"""Model-bound, dated native features for the common individual attribution API."""
-
-import pandas as pd
-import pyarrow.parquet as pq
+"""Exact inference inputs for the common individual attribution API."""
 
 from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
-from backend.shared.fundamental_aligner import FundamentalAligner
+from backend.services.engine.data_platform.quantdb_factor_reader import (
+    QuantDBFactorReader,
+)
+from backend.services.engine.inference.prediction_provenance import prediction_source
 from backend.shared.stock_utils import StockCodeUtil
 
 
-def read_model_snapshot(metadata, symbol, asof, feature_columns):
+def read_model_snapshot(metadata, symbol, asof, feature_columns, *, provenance=None):
     if str((metadata.get("context") or {}).get("market") or "").upper() != "JP":
         raise ValueError("Individual JP attribution requires a JP model")
-    declared = metadata.get("jp_data_version")
-    trained = (metadata.get("factor_coverage") or {}).get("jp_data_version")
-    if declared and trained and declared != trained:
-        raise ValueError("JP model publication metadata is inconsistent")
-    version = declared or trained
-    if not version:
-        raise ValueError("JP attribution requires the model's immutable publication")
-    hub = LOCAL_MARKET_PROVIDERS["JP"].open(version)
-    relative = "6_ml_datasets/l1_factors"
-    dates = hub._partition_dates(relative, end=asof)
-    if not dates:
+    source = prediction_source(provenance)
+    if not source:
+        raise ValueError("JP attribution requires the selected prediction's source")
+    if source["data_trade_date"] != asof.isoformat():
+        raise ValueError("JP attribution differs from the prediction input date")
+    hub = LOCAL_MARKET_PROVIDERS["JP"].open(source["data_version"])
+    reader = QuantDBFactorReader(hub.data_dir, market="JP")
+    dataset = str(metadata.get("factor_source") or "l1_factors")
+    mappings = metadata.get("factor_field_sources") or {}
+    columns = set(reader.describe(dataset).columns)
+    available = [
+        column for column in feature_columns if mappings.get(column, column) in columns
+    ]
+    if available != list(feature_columns):
+        raise ValueError("JP attribution is missing an inference feature")
+    if asof.isoformat() not in reader.available_dates(dataset):
         return None
-    schema = set().union(
-        *(
-            set(pq.read_schema(path).names)
-            for path in (hub.data_dir / relative / f"dt={dates[-1]}").glob("*.parquet")
+    frame = reader.read_day(
+        dataset,
+        features=available,
+        feature_sources=mappings,
+        trade_date=asof,
+    )
+    prep = metadata.get("preprocessing")
+    if isinstance(prep, dict) and prep.get("enabled"):
+        from backend.services.engine.inference.templates.inference_parquet import (
+            filter_untradable_rows,
+            preprocess,
         )
-    )
-    available = [column for column in feature_columns if column in schema]
-    if not available:
-        return None
-    frame = hub.fetch_latest_rows(
-        "qjp_l1_factors",
-        [StockCodeUtil.to_suffix(symbol, market="JP")],
-        dt=int(asof.strftime("%Y%m%d")),
-        lookback=FundamentalAligner.LOOKBACK_DAYS,
-        columns=available,
-    )
+
+        # Single-stock/pool inference filters output after full-day preprocessing.
+        # Normalize that same full tradable cross-section before selecting a row.
+        frame = filter_untradable_rows(frame)
+        x, symbols = preprocess(frame.copy(), metadata)
+        frame = frame.loc[:, ["symbol", "trade_date"]].copy()
+        frame[feature_columns] = x.to_numpy()
+        if frame.symbol.tolist() != symbols:
+            raise ValueError("JP preprocessing reordered attribution symbols")
+    frame = frame.loc[frame.symbol.eq(StockCodeUtil.to_prefix(symbol, market="JP"))]
     if frame.empty:
         return None
-    if frame.dt.gt(int(asof.strftime("%Y%m%d"))).any():
-        raise ValueError("JP attribution exceeds its requested date")
-    row = frame.sort_values("dt").iloc[-1]
-    return pd.Series({column: row[column] for column in available}), available
+    if len(frame) != 1 or not frame.trade_date.dt.date.eq(asof).all():
+        raise ValueError("JP attribution requires one exact input-day feature row")
+    # The shared reader applies inference mappings; retain the model's order.
+    return frame.iloc[0].loc[available], available

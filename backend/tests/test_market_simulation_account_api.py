@@ -246,6 +246,8 @@ async def test_native_read_ignores_cny_baselines_and_does_not_repair_cache(api):
     response = await api.http.get("/api/v1/simulation/account", params={"market": "JP"})
     assert response.status_code == 200, response.text
     data = response.json()["data"]
+    assert data["user_id"] == "7" and data["tenant_id"] == "test"
+    assert data["trading_mode"] == "simulation"
     assert data["initial_equity"] == 100000
     assert data["baseline"]["day_open_equity"] == 100000
     assert (
@@ -267,9 +269,46 @@ async def test_missing_checkpoint_never_reconstructs_cash_from_redis(api):
         response.status_code == 200
         and response.json()["data"]["account_not_initialized"]
     )
+    empty = response.json()["data"]
+    assert empty["market"] == "JP" and empty["currency"] == "JPY"
+    assert empty["user_id"] == "7" and empty["tenant_id"] == "test"
+    assert empty["trading_mode"] == "simulation" and empty["total_asset"] == 0
     assert api.pg.setup.redis.client.values == cache
     async with api.pg.sessions() as db:
         assert (await db.get(SimulationAccount, ROOT)).market_state is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("alias", ["admin", "0", "1", "00000001"])
+async def test_registered_account_http_preserves_canonical_admin_owner(
+    api, monkeypatch, alias
+):
+    from backend.services.simulation.services.dated_account import (
+        DatedSimulationAccountManager,
+    )
+
+    monkeypatch.setitem(globals(), "AUTH", AuthContext(alias, "test", alias, ["user"]))
+    async with api.pg.sessions() as db:
+        manager = DatedSimulationAccountManager(
+            db,
+            api.pg.setup.redis,
+            tenant_id="test",
+            user_id=10000001,
+            cash_rules=api.pg.setup.rules,
+        )
+        await manager.initialize(300000, DAY)
+        await db.commit()
+    cache = deepcopy(api.pg.setup.redis.client.values)
+    response = await api.http.get("/api/v1/simulation/account", params={"market": "JP"})
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["user_id"] == "10000001" and data["tenant_id"] == "test"
+    assert data["trading_mode"] == "simulation" and data["currency"] == "JPY"
+    assert data["cash"] == 300000
+    assert api.pg.setup.redis.client.values == cache
+    async with api.pg.sessions() as db:
+        root = await db.get(SimulationAccount, ROOT)
+        assert root.cash == 250000 and root.market_state is None
 
 
 @pytest.mark.asyncio

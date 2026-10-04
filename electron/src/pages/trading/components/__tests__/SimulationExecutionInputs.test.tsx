@@ -108,6 +108,52 @@ describe('common simulation controller input flow', () => {
     expect(mocks.reset).not.toHaveBeenCalled();
   });
 
+  it('selects a new publication and its added trading day through the existing manual page without changing saved fees or funds', async () => {
+    const saved = { ...inputs.execution_context, commission_rate: '0.002', slippage_bps: '8' };
+    mocks.account.mockResolvedValue({ cash: 300000, positions: { JP72030: { volume: 100 } }, execution_context: saved });
+    mocks.inputs.mockImplementation(async (_market: string, day?: string, version?: string) => {
+      const chosen = version || 'v2';
+      return {
+        ...structuredClone(inputs),
+        trade_dates: chosen === 'v2' ? [...inputs.trade_dates, '2026-10-01'] : inputs.trade_dates,
+        execution_context: { ...inputs.execution_context, data_version: chosen, trade_date: day || (chosen === 'v2' ? '2026-10-01' : '2026-09-30') },
+      };
+    });
+    render(<RealTradingPage />);
+    await waitFor(() => expect(screen.getByTestId('console-context')).toHaveTextContent('"data_version":"v1"'));
+    fireEvent.click(screen.getByRole('button', { name: '选择最新发布' }));
+    await waitFor(() => expect(screen.getByTestId('console-context')).toHaveTextContent('"data_version":"v2"'));
+    expect(screen.getByTestId('console-context')).toHaveTextContent('"trade_date":"2026-09-30"');
+    expect(mocks.inputs).toHaveBeenCalledWith('JP', '2026-09-30', 'v2');
+    await chooseDate('2026-10-01');
+    fireEvent.click(screen.getByRole('button', { name: '手动任务' }));
+    await waitFor(() => expect(screen.getByTestId('manual-context')).toHaveTextContent('"trade_date":"2026-10-01"'));
+    expect(screen.getByTestId('manual-context')).toHaveTextContent('"data_version":"v2"');
+    expect(screen.getByTestId('manual-context')).toHaveTextContent('"commission_rate":"0.002"');
+    expect(screen.getByTestId('manual-context')).toHaveTextContent('"slippage_bps":"8"');
+    expect(mocks.reset).not.toHaveBeenCalled();
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(mocks.account.mock.results.every(result => result.type === 'return')).toBe(true);
+  });
+
+  it('keeps hosted inputs fixed and ignores an in-flight latest-publication selection when runtime starts', async () => {
+    let resolve!: (value: SimulationExecutionInputs) => void;
+    const change = vi.fn();
+    const props = { market: 'JP', userId: '7', tenantId: 'test', savedContext: inputs.execution_context, runtimeActive: false, onChange: change, onAccountReset: vi.fn() };
+    const view = render(<SimulationExecutionInputForm {...props} />);
+    await screen.findByText(/日线开盘价模拟/);
+    mocks.inputs.mockImplementationOnce(() => new Promise<SimulationExecutionInputs>(done => { resolve = done; }));
+    fireEvent.click(screen.getByRole('button', { name: '选择最新发布' }));
+    view.rerender(<SimulationExecutionInputForm {...props} runtimeActive />);
+    await waitFor(() => expect(change).toHaveBeenLastCalledWith(expect.objectContaining({ execution_context: inputs.execution_context })));
+    await act(async () => { resolve({ ...inputs, trade_dates: ['2026-10-01'], execution_context: { ...inputs.execution_context, trade_date: '2026-10-01', data_version: 'v2' } }); });
+    expect(change).toHaveBeenLastCalledWith(expect.objectContaining({ execution_context: inputs.execution_context }));
+    expect(screen.getByRole('button', { name: '选择最新发布' })).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: '执行交易日' })).toBeDisabled();
+    expect(screen.getByRole('spinbutton', { name: '佣金比例' })).toBeDisabled();
+    expect(mocks.reset).not.toHaveBeenCalled();
+  });
+
   it('passes one confirmed context through the actual wizard, precheck and final start', async () => {
     render(<RealTradingPage />);
     await screen.findByText(/日线开盘价模拟/);

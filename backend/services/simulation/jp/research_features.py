@@ -37,6 +37,8 @@ def dated_metadata(hub, day):
 
 def read_projection(symbols, wanted, trade_date=None, data_version=None):
     # Freeze one registered publication for this request, including future labels.
+    if not data_version or not trade_date:
+        raise ValueError("JP features require the prediction's publication and input date")
     hub = LOCAL_MARKET_PROVIDERS["JP"].open(data_version)
     day = date.fromisoformat(trade_date[:10]) if trade_date else None
     if day is None:

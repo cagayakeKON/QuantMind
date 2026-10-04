@@ -1292,6 +1292,17 @@ class InferenceScriptRunner:
         # 各 run 互不删除，读侧按 run_id 取数）。
         # persist=False（个股独立路线）时跳过，只返回内存信号。
         pool_scoped = bool(pool_id)
+        if model_market == "JP":
+            source = {
+                "market": "JP",
+                "data_version": Path(publication_data_dir).name,
+                "data_trade_date": date,
+                "prediction_trade_date": prediction_trade_date,
+                "run_id": run_id,
+            }
+            # The source travels with each actual score, including persist=False
+            # and subsequent pred.parquet merges. Training metadata stays intact.
+            signals = [{**signal, "data_provenance": source} for signal in signals]
         if persist:
             self._persist_and_publish(
                 run_id,
@@ -1977,6 +1988,14 @@ class InferenceScriptRunner:
         for idx, (sym, score) in enumerate(zip(symbols, scores, strict=True)):
             signal_side = signal_sides[idx]
             quality_parts = {"consensus": consensus_list[idx]} if has_consensus else {}
+            if model_market == "JP":
+                quality_parts["data_provenance"] = {
+                    "market": "JP",
+                    "data_version": Path(publication_data_dir).name,
+                    "data_trade_date": inference_date,
+                    "prediction_trade_date": prediction_trade_date,
+                    "run_id": run_id,
+                }
             if has_zfusion:
                 quality_parts["zfusion"] = round(zfusion_list[idx], 6)
             if has_detail:

@@ -182,11 +182,36 @@ async def get_batch_features(
     current_user: dict = Depends(get_current_user),
 ):
     """批量 QuantDB 特征投影：按 fields 返回指定字段（按需加载）。"""
-    _ = current_user
     if req.market.upper() == "JP":
-        return await get_batch_full_features_service(
-            req.symbols, req.fields, req.trade_date, req.market, req.data_version
+        if not req.model_id or not req.trade_date:
+            raise HTTPException(422, "JP features require the selected model and input date")
+        from backend.shared.stock_utils import StockCodeUtil
+
+        tid, uid = str(current_user["tenant_id"]), str(current_user["user_id"])
+        rows = await _research_service.selected_prediction_rows(
+            tid, uid, req.model_id, req.trade_date, req.run_id
         )
+        sources = {row["symbol"]: row.get("data_provenance") for row in rows}
+        groups, warnings = {}, {}
+        for symbol in req.symbols:
+            prefix = StockCodeUtil.to_prefix(symbol, market="JP")
+            source = sources.get(prefix)
+            if not source:
+                warnings[prefix] = "Prediction has no recorded input publication"
+                continue
+            if req.data_version and req.data_version != source["data_version"]:
+                raise HTTPException(409, "Requested publication differs from the prediction source")
+            groups.setdefault(source["data_version"], []).append(prefix)
+        items = []
+        for version, symbols in groups.items():
+            payload = await get_batch_full_features_service(
+                symbols, req.fields, req.trade_date, "JP", version
+            )
+            for item in payload["data"]["items"]:
+                prefix = StockCodeUtil.to_prefix(item["symbol"], market="JP")
+                item.update(dataVersion=version, dataProvenance=sources[prefix])
+                items.append(item)
+        return {"code": 200, "data": {"items": items, "sourceWarnings": warnings}}
     return await get_batch_full_features_service(req.symbols, req.fields, req.trade_date)
 
 

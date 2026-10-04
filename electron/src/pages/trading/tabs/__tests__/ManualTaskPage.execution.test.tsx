@@ -133,6 +133,18 @@ describe('common manual task optional market inputs', () => {
     expect(mocks.create).not.toHaveBeenCalled();
   }, 20000);
 
+  it('rejects an incompatible newer publication through the original read-only preview and never submits or resets funds', async () => {
+    const next = { ...context, trade_date: '2026-10-01', data_version: 'v2', commission_rate: '0.002', slippage_bps: '8' };
+    mocks.preview.mockRejectedValue({ response: { status: 409, data: { detail: 'JP publication is incompatible with the committed account checkpoint' } }, message: 'JP publication is incompatible with the committed account checkpoint' });
+    render(<ManualTaskPage {...props} executionContext={next} executionCurrency="JPY" requiresExecutionInputs />);
+    await reachPreview();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: '立即计算调仓预案' })); });
+    expect(mocks.preview.mock.lastCall![0].execution_context).toEqual(next);
+    expect(screen.getByRole('button', { name: '下一步' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: '推送执行' })).not.toBeInTheDocument();
+    expect(mocks.create).not.toHaveBeenCalled();
+  }, 20000);
+
   it.each([undefined, { ...context, market: 'CN' }])('does not generate an undated or mismatched preview while dated inputs are required', async inputs => {
     render(<ManualTaskPage {...props} executionContext={inputs} requiresExecutionInputs />);
     await reachPreview();

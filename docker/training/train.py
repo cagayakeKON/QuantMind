@@ -1047,8 +1047,21 @@ def main() -> int:
         explain_cfg = _normalize_explain_cfg(cfg.get("explain") or {})
         context_cfg = cfg.get("context", {}) or {}
         market = str(context_cfg.get("market", "CN")).upper()
+        jp_prediction_publication = None
         if market == "JP":
             from backend.services.engine.data_platform.jp_labels import label_formula
+            from backend.services.engine.data_platform.quantdb_factor_reader import QuantDBFactorReader
+            # Freeze the exact source before load_data and preserve it in output.
+            jp_prediction_publication = str(QuantDBFactorReader(
+                cfg["data"].get("quantdb_dir") or os.getenv("QUANTJP_DATA_DIR") or None,
+                market="JP",
+            ).data_dir)
+            cfg["data"]["quantdb_dir"] = jp_prediction_publication
+            coverage = dict(cfg["data"].get("factor_coverage") or {})
+            if coverage.get("jp_data_version") not in (None, Path(jp_prediction_publication).name):
+                raise ValueError("JP training publication differs from submitted coverage")
+            coverage["jp_data_version"] = Path(jp_prediction_publication).name
+            cfg["data"]["factor_coverage"] = coverage
             label_cfg = cfg.setdefault("label", {})
             label_cfg["label_formula"] = label_formula(
                 int(label_cfg.get("target_horizon_days") or 1),
@@ -1217,6 +1230,9 @@ def main() -> int:
 
             # 保存预测
             pred_path = workspace / "pred.parquet"
+            if market == "JP":
+                from backend.services.engine.inference.prediction_provenance import stamp_training_predictions
+                pred_df = stamp_training_predictions(pred_df, jp_prediction_publication, run_id)
             pred_df.to_parquet(pred_path, engine="pyarrow", compression="zstd", index=False)
             logger.info(f"Predictions saved to {pred_path}")
 
@@ -1435,6 +1451,9 @@ def main() -> int:
 
             # 保存预测结果（parquet 压缩用于存档，比 pickle 小 ~10x）
             pred_path = workspace / "pred.parquet"
+            if market == "JP":
+                from backend.services.engine.inference.prediction_provenance import stamp_training_predictions
+                pred_df = stamp_training_predictions(pred_df, jp_prediction_publication, run_id)
             pred_df.to_parquet(pred_path, engine="pyarrow", compression="zstd", index=False)
             logger.info(f"Predictions saved to {pred_path} ({pred_path.stat().st_size/1024/1024:.1f} MB)")
 

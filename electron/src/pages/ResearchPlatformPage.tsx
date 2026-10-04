@@ -892,7 +892,8 @@ export const ResearchPlatformPage: React.FC = () => {
     // 变化时 context 不变，仍强制重拉，保证 pred.parquet 最新分数被读回。
     const isContextSwitch = dateContext !== prevDateContext.current;
     prevDateContext.current = dateContext;
-    const cached = isContextSwitch ? researchDateCache.get(dateContext) : undefined;
+    // JP 同日可以分批补推；模型/日期不足以标识每行实际使用的发布。
+    const cached = isContextSwitch && currentMarket !== 'JP' ? researchDateCache.get(dateContext) : undefined;
     if (cached) {
       setCandidatePool(cached.candidatePool);
       setOverview(cached.overview);
@@ -904,6 +905,7 @@ export const ResearchPlatformPage: React.FC = () => {
     let cancelled = false;
     const loadUniverse = async () => {
       setOverviewLoading(true);
+      if (currentMarket === 'JP') setUniverseFeatures({});
       try {
         const result = await researchService.getResearchUniverseByDate(selectedModelId, selectedDate, 10000);
         if (cancelled) return;
@@ -957,7 +959,7 @@ export const ResearchPlatformPage: React.FC = () => {
           overview: result,
           // 切日期可复用已富化特征；点「刷新数据」必须清空，否则会一直命中
           // 旧的 return10d 空值，宽表回填后前端仍显示 “-”。
-          universeFeatures: isContextSwitch
+          universeFeatures: isContextSwitch && currentMarket !== 'JP'
             ? (researchDateCache.get(dateContext)?.universeFeatures ?? {})
             : {},
         });
@@ -970,7 +972,7 @@ export const ResearchPlatformPage: React.FC = () => {
     };
     void loadUniverse();
     return () => { cancelled = true; };
-  }, [selectedModelId, selectedDate, appliedFilters.minScore, appliedFilters.excludeSt, refreshNonce, loadRange]);
+  }, [selectedModelId, selectedDate, appliedFilters.minScore, appliedFilters.excludeSt, refreshNonce, loadRange, currentMarket === 'JP']);
 
   const handleSyncCandidates = async () => {
     if (!selectedModelId) {
@@ -1044,7 +1046,7 @@ export const ResearchPlatformPage: React.FC = () => {
    */
   const projectionMarket = currentMarket === 'JP' ? 'JP' : 'legacy';
   React.useEffect(() => {
-    if (projectionMarket === 'JP' && (overview?.market !== 'JP' || !overview?.dataVersion)) {
+    if (projectionMarket === 'JP' && (overview?.market !== 'JP' || !selectedModelId)) {
       setUniverseFeatures({});
       setUniverseFeaturesLoading(false);
       return;
@@ -1060,17 +1062,18 @@ export const ResearchPlatformPage: React.FC = () => {
     // 命中内存缓存：universeFeatures 已完整写入则直接恢复，不再请求 QuantDB 宽表
     const cacheKey = `${selectedModelId}|${selectedDate}`;
     const cachedUniverse = researchDateCache.get(cacheKey)?.universeFeatures;
-    if (cachedUniverse && Object.keys(cachedUniverse).length) {
+    if (projectionMarket !== 'JP' && cachedUniverse && Object.keys(cachedUniverse).length) {
       setUniverseFeatures(cachedUniverse);
       setUniverseFeaturesLoading(false);
       return;
     }
 
     let cancelled = false;
+    if (projectionMarket === 'JP') setUniverseFeatures({});
     setUniverseFeaturesLoading(true);
     const request = projectionMarket === 'JP'
       ? researchService.getProjectedQuantDbFeatures(symbols, QUANTDB_PROJECTION_FIELDS, selectedDate,
-        { market: 'JP', dataVersion: overview?.dataVersion })
+        { market: 'JP', modelId: selectedModelId })
       : researchService.getProjectedQuantDbFeatures(symbols, QUANTDB_PROJECTION_FIELDS, selectedDate);
     void request
       .then((bySymbol) => {
@@ -1794,6 +1797,12 @@ export const ResearchPlatformPage: React.FC = () => {
               </Button>
             </div>
           </header>
+
+          {projectionMarket === 'JP' && candidatePool.some(item => item.sourceWarning) && (
+            <div role="status" className="px-5 py-2 text-xs text-amber-700">
+              部分历史预测未记录数据来源，无法显示对应价格、因子与归因。预测分数仍可查看。
+            </div>
+          )}
 
           <div className="flex min-h-0 flex-1 flex-col">
             {/* 底部按 Dock 高度预留，并上探 12px 让左右两栏尽量吃满可视高度 */}

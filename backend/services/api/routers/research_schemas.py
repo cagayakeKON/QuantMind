@@ -21,6 +21,8 @@ class BatchFeaturesRequest(BaseModel):
     trade_date: str | None = None
     market: str = "CN"
     data_version: str | None = None
+    model_id: str | None = None
+    run_id: str | None = None
 
 
 class WatchlistAddRequest(BaseModel):

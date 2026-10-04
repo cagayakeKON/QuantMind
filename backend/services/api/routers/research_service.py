@@ -1916,28 +1916,55 @@ async def _jp_snapshot_scores(tid, uid, model_id, run_id, trade_date):
         rows = (
             await session.execute(
                 text(
-                    "SELECT symbol, fusion_score, score_rank FROM qm_research_candidate_snapshot "
-                    "WHERE tenant_id=:tid AND user_id=:uid AND model_id=:mid AND run_id=:rid "
-                    "AND data_trade_date=CAST(:day AS DATE) ORDER BY score_rank ASC"
+                    "SELECT c.symbol, c.fusion_score, c.score_rank, e.quality "
+                    "FROM qm_research_candidate_snapshot c LEFT JOIN engine_signal_scores e "
+                    "ON e.tenant_id=c.tenant_id AND e.user_id=c.user_id "
+                    "AND e.run_id=c.run_id AND e.symbol=c.symbol "
+                    "WHERE c.tenant_id=:tid AND c.user_id=:uid AND c.model_id=:mid AND c.run_id=:rid "
+                    "AND c.data_trade_date=CAST(:day AS DATE) ORDER BY c.score_rank ASC"
                 ),
                 {
                     "tid": tid,
                     "uid": uid,
                     "mid": model_id,
                     "rid": run_id,
-                    "day": trade_date,
+                    "day": date.fromisoformat(trade_date),
                 },
             )
         ).all()
-    return [
+    from backend.services.engine.inference.prediction_provenance import prediction_source
+    result = [
         {
             "symbol": StockCodeUtil.to_prefix(row[0], market="JP"),
             "score": float(row[1]),
             "rank": int(row[2] or 0),
+            "data_provenance": prediction_source(row[3]),
         }
         for row in rows
         if row[1] is not None and math.isfinite(float(row[1]))
     ]
+    for row in result:
+        source = row.get("data_provenance")
+        if source and (source["data_trade_date"] != trade_date or source["run_id"] != run_id):
+            raise ValueError("Snapshot score differs from its recorded prediction source")
+    return result
+
+
+async def selected_prediction_rows(tid, uid, model_id, trade_date, run_id=None):
+    """Owned JP prediction rows; each retains its actual inference source."""
+    from backend.services.engine.inference.prediction_provenance import read_pred_sources
+
+    path, market, _ = await _model_market(tid, uid, model_id, include_metadata=True)
+    if market != "JP":
+        raise ValueError("The selected research model is not Japanese")
+    if run_id:
+        return await _jp_snapshot_scores(tid, uid, model_id, run_id, trade_date)
+    rows = await asyncio.to_thread(read_pred_sources, Path(path) / "pred.parquet", trade_date) if path else []
+    if not rows:
+        saved = await _best_snapshot_run_for_date(tid, uid, model_id, date.fromisoformat(trade_date))
+        if saved:
+            rows = await _jp_snapshot_scores(tid, uid, model_id, saved, trade_date)
+    return rows
 
 
 async def get_research_universe_by_date(
@@ -1951,17 +1978,21 @@ async def get_research_universe_by_date(
     trade_date = str(trade_date)[:10]
     cache_key = f"date:{tid}:{uid}:{model_id}:{trade_date}:{limit}:{offset}"
     cached = _get_local_cache(_UNIVERSE_CACHE, cache_key, _UNIVERSE_CACHE_TTL_SECONDS)
-    if cached is not None:
+    if cached is not None and (cached.get("data") or {}).get("market") != "JP":
         return cached
 
     storage_path, _market, metadata = await _model_market(
         tid, uid, model_id, include_metadata=True
     )
-    pred_rows = await asyncio.to_thread(_read_model_pred_day, storage_path, trade_date) if storage_path else []
+    if _market == "JP":
+        from backend.services.engine.inference.prediction_provenance import read_pred_sources
+        pred_rows = await asyncio.to_thread(read_pred_sources, Path(storage_path) / "pred.parquet", trade_date) if storage_path else []
+    else:
+        pred_rows = await asyncio.to_thread(_read_model_pred_day, storage_path, trade_date) if storage_path else []
     snapshot_run = None
     if not pred_rows:
         # 兜底：该日无 parquet 分数 → 候选池快照（同日行数最多的 run）
-        snap_run = await _best_snapshot_run_for_date(tid, uid, model_id, trade_date)
+        snap_run = await _best_snapshot_run_for_date(tid, uid, model_id, date.fromisoformat(trade_date) if _market == "JP" else trade_date)
         if snap_run:
             if _market == "JP":
                 pred_rows = await _jp_snapshot_scores(
@@ -1975,6 +2006,8 @@ async def get_research_universe_by_date(
                 "code": 200,
                 "data": {"items": [], "summary": dict(_EMPTY_UNIVERSE_SUMMARY)},
             }
+            if _market == "JP":
+                payload["data"]["market"] = "JP"
             _set_local_cache(
                 _UNIVERSE_CACHE, cache_key, payload, _UNIVERSE_CACHE_MAX_ENTRIES
             )
@@ -1999,16 +2032,16 @@ async def get_research_universe_by_date(
         from backend.services.engine.data_platform.market_provider import (
             LOCAL_MARKET_PROVIDERS,
         )
-        from backend.services.simulation.jp.research_features import (
-            dated_metadata,
-            model_publication,
-        )
-
-        jp_version = model_publication(metadata)
-        hub = LOCAL_MARKET_PROVIDERS["JP"].open(jp_version)
-        quantdb_meta = await asyncio.to_thread(
-            dated_metadata, hub, date.fromisoformat(trade_date)
-        )
+        from backend.services.simulation.jp.research_features import dated_metadata
+        sources = {r["data_provenance"]["data_version"] for r in pred_rows if r.get("data_provenance")}
+        jp_version = next(iter(sources)) if len(sources) == 1 and all(r.get("data_provenance") for r in pred_rows) else None
+        quantdb_meta = {}
+        for version in sources:
+            hub = LOCAL_MARKET_PROVIDERS["JP"].open(version)
+            names = await asyncio.to_thread(dated_metadata, hub, date.fromisoformat(trade_date))
+            for r in pred_rows:
+                if (r.get("data_provenance") or {}).get("data_version") == version and r["symbol"] in names:
+                    quantdb_meta[r["symbol"]] = names[r["symbol"]]
         quantdb_names = {
             StockCodeUtil.to_suffix(symbol, market="JP"): row["stock_name"]
             for symbol, row in quantdb_meta.items()
@@ -2075,8 +2108,12 @@ async def get_research_universe_by_date(
 
     payload = {"code": 200, "data": {"items": items, "summary": summary}}
     if _market == "JP":
+        for item, row in zip(items, pred_rows[offset:offset + limit], strict=True):
+            item["dataProvenance"] = row.get("data_provenance")
+            item["dataVersion"] = (row.get("data_provenance") or {}).get("data_version")
+            item["sourceWarning"] = None if row.get("data_provenance") else "Prediction input provenance is unavailable"
         payload["data"].update(
-            {"market": "JP", "dataVersion": jp_version, "currency": "JPY"}
+            {"market": "JP", "dataVersion": jp_version, "currency": "JPY", "sourceWarning": None if jp_version else "Prediction inputs have missing or mixed provenance; resolve features per symbol"}
         )
     _set_local_cache(_UNIVERSE_CACHE, cache_key, payload, _UNIVERSE_CACHE_MAX_ENTRIES)
     return payload
@@ -2504,7 +2541,8 @@ def _snapshot_symbol(market: str, normalized_symbol: str) -> str:
 
 
 def _compute_shap_drivers_sync(
-    model_id: str, normalized_symbol: str, as_of_date_str: str, market: str
+    model_id: str, normalized_symbol: str, as_of_date_str: str, market: str,
+    *, provenance=None, model_storage_path=None,
 ) -> list[dict[str, Any]] | None:
     """加载 headline 树模型 + 该标的快照真实特征，原生 pred_contrib 取 |SHAP| top6。
 
@@ -2516,7 +2554,16 @@ def _compute_shap_drivers_sync(
     import glob as _glob
     from pathlib import Path
 
-    metas = _glob.glob(f"/app/models/users/*/*/{model_id}/metadata.json")
+    if market.upper() == "JP":
+        if not model_storage_path or not provenance:
+            return None
+        if str(provenance.get("run_id") or "").startswith("training:"):
+            # Training split/fold preprocessing may differ from live inference.
+            # Its publication is known, but a live transform cannot explain it.
+            return None
+        metas = [str(Path(model_storage_path) / "metadata.json")]
+    else:
+        metas = _glob.glob(f"/app/models/users/*/*/{model_id}/metadata.json")
     if not metas:
         return None
     try:
@@ -2548,7 +2595,8 @@ def _compute_shap_drivers_sync(
         module, function = native_loader.rsplit(".", 1)
         try:
             snapshot = getattr(import_module(module), function)(
-                meta, normalized_symbol, d_ref, feat_cols
+                meta, normalized_symbol, d_ref, feat_cols,
+                **({"provenance": provenance} if market.upper() == "JP" else {}),
             )
         except Exception as exc:
             logger.warning("%s model feature attribution unavailable: %s", market, exc)
@@ -2593,6 +2641,9 @@ def _compute_shap_drivers_sync(
         dtype=np.float64,
     )
     # 仅真实快照值参与排名（fill 的 qlib 表达式因子不进 top6）
+    if market.upper() == "JP":
+        # The shared live inference template supplies tree models float32 inputs.
+        x = x.astype(np.float32)
     real_cols = {c for c in avail if pd.notna(row.get(c))}
 
     model_file = Path(metas[0]).parent / str(meta.get("model_file") or "")
@@ -2731,6 +2782,8 @@ async def predict_single_stock(
     selected_model = None
     if model_id:
         selected_model = next((m for m in available_models if m.get("modelId") == model_id), None)
+        if market.upper() == "JP" and not selected_model:
+            raise HTTPException(404, "Selected JP model is not registered for this user")
     if not selected_model and available_models:
         selected_model = available_models[0]
 
@@ -2786,9 +2839,14 @@ async def predict_single_stock(
                 )
                 storage_path = str(resolved.storage_path)
                 # ① pred.parquet 单标的直读（不物化分片、不写库）
-                hit = _read_pred_single_symbol(
-                    storage_path, requested_date.isoformat(), normalized_symbol
-                )
+                source = None
+                if market.upper() == "JP":
+                    from backend.services.engine.inference.prediction_provenance import read_pred_sources
+                    hits = await asyncio.to_thread(read_pred_sources, Path(storage_path) / "pred.parquet", requested_date.isoformat(), normalized_symbol)
+                    hit = hits[0]["score"] if hits else None
+                    source = hits[0]["data_provenance"] if hits else None
+                else:
+                    hit = _read_pred_single_symbol(storage_path, requested_date.isoformat(), normalized_symbol)
                 hit_date = requested_date.isoformat()
                 live_signal: dict[str, Any] | None = None
                 if hit is None:
@@ -2807,7 +2865,14 @@ async def predict_single_stock(
                         continue
                     # 回退后的数据日可能有 parquet（请求日无数据但回退日有），再试一次
                     rolled = str(execution.get("data_trade_date") or hit_date)
-                    hit = _read_pred_single_symbol(storage_path, rolled, normalized_symbol)
+                    if market.upper() == "JP":
+                        if rolled != requested_date.isoformat():
+                            raise ValueError("JP prediction requires the exact requested input day")
+                        hits = await asyncio.to_thread(read_pred_sources, Path(storage_path) / "pred.parquet", rolled, normalized_symbol)
+                        hit = hits[0]["score"] if hits else None
+                        source = hits[0]["data_provenance"] if hits else None
+                    else:
+                        hit = _read_pred_single_symbol(storage_path, rolled, normalized_symbol)
                     hit_date = rolled
                     if hit is None:
                         # ③ 取内存信号（已按 symbols 过滤，仅含目标股）
@@ -2821,6 +2886,8 @@ async def predict_single_stock(
                         if live_signal is None:
                             continue
                 if live_signal is not None:
+                    if market.upper() == "JP":
+                        source = live_signal.get("data_provenance")
                     fusion = float(live_signal["score"])
                     side = InferenceScriptRunner._resolve_signal_sides(
                         [fusion], [int(live_signal.get("consensus") or 0)]
@@ -2835,7 +2902,7 @@ async def predict_single_stock(
                         "fusion_score": fusion,
                         "signal_side": side,
                         "score_rank": None,
-                        "quality": None,
+                        "quality": {"data_provenance": source} if market.upper() == "JP" else None,
                         "expected_price": None,
                         "run_model_id": exec_mid,
                         "run_id": None,
@@ -2895,6 +2962,12 @@ async def predict_single_stock(
             else:
                 date_filter = "" if execute else " AND e.trade_date <= :d"
             params = dict(score_params)
+            owner_filter = ""
+            if market.upper() == "JP":
+                owner_filter = " AND e.user_id=:uid"
+                params["uid"] = uid
+                params["d"] = score_params["d"].isoformat()
+                date_filter = " AND (e.quality->'data_provenance'->>'data_trade_date' = :d OR (e.quality->'data_provenance' IS NULL AND CAST(e.trade_date AS TEXT)=:d))"
             if not date_filter:
                 params.pop("d", None)  # SQL 无 :d 占位符时不能传多余绑定
             score_rows = (
@@ -2909,7 +2982,7 @@ async def predict_single_stock(
                         WHERE e.tenant_id = :tid
                           AND e.symbol = ANY(:s_variants)
                         """
-                        + date_filter
+                        + owner_filter + date_filter
                         + """
                         ORDER BY e.trade_date DESC, e.created_at DESC
                         """
@@ -2919,6 +2992,10 @@ async def predict_single_stock(
             ).mappings().all()
     except Exception as exc:
         logger.warning(f"[predict_single_stock] 查询 engine_signal_scores 失败: {exc}")
+
+    if market.upper() == "JP":
+        owned_ids = {m.get("modelId") for m in available_models}
+        score_rows = [row for row in score_rows if row.get("run_model_id") in owned_ids]
 
     resolved_date = latest_date
     main_row = None
@@ -2941,7 +3018,7 @@ async def predict_single_stock(
         )
         if model_id:
             main_row = next((r for r in day_rows if r["run_model_id"] == model_id), None)
-        if main_row is None and pool:
+        if main_row is None and pool and not (market.upper() == "JP" and model_id):
             main_row = max(pool, key=lambda r: float(r["fusion_score"] or 0.0))
         seen: set[str] = set()
         for r in sorted(pool, key=lambda x: float(x["fusion_score"] or 0.0), reverse=True):
@@ -2964,7 +3041,7 @@ async def predict_single_stock(
             key=lambda r: float(r["fusion_score"] or 0.0),
             reverse=True,
         )
-        for qr in score_rows or []:
+        for qr in (score_rows or []) if market.upper() != "JP" else []:
             if str(qr.get("trade_date")) != resolved_date:
                 continue
             if (qr.get("run_model_id") or qr.get("run_id")) not in {
@@ -2998,6 +3075,12 @@ async def predict_single_stock(
                     if not sp:
                         continue
                     sc = _read_pred_single_symbol(sp, fallback_date, normalized_symbol)
+                    source = None
+                    if market.upper() == "JP":
+                        from backend.services.engine.inference.prediction_provenance import read_pred_sources
+                        hits = await asyncio.to_thread(read_pred_sources, Path(sp) / "pred.parquet", target_date or date_bound_str, normalized_symbol)
+                        sc = hits[0]["score"] if hits else None
+                        source = hits[0]["data_provenance"] if hits else None
                     if sc is None:
                         continue
                     side = "BUY" if sc > 0.2 else ("SELL" if sc < -0.2 else "HOLD")
@@ -3006,7 +3089,7 @@ async def predict_single_stock(
                             "fusion_score": float(sc),
                             "signal_side": side,
                             "score_rank": None,
-                            "quality": None,
+                            "quality": {"data_provenance": source} if market.upper() == "JP" else None,
                             "expected_price": None,
                             "run_model_id": mid,
                             "run_id": None,
@@ -3017,8 +3100,9 @@ async def predict_single_stock(
                     continue
             # 若补齐后主分仍为空（极早日期且独立路线未命中），用补齐首个当主分
             if main_row is None and consensus_rows:
-                main_row = dict(consensus_rows[0])
-                resolved_date = str(main_row.get("trade_date") or fallback_date)
+                fallback_row = next((row for row in consensus_rows if row["run_model_id"] == chosen_model_id), None) if market.upper() == "JP" else consensus_rows[0]
+                main_row = dict(fallback_row) if fallback_row else None
+                resolved_date = str((main_row or {}).get("trade_date") or fallback_date)
         except Exception:  # noqa: BLE001
             pass
 
@@ -3056,6 +3140,32 @@ async def predict_single_stock(
             detail="该标的没有真实模型推理结果；请点击“开始预测推理”执行模型后重试",
         )
 
+    jp_source = None
+    shap_kwargs = {}
+    if market.upper() == "JP":
+        from backend.services.engine.inference.prediction_provenance import prediction_source
+        from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
+        jp_source = prediction_source(main_row.get("quality"))
+        latest_close = 0.0
+        if jp_source:
+            if main_row.get("run_id") and jp_source["run_id"] != main_row["run_id"]:
+                raise HTTPException(409, "Prediction run differs from its input provenance")
+            if target_date and jp_source["data_trade_date"] != target_date:
+                raise HTTPException(409, "Prediction differs from the requested input day")
+            resolved_date = jp_source["data_trade_date"]
+            hub = LOCAL_MARKET_PROVIDERS["JP"].open(jp_source["data_version"])
+            day = date.fromisoformat(resolved_date)
+            bars = await asyncio.to_thread(hub.fetch_daily_kline_batch, [StockCodeUtil.to_suffix(normalized_symbol, market="JP")], day, day, adjust="none")
+            if not bars.empty:
+                latest_close = float(bars.iloc[0].close)
+            from backend.services.simulation.jp.research_features import dated_metadata
+            names = await asyncio.to_thread(dated_metadata, hub, day)
+            stock_name = (names.get(normalized_symbol) or {}).get("stock_name") or normalized_symbol
+            owned_path, owned_market = await _model_market(tid, uid, chosen_model_id)
+            if owned_market != "JP":
+                raise HTTPException(409, "Prediction model market differs")
+            shap_kwargs = {"provenance": jp_source, "model_storage_path": owned_path}
+
     # SHAP 归因
     drivers_source = None
     try:
@@ -3066,6 +3176,7 @@ async def predict_single_stock(
                 normalized_symbol,
                 resolved_date,
                 market,
+                **shap_kwargs,
             ),
             timeout=_SHAP_TIMEOUT_SEC,
         )
@@ -3081,7 +3192,7 @@ async def predict_single_stock(
     confidence = 0.0
     forecast_curve: list[dict[str, Any]] = []
     forecast_warning: str | None = None
-    curr_p = latest_close if latest_close > 0 else 100.0
+    curr_p = latest_close if latest_close > 0 else (None if market.upper() == "JP" else 100.0)
     quantile_prediction: dict[str, Any] | None = None
     if main_row is not None:
         quality = main_row.get("quality")
@@ -3090,7 +3201,7 @@ async def predict_single_stock(
                 quality = json.loads(quality)
             except (TypeError, ValueError):
                 quality = None
-        if isinstance(quality, dict):
+        if isinstance(quality, dict) and (market.upper() != "JP" or (jp_source and curr_p is not None)):
             detail = quality.get("detail")
             candidate = detail.get("quantile_prediction") if isinstance(detail, dict) else None
             if isinstance(candidate, dict):
@@ -3190,4 +3301,8 @@ async def predict_single_stock(
         "drivers_source": drivers_source,
         "error": None,
     }
+    if market.upper() == "JP":
+        payload_data.update(dataProvenance=jp_source, dataVersion=(jp_source or {}).get("data_version"), sourceWarning=None if jp_source else "Prediction has no recorded input publication; attribution is unavailable")
+        if jp_source and jp_source["run_id"].startswith("training:"):
+            payload_data["sourceWarning"] = "Training prediction source is fixed; split/fold model input attribution is unavailable"
     return {"code": 200, "data": payload_data}

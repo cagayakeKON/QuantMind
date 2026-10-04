@@ -81,6 +81,10 @@ describe('useIntelligenceCharts', () => {
                 return cursor.toISOString().slice(0, 10);
             });
         vi.mocked(realTradingService.getRuntimeAccount).mockResolvedValue(null as any);
+        vi.mocked(portfolioService.getDailyReturns).mockResolvedValue([]);
+        vi.mocked(portfolioService.getPositionDistribution).mockResolvedValue([]);
+        vi.mocked(tradingService.getTradeStats).mockResolvedValue([]);
+        vi.mocked(realTradingService.getAccountLedgerDaily).mockResolvedValue([]);
         vi.mocked(realTradingService.getSimulationDailySnapshots).mockResolvedValue([] as any);
         vi.mocked(tradingService.getSimulationTradeStatsOverview).mockResolvedValue(null as any);
         // Setup default mock implementation for onMessage to return unsubscribe function
@@ -93,6 +97,7 @@ describe('useIntelligenceCharts', () => {
         vi.mocked(authService.getStoredUser).mockReturnValue({id: '7'} as any);
         vi.mocked(realTradingService.getRuntimeAccount).mockResolvedValue({
             cash: 20000, total_asset: 30000, today_pnl: 0, positions: {},
+            market: 'JP', currency: 'JPY', user_id: '7', tenant_id: 'default', trading_mode: 'simulation',
             metrics_meta: {as_of: '2023-01-03', today_pnl_available: true},
         } as any);
         vi.mocked(tradingService.getTradeStats).mockResolvedValue([]);
@@ -105,6 +110,151 @@ describe('useIntelligenceCharts', () => {
         expect(portfolioService.getPositionDistribution).not.toHaveBeenCalled();
         expect(result.current.data.dailyReturn.at(-1)?.value).toBe(0);
         unmount();
+    });
+
+    const jpAccount = (cash = 300, user = '7', tenant = 'default') => ({
+        market: 'JP', currency: 'JPY', user_id: user, tenant_id: tenant, trading_mode: 'simulation',
+        cash, total_asset: cash, positions: {}, metrics_meta: {as_of: '2023-01-03'},
+    });
+
+    const selectMarket = (market: string) => vi.mocked(useAppSelector).mockImplementation((selector: any) =>
+        selector({ui: {currentMarket: market, tradingMode: 'simulation'}}));
+
+    it('rejects legacy or wrong-owner WS updates on JP while accepting scoped JPY updates', async () => {
+        selectMarket('JP');
+        vi.mocked(realTradingService.getRuntimeAccount).mockResolvedValue(jpAccount() as any);
+        let callback!: (type: string, data: any) => void;
+        mockOnMessage.mockImplementation(cb => { callback = cb; return () => {}; });
+        const {result} = renderHook(() => useIntelligenceCharts('7', {tradingMode: 'simulation'}));
+        await waitFor(() => expect(result.current.loading).toBe(false));
+        const before = result.current.data;
+        const scoped = {market: 'JP', currency: 'JPY', user_id: '00000007', tenant_id: 'default', trading_mode: 'simulation'};
+        const send = (scope: any) => act(() => callback('chart_update', {data: {chartType: 'dailyReturn', value: 200, ...scope}}));
+        for (const scope of [{}, {...scoped, market: 'CN', currency: 'CNY'}, {...scoped, currency: 'CNY'},
+            {...scoped, user_id: '8'}, {...scoped, tenant_id: 'other'}, {...scoped, trading_mode: 'real'}]) {
+            send(scope);
+            expect(result.current.data).toBe(before);
+        }
+        send(scoped);
+        expect(result.current.data.dailyReturn.at(-1)?.value).toBe(200);
+        act(() => callback('chart_update', {market: 'CN', data: {chartType: 'dailyReturn', value: 999, ...scoped}}));
+        expect(result.current.data.dailyReturn.at(-1)?.value).toBe(200);
+    });
+
+    it.each(['wrong-market', 'wrong-user', 'missing-source', 'wrong-context', 'wrong-metric-currency'])('rejects %s HTTP account data on JP', async (fault) => {
+        selectMarket('JP');
+        const account = fault === 'missing-source' ? {cash: 200, total_asset: 200, positions: {}} :
+            {...jpAccount(), ...(fault === 'wrong-market' ? {market: 'CN', currency: 'CNY'} :
+                fault === 'wrong-context' ? {execution_context: {market: 'CN'}} :
+                fault === 'wrong-metric-currency' ? {metrics_meta: {currency: 'CNY'}} : {user_id: '8'})};
+        vi.mocked(realTradingService.getRuntimeAccount).mockResolvedValue(account as any);
+        const {result} = renderHook(() => useIntelligenceCharts('7', {tradingMode: 'simulation'}));
+        await waitFor(() => expect(result.current.loading).toBe(false));
+        expect(result.current.error).toContain('JP/JPY');
+        expect(result.current.data.positionRatio).toEqual([]);
+    });
+
+    it.each([['CN', 'JP'], ['JP', 'CN']])('discards delayed %s HTTP response after switching to %s', async (from, to) => {
+        selectMarket(from);
+        let resolve!: (value: any) => void;
+        vi.mocked(realTradingService.getRuntimeAccount).mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+        const {result, rerender} = renderHook(() => useIntelligenceCharts('7', {tradingMode: 'simulation'}));
+        await waitFor(() => expect(realTradingService.getRuntimeAccount).toHaveBeenCalledOnce());
+        selectMarket(to);
+        vi.mocked(realTradingService.getRuntimeAccount).mockResolvedValue(to === 'JP' ? jpAccount(500) as any : {cash: 500, total_asset: 500, positions: {}} as any);
+        rerender();
+        expect(result.current.data.positionRatio).toEqual([]);
+        await waitFor(() => expect(result.current.data.positionRatio.find(row => row.code === 'CASH')?.value).toBe(500));
+        await act(async () => resolve(from === 'JP' ? jpAccount(200) : {cash: 200, total_asset: 200, positions: {}}));
+        expect(result.current.data.positionRatio.find(row => row.code === 'CASH')?.value).toBe(500);
+    });
+
+    it('discards a delayed JP account response after user and tenant change', async () => {
+        selectMarket('JP');
+        vi.mocked(authService.getStoredUser).mockReturnValue({tenant_id: 'first'} as any);
+        let resolve!: (value: any) => void;
+        vi.mocked(realTradingService.getRuntimeAccount).mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+        const {result, rerender} = renderHook(({user}) => useIntelligenceCharts(user, {tradingMode: 'simulation'}), {initialProps: {user: '7'}});
+        await waitFor(() => expect(realTradingService.getRuntimeAccount).toHaveBeenCalledOnce());
+        vi.mocked(authService.getStoredUser).mockReturnValue({tenant_id: 'second'} as any);
+        vi.mocked(realTradingService.getRuntimeAccount).mockResolvedValue(jpAccount(500, '8', 'second') as any);
+        rerender({user: '8'});
+        await waitFor(() => expect(result.current.data.positionRatio.find(row => row.code === 'CASH')?.value).toBe(500));
+        await act(async () => resolve(jpAccount(200, '7', 'first')));
+        expect(result.current.data.positionRatio.find(row => row.code === 'CASH')?.value).toBe(500);
+        expect(realTradingService.getRuntimeAccount).toHaveBeenLastCalledWith('8', 'second', 'simulation', 'JP');
+    });
+
+    it('preserves old-market late HTTP and unscoped WS acceptance', async () => {
+        selectMarket('CN');
+        let resolve!: (value: any) => void;
+        let callback!: (type: string, data: any) => void;
+        mockOnMessage.mockImplementation(cb => { callback = cb; return () => {}; });
+        vi.mocked(realTradingService.getRuntimeAccount).mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+        const {result, rerender} = renderHook(() => useIntelligenceCharts('7', {tradingMode: 'simulation'}));
+        await waitFor(() => expect(realTradingService.getRuntimeAccount).toHaveBeenCalledOnce());
+        selectMarket('US');
+        vi.mocked(realTradingService.getRuntimeAccount).mockResolvedValue({cash: 500, total_asset: 500, positions: {}} as any);
+        rerender();
+        await waitFor(() => expect(result.current.data.positionRatio.find(row => row.code === 'CASH')?.value).toBe(500));
+        await act(async () => resolve({cash: 200, total_asset: 200, positions: {}}));
+        expect(result.current.data.positionRatio.find(row => row.code === 'CASH')?.value).toBe(200);
+        act(() => callback('chart_update', {chartType: 'dailyReturn', value: 200}));
+        expect(result.current.data.dailyReturn.at(-1)?.value).toBe(200);
+        act(() => callback('chart_update', {chartType: 'dailyReturn', value: 999, market: 'JP', currency: 'JPY'}));
+        expect(result.current.data.dailyReturn.at(-1)?.value).toBe(200);
+    });
+
+    it('does not fetch CNY real sources or accept a delayed simulation response after JP mode change', async () => {
+        selectMarket('JP');
+        let resolve!: (value: any) => void;
+        let callback!: (type: string, data: any) => void;
+        mockOnMessage.mockImplementation(cb => { callback = cb; return () => {}; });
+        vi.mocked(realTradingService.getRuntimeAccount).mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+        const {result, rerender} = renderHook(({mode}) => useIntelligenceCharts('7', {tradingMode: mode}), {initialProps: {mode: 'simulation' as 'real' | 'simulation'}});
+        await waitFor(() => expect(realTradingService.getRuntimeAccount).toHaveBeenCalledOnce());
+        rerender({mode: 'real'});
+        await waitFor(() => expect(result.current.error).toContain('仅支持模拟'));
+        await act(async () => resolve(jpAccount(200)));
+        expect(result.current.data.positionRatio).toEqual([]);
+        expect(realTradingService.getRuntimeAccount).toHaveBeenCalledOnce();
+        expect(realTradingService.getAccountLedgerDaily).not.toHaveBeenCalled();
+        expect(portfolioService.getDailyReturns).not.toHaveBeenCalled();
+        act(() => callback('chart_update', {chartType: 'dailyReturn', value: 200,
+            market: 'JP', currency: 'JPY', user_id: '7', tenant_id: 'default', trading_mode: 'real'}));
+        expect(result.current.data.dailyReturn).toEqual([]);
+    });
+
+    it.each(['admin', '0', '1', '00000001'])('accepts the existing administrator account alias %s without merging another owner', async alias => {
+        selectMarket('JP');
+        vi.mocked(realTradingService.getRuntimeAccount).mockResolvedValue(jpAccount(500, '10000001') as any);
+        let callback!: (type: string, data: any) => void;
+        mockOnMessage.mockImplementation(cb => { callback = cb; return () => {}; });
+        const {result} = renderHook(() => useIntelligenceCharts(alias, {tradingMode: 'simulation'}));
+        await waitFor(() => expect(result.current.data.positionRatio.find(row => row.code === 'CASH')?.value).toBe(500));
+        const point = {chartType: 'dailyReturn', value: 200, market: 'JP', currency: 'JPY',
+            user_id: '10000001', tenant_id: 'default', trading_mode: 'simulation'};
+        act(() => callback('chart_update', point));
+        expect(result.current.data.dailyReturn.at(-1)?.value).toBe(200);
+        act(() => callback('chart_update', {...point, value: 999, user_id: '42'}));
+        expect(result.current.data.dailyReturn.at(-1)?.value).toBe(200);
+    });
+
+    it.each([['CN', '7'], ['JP', '8']])('cannot invoke a retained %s refresh callback into a new JP owner %s', async (from, nextUser) => {
+        selectMarket(from);
+        vi.mocked(realTradingService.getRuntimeAccount).mockResolvedValue(from === 'JP' ? jpAccount(200) as any : {cash: 200, total_asset: 200, positions: {}} as any);
+        const {result, rerender} = renderHook(({user}) => useIntelligenceCharts(user, {tradingMode: 'simulation'}), {initialProps: {user: '7'}});
+        await waitFor(() => expect(result.current.data.positionRatio.find(row => row.code === 'CASH')?.value).toBe(200));
+        const oldRefresh = result.current.refresh;
+        selectMarket('JP');
+        vi.mocked(realTradingService.getRuntimeAccount).mockResolvedValue(jpAccount(500, nextUser) as any);
+        rerender({user: nextUser});
+        await waitFor(() => expect(result.current.data.positionRatio.find(row => row.code === 'CASH')?.value).toBe(500));
+        const calls = vi.mocked(realTradingService.getRuntimeAccount).mock.calls.length;
+        await act(async () => { await oldRefresh(); });
+        expect(realTradingService.getRuntimeAccount).toHaveBeenCalledTimes(calls);
+        expect(result.current.data.positionRatio.find(row => row.code === 'CASH')?.value).toBe(500);
+        expect(result.current.error).toBeNull();
     });
 
     it('should fetch all chart data successfully', async () => {

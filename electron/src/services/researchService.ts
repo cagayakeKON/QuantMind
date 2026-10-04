@@ -98,7 +98,8 @@ interface ResearchUniverseResponse {
     items: ResearchStockRow[];
     pagination?: ResearchOverviewData['pagination'];
     market?: string;
-    dataVersion?: string;
+    dataVersion?: string | null;
+    sourceWarning?: string | null;
   };
 }
 
@@ -255,7 +256,7 @@ class ResearchService {
     symbols: string[],
     fields: string[],
     tradeDate?: string | null,
-    options?: { market?: string; dataVersion?: string }
+    options?: { market?: string; dataVersion?: string | null; modelId?: string; runId?: string }
   ): Promise<Record<string, Record<string, number>>> {
     if (!symbols?.length || !fields?.length) return {};
     try {
@@ -263,7 +264,12 @@ class ResearchService {
         code: number;
         data: { items: Array<{ symbol: string; values: Record<string, number> }> };
       }>('/research/batch-features', { symbols, fields, trade_date: tradeDate || undefined,
-        ...(options?.market === 'JP' ? { market: 'JP', data_version: options.dataVersion } : {}),
+        ...(options?.market === 'JP' ? {
+          market: 'JP',
+          ...(options.dataVersion ? { data_version: options.dataVersion } : {}),
+          ...(options.modelId ? { model_id: options.modelId } : {}),
+          ...(options.runId ? { run_id: options.runId } : {}),
+        } : {}),
       });
       const items = resp.data?.data?.items || [];
       return items.reduce<Record<string, Record<string, number>>>((acc, item) => {
@@ -321,14 +327,14 @@ class ResearchService {
   }
 
   /** 按数据日直读模型 pred.parquet 的全市场分数截面（B 套，与批次日历/分数曲线同源） */
-  async getResearchUniverseByDate(modelId: string, tradeDate: string, limit: number = 2000, offset: number = 0): Promise<{ candidates: any[], summary: any, market?: string, dataVersion?: string }> {
+  async getResearchUniverseByDate(modelId: string, tradeDate: string, limit: number = 2000, offset: number = 0): Promise<{ candidates: any[], summary: any, market?: string, dataVersion?: string | null, sourceWarning?: string | null }> {
     const resp = await this.client.get<ResearchUniverseResponse>(
       `/research/universe?model_id=${encodeURIComponent(modelId)}&date=${encodeURIComponent(tradeDate)}&limit=${limit}&offset=${offset}`
     );
     const data = resp.data.data;
     return {
       candidates: data.items || [],
-      ...(data.market === 'JP' ? { market: data.market, dataVersion: data.dataVersion } : {}),
+      ...(data.market === 'JP' ? { market: data.market, dataVersion: data.dataVersion, sourceWarning: data.sourceWarning } : {}),
       summary: data.summary || { total: 0, avgScore: 0, highConfidenceCount: 0, strongCount: 0, lastUpdatedAt: null }
     };
   }

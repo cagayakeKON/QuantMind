@@ -10,6 +10,7 @@ import { authService } from '../features/auth/services/authService';
 import { useAppSelector } from '../store';
 import { selectCurrentMarket } from '../store/slices/uiSlice';
 import { getMarketConfig } from '../config/marketConfig';
+import { normalizeUserId } from '../features/strategy-wizard/utils/userId';
 
 export interface ChartData {
     dailyReturn: ChartDataPoint[];
@@ -266,6 +267,15 @@ const resolveChartUserId = (userId: string): string => {
     return fromStored || normalized;
 };
 
+// JP uses the existing simulation owner aliases (simulation_account_keys.py).
+// Unknown IDs remain distinct; this comparison never changes old-market requests.
+const simulationChartOwner = (value: unknown): string => {
+    const raw = String(value ?? '').trim();
+    const canonical = /^\d+$/.test(raw) ? raw.replace(/^0+(?=\d)/, '') : raw;
+    return ['admin', '0', '1', '10000001'].includes(canonical)
+        ? '10000001' : normalizeUserId(canonical);
+};
+
 const parseIsoDateFromTimestamp = (timestamp: string): string | null => {
     const normalized = String(timestamp || '').trim();
     if (!normalized) return null;
@@ -454,6 +464,14 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
     const resolvedUserId = resolveChartUserId(userId);
     const mode = options?.tradingMode || 'real';
     const isLive = mode === 'real';
+    const storedUser = authService.getStoredUser() as { tenant_id?: string } | null;
+    const tenantId = String(storedUser?.tenant_id || localStorage.getItem('tenant_id') ||
+        (import.meta as any).env?.VITE_TENANT_ID || 'default').trim() || 'default';
+    const scopeKey = currentMarket === 'JP' ? `JP:${mode}:${tenantId}:${resolvedUserId}` : 'legacy';
+    const scopeRef = useRef({ key: scopeKey, revision: 0, userId: resolvedUserId, tenantId, mode });
+    if (scopeRef.current.key !== scopeKey) scopeRef.current.revision += 1;
+    scopeRef.current = { key: scopeKey, revision: scopeRef.current.revision, userId: resolvedUserId, tenantId, mode };
+    const previousScopeRef = useRef(scopeKey);
 
     const [data, setData] = useState<ChartData>({
         dailyReturn: [],
@@ -478,6 +496,12 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
     const { onMessage } = useWebSocket();
 
     const fetchData = useCallback(async (params?: { silent?: boolean }) => {
+        // A retained interval/caller may invoke a callback from the previous
+        // account after render. Keep the callback's source scope, not just the
+        // current revision, so it cannot issue a legacy request into JP state.
+        if (scopeRef.current.key !== scopeKey) return;
+        const scopeRevision = scopeRef.current.revision;
+        const acceptsResponse = () => scopeRef.current.key === scopeKey && scopeRef.current.revision === scopeRevision;
         if (!autoFetchEnabled) {
             setLoading(false);
             setError(null);
@@ -502,6 +526,9 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
         const silent = params?.silent ?? true;
 
         try {
+            if (currentMarket === 'JP' && isLive) {
+                throw new Error('日本资金图表仅支持模拟账户');
+            }
             // 根据模式动态选择接口
             const { realTradingService } = await import('../services/realTradingService');
             const nativeMarket = !isLive && getMarketConfig(currentMarket).simulationExecution === 'dated_daily' ? currentMarket : undefined;
@@ -509,7 +536,7 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
                 nativeMarket ? Promise.resolve([]) : portfolioService.getDailyReturns(resolvedUserId, '1m', mode),
                 nativeMarket ? tradingService.getTradeStats(resolvedUserId, '1w', mode, nativeMarket) : tradingService.getTradeStats(resolvedUserId, '1w', mode),
                 nativeMarket ? Promise.resolve([]) : portfolioService.getPositionDistribution(resolvedUserId, mode),
-                realTradingService.getRuntimeAccount(resolvedUserId, 'default', mode, getMarketConfig(currentMarket).simulationExecution === 'dated_daily' ? currentMarket : undefined).catch(() => null),
+                realTradingService.getRuntimeAccount(resolvedUserId, currentMarket === 'JP' ? tenantId : 'default', mode, getMarketConfig(currentMarket).simulationExecution === 'dated_daily' ? currentMarket : undefined).catch(() => null),
                 isLive 
                     ? realTradingService.getAccountLedgerDaily(30, resolvedUserId).catch(() => [])
                     : realTradingService.getSimulationDailySnapshots(30, getMarketConfig(currentMarket).simulationExecution === 'dated_daily' ? currentMarket : undefined).catch(() => []),
@@ -517,6 +544,17 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
                     ? Promise.resolve(null)
                     : (nativeMarket ? tradingService.getSimulationTradeStatsOverview(nativeMarket) : tradingService.getSimulationTradeStatsOverview()).catch(() => null),
             ]);
+            if (!acceptsResponse()) return;
+            if (currentMarket === 'JP') {
+                const source = account as any;
+                if (!source || source.market !== 'JP' || source.currency !== 'JPY' ||
+                    simulationChartOwner(source.user_id) !== simulationChartOwner(resolvedUserId) || String(source.tenant_id) !== tenantId ||
+                    String(source.trading_mode).toLowerCase() !== mode ||
+                    (source.execution_context?.market && source.execution_context.market !== 'JP') ||
+                    (source.metrics_meta?.currency && source.metrics_meta.currency !== 'JPY')) {
+                    throw new Error('日本资金图表缺少匹配的 JP/JPY 模拟账户来源');
+                }
+            }
 
             let normalizedPositionRatio: PositionDistribution[] = [];
             
@@ -632,6 +670,7 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
                 positionRatio: normalizedPositionRatio,
                 tradeStats: tradeStats ?? null,
             };
+            if (!acceptsResponse()) return;
             const { changed, fingerprint } = shouldUpdateByFingerprint(fingerprintRef.current, nextData);
             if (changed) {
                 setData(nextData);
@@ -642,6 +681,7 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
             setLastUpdatedAt(new Date().toISOString());
             setError(null);
         } catch (err) {
+            if (!acceptsResponse()) return;
             setError(err instanceof Error ? err.message : 'Failed to fetch chart data');
             setIsStale(
                 dataRef.current.dailyReturn.length > 0 ||
@@ -649,10 +689,25 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
                 dataRef.current.positionRatio.length > 0,
             );
         } finally {
-            initializedRef.current = true;
-            setLoading(false);
+            if (acceptsResponse()) {
+                initializedRef.current = true;
+                setLoading(false);
+            }
         }
-    }, [autoFetchEnabled, resolvedUserId, mode, isLive, calendar, currentMarket]);
+    }, [autoFetchEnabled, resolvedUserId, mode, isLive, calendar, currentMarket, currentMarket === 'JP' ? tenantId : 'default', scopeKey]);
+
+    useEffect(() => {
+        if (previousScopeRef.current === scopeKey) return;
+        previousScopeRef.current = scopeKey;
+        const emptyData: ChartData = { dailyReturn: [], tradeCount: [], positionRatio: [], tradeStats: null };
+        dataRef.current = emptyData;
+        fingerprintRef.current = null;
+        initializedRef.current = false;
+        setData(emptyData);
+        setIsStale(false);
+        setLastUpdatedAt(null);
+        setError(null);
+    }, [scopeKey]);
 
     useEffect(() => {
         if (!autoFetchEnabled) {
@@ -667,6 +722,22 @@ export const useIntelligenceCharts = (userId: string = 'current', options?: { au
             // 监听 chart_update 类型消息
             if (String(type) === 'chart_update' || payload?.type === 'chart_update') {
                 const updateData = payload?.data || payload;
+                const scope = scopeRef.current;
+                const sources = [payload, updateData, payload?.account_scope, updateData?.account_scope].filter(Boolean);
+                const tags = (field: string) => sources.map(source => source[field])
+                    .filter(value => value !== undefined && value !== null).map(value => String(value));
+                if (scope.key !== 'legacy') {
+                    if (scope.mode !== 'simulation') return;
+                    const expected: Record<string, string> = { market: 'JP', currency: 'JPY',
+                        user_id: scope.userId, tenant_id: scope.tenantId, trading_mode: scope.mode.toUpperCase() };
+                    if (Object.entries(expected).some(([field, wanted]) => {
+                        const values = tags(field);
+                        return !values.length || values.some(value =>
+                            (field === 'user_id' ? simulationChartOwner(value) !== simulationChartOwner(wanted) :
+                                (field === 'market' || field === 'currency' || field === 'trading_mode' ? value.toUpperCase() : value) !== wanted));
+                    })) return;
+                } else if (tags('market').some(value => value.toUpperCase() === 'JP') ||
+                    tags('currency').some(value => value.toUpperCase() === 'JPY')) return;
                 const { chartType, value } = updateData;
 
                 if (!chartType || value === undefined) return;

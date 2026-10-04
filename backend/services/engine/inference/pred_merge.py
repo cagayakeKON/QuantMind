@@ -33,6 +33,7 @@ def merge_signals_into_pred(
     """
     import os
     import tempfile
+    import json
 
     import duckdb
     import pandas as pd
@@ -62,6 +63,13 @@ def merge_signals_into_pred(
                     "split": "test",
                 }
             )
+            if StockCodeUtil.is_jp_symbol(sym) and s.get("data_provenance"):
+                from .prediction_provenance import prediction_source
+
+                source = prediction_source(s["data_provenance"])
+                if not source or source["data_trade_date"] != str(d):
+                    raise ValueError("JP prediction merge differs from its input source")
+                rows[-1]["data_provenance"] = json.dumps(source, sort_keys=True)
     if not rows:
         return 0
     new_df = pd.DataFrame(rows)
@@ -89,7 +97,16 @@ def merge_signals_into_pred(
             pass
 
     # 刷新按日物化分片：合并后的当日截面直接落盘，投研平台无需再从全量重提。
-    _refresh_pred_daily(parquet_file, new_df)
+    jp_new = new_df.symbol.map(StockCodeUtil.is_jp_symbol)
+    daily_df = new_df
+    if jp_new.any():
+        affected = new_df.loc[jp_new, "trade_date"].dt.normalize()
+        kept = combined.loc[
+            combined.symbol.map(StockCodeUtil.is_jp_symbol)
+            & combined.trade_date.dt.normalize().isin(affected)
+        ]
+        daily_df = pd.concat([new_df.loc[~jp_new], kept], ignore_index=True)
+    _refresh_pred_daily(parquet_file, daily_df)
     return len(new_df)
 
 
@@ -124,7 +141,10 @@ def _refresh_pred_daily(parquet_file: Path, new_df) -> None:
             pred_val = r.get("pred")
             if pred_val is None or (isinstance(pred_val, float) and pd.isna(pred_val)):
                 continue
-            rows.append({"symbol": sym, "score": float(pred_val)})
+            item = {"symbol": sym, "score": float(pred_val)}
+            if StockCodeUtil.is_jp_symbol(sym) and "data_provenance" in r:
+                item["data_provenance"] = r["data_provenance"]
+            rows.append(item)
         if not rows:
             continue
         part = daily_dir / f"dt={date_str.replace('-', '')}" / "data.parquet"

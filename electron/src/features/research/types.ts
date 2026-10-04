@@ -25,6 +25,15 @@ export interface ResearchStockRow {
   code: string;
   name: string;
   score: number;
+  dataVersion?: string | null;
+  dataProvenance?: {
+    market: 'JP';
+    data_version: string;
+    data_trade_date: string;
+    prediction_trade_date: string | null;
+    run_id: string;
+  } | null;
+  sourceWarning?: string | null;
   latestChange: number | null;
   totalReturn?: number | null;
   volumeTrend3d: number | null;

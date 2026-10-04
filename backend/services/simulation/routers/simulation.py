@@ -510,6 +510,19 @@ async def get_simulation_account(
         account = await manager.get_account(uid, tenant_id=auth.tenant_id, market=market)
     if not account:
         # 不自动初始化，返回空账户标记，由前端引导用户去个人中心重置
+        registered_scope = {}
+        if registered:
+            from backend.services.engine.data_platform.market_provider import (
+                LOCAL_MARKET_PROVIDERS,
+            )
+
+            registered_scope = {
+                "market": market,
+                "currency": LOCAL_MARKET_PROVIDERS[market].currency,
+                "user_id": str(uid),
+                "tenant_id": auth.tenant_id,
+                "trading_mode": "simulation",
+            }
         return {
             "success": True,
             "data": {
@@ -518,6 +531,7 @@ async def get_simulation_account(
                 "market_value": 0.0,
                 "positions": {},
                 "account_not_initialized": True,
+                **registered_scope,
             },
             "market": market,
         }

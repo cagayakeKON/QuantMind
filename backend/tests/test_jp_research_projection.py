@@ -93,7 +93,7 @@ def test_native_normalization_units_asof_and_version_are_kept(
     assert values["return1d"] == pytest.approx(0)
     assert "return3d" not in values and "flowNetAmount" not in values
     newest = service.get_batch_full_features_sync(
-        ["JP72030"], ["KMID"], "2026-09-29", "JP"
+        ["JP72030"], ["KMID"], "2026-09-29", "JP", "research-v2"
     )
     assert newest["data"]["items"][0]["values"]["KMID"] == 9
     retired = service.get_batch_full_features_sync(
@@ -113,7 +113,22 @@ async def test_real_pred_skeleton_uses_historical_master_and_pins_batch(
     model = tmp_path / "model"
     model.mkdir()
     pd.DataFrame(
-        {"symbol": ["JP72030"], "trade_date": [date(2026, 9, 28)], "pred": [0.2]}
+        {
+            "symbol": ["JP72030"],
+            "trade_date": [date(2026, 9, 28)],
+            "pred": [0.2],
+            "data_provenance": [
+                json.dumps(
+                    {
+                        "market": "JP",
+                        "data_version": "research-v1",
+                        "data_trade_date": "2026-09-28",
+                        "prediction_trade_date": "2026-09-29",
+                        "run_id": "real-run",
+                    }
+                )
+            ],
+        }
     ).to_parquet(model / "pred.parquet")
     metadata = {"context": {"market": "JP"}, "jp_data_version": "research-v1"}
     # Only external model ownership/DB lookup is isolated; pred/master/features are real.
@@ -147,6 +162,7 @@ async def test_real_pred_skeleton_uses_historical_master_and_pins_batch(
     response = await get_batch_features(
         BatchFeaturesRequest(
             symbols=[row["code"]],
+            model_id="jp-model",
             fields=["closePrice", "pe"],
             trade_date="2026-09-28",
             market=data["market"],
@@ -194,7 +210,26 @@ async def test_snapshot_only_jp_model_keeps_pin_and_historical_skeleton(
     monkeypatch.setattr(
         service, "_best_snapshot_run_for_date", AsyncMock(return_value="saved-run")
     )
-    execute = AsyncMock(return_value=SimpleNamespace(all=lambda: [("JP72030", 0.2, 1)]))
+    execute = AsyncMock(
+        return_value=SimpleNamespace(
+            all=lambda: [
+                (
+                    "JP72030",
+                    0.2,
+                    1,
+                    {
+                        "data_provenance": {
+                            "market": "JP",
+                            "data_version": "research-v1",
+                            "data_trade_date": "2026-09-28",
+                            "prediction_trade_date": "2026-09-29",
+                            "run_id": "saved-run",
+                        }
+                    },
+                )
+            ]
+        )
+    )
 
     @asynccontextmanager
     async def session(**kwargs):
@@ -220,7 +255,7 @@ async def test_snapshot_only_jp_model_keeps_pin_and_historical_skeleton(
         "uid": "7",
         "mid": "snapshot-only",
         "rid": "saved-run",
-        "day": "2026-09-28",
+        "day": date(2026, 9, 28),
     }
     enriched = get_batch_full_features_sync(
         ["JP72030"],

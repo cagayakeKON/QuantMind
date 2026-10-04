@@ -315,6 +315,15 @@ def test_execution_pins_publication_through_subprocess_and_reference_price(
         args for sql, args in writes if "INSERT INTO engine_signal_scores" in sql
     )
     assert score_rows[0]["expected_price"] == 45
+    provenance = result.signals[0]["data_provenance"]
+    assert provenance == {
+        "market": "JP",
+        "data_version": first.name,
+        "data_trade_date": "2026-09-30",
+        "prediction_trade_date": "2026-10-01",
+        "run_id": result.run_id,
+    }
+    assert json.loads(score_rows[0]["quality"])["data_provenance"] == provenance
     candidates = next(
         args
         for sql, args in writes

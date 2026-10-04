@@ -245,6 +245,9 @@ async def read_registered_simulation_account(
                 project_account_to_day, context.rules, account, context.trade_date
             )
         public = context.serialize(account, checkpoint)
+        public.update(
+            user_id=str(user_id), tenant_id=tenant_id, trading_mode="simulation"
+        )
         if include_trade_stats:
             from .dated_account_day import native_trade_stats
 

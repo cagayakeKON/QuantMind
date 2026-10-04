@@ -67,8 +67,14 @@ def native_publication(snapshot, tmp_path, monkeypatch):
                 "KLEN": [0.2 * multiplier],
                 "KMID2": [0.3 * multiplier],
                 "KUP": [0.4 * multiplier],
+                "open": [45],
+                "high": [51],
+                "low": [40],
+                "close": [50],
+                "volume": [1000],
+                "amount": [50000],
             }
-        ).to_parquet(target / "part.parquet")
+        ).to_parquet(target / "data.parquet")
     manifest = json.loads((folder / "manifest.json").read_text())
     manifest["version"] = version
     (folder / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -354,7 +360,7 @@ def test_runner_dates_are_published_cash_sessions(native_publication):
     assert default_dates() == ("2026-09-29", "2026-09-30")
 
 
-def test_shap_uses_model_pinned_publication_and_asof(
+def test_shap_uses_prediction_pinned_publication_and_exact_asof(
     native_publication, tmp_path, monkeypatch
 ):
     import glob
@@ -363,7 +369,14 @@ def test_shap_uses_model_pinned_publication_and_asof(
     from backend.services.simulation.jp.model_snapshot import read_model_snapshot
 
     _, version = native_publication
-    features = ["KMID", "KLEN", "KMID2", "KUP", "missing_feature"]
+    features = ["KMID", "KLEN", "KMID2", "KUP"]
+    source = {
+        "market": "JP",
+        "data_version": version,
+        "data_trade_date": "2026-09-29",
+        "prediction_trade_date": "2026-09-30",
+        "run_id": "review-run",
+    }
     metadata = {
         "context": {"market": "JP"},
         "factor_coverage": {"jp_data_version": version},
@@ -373,11 +386,24 @@ def test_shap_uses_model_pinned_publication_and_asof(
         "fill_values": {"missing_feature": 7},
     }
     row, available = read_model_snapshot(
-        metadata, "7203.T", date(2026, 9, 29), features
+        metadata, "7203.T", date(2026, 9, 29), features, provenance=source
     )
     assert row.KMID == 0.1 and "missing_feature" not in available
-    assert read_model_snapshot(metadata, "JP72030", date(2026, 9, 28), features) is None
-    with pytest.raises(ValueError, match="inconsistent"):
+    assert (
+        read_model_snapshot(
+            metadata,
+            "JP72030",
+            date(2026, 9, 28),
+            features,
+            provenance={
+                **source,
+                "data_trade_date": "2026-09-28",
+                "prediction_trade_date": "2026-09-29",
+            },
+        )
+        is None
+    )
+    with pytest.raises(ValueError, match="selected prediction"):
         read_model_snapshot(
             {**metadata, "jp_data_version": "another"},
             "JP72030",
@@ -385,7 +411,7 @@ def test_shap_uses_model_pinned_publication_and_asof(
             features,
         )
     rng = np.random.default_rng(12)
-    x = rng.normal(size=(128, 5))
+    x = rng.normal(size=(128, 4))
     model = lgb.train(
         {
             "objective": "regression",
@@ -394,14 +420,21 @@ def test_shap_uses_model_pinned_publication_and_asof(
             "min_data_in_leaf": 4,
             "num_leaves": 12,
         },
-        lgb.Dataset(x, label=x @ np.arange(1, 6), feature_name=features),
+        lgb.Dataset(x, label=x @ np.arange(1, 5), feature_name=features),
         num_boost_round=12,
     )
     model.save_model(str(tmp_path / "model.txt"))
     meta_path = tmp_path / "metadata.json"
     meta_path.write_text(json.dumps(metadata))
     monkeypatch.setattr(glob, "glob", lambda pattern: [str(meta_path)])
-    drivers = _compute_shap_drivers_sync("review-model", "JP72030", "2026-09-29", "JP")
+    drivers = _compute_shap_drivers_sync(
+        "review-model",
+        "JP72030",
+        "2026-09-29",
+        "JP",
+        provenance=source,
+        model_storage_path=str(tmp_path),
+    )
     assert len(drivers) == 4 and {d["name"] for d in drivers} == set(features[:4])
     assert {d["name"]: d["value"] for d in drivers}["KMID"] == 0.1
 
