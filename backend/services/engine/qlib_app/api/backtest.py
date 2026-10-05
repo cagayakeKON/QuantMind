@@ -1,7 +1,6 @@
 """Qlib 回测 API 路由"""
 
 import logging
-from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
@@ -75,61 +74,53 @@ async def run_backtest(
         request.tenant_id = auth_tenant_id
 
         backtest_id = getattr(request, "backtest_id", None) or uuid4().hex
-        is_jp = request.market == "JP" or "jp_data" in str(request.qlib_provider_uri or "").lower()
+        is_jp = (
+            request.market == "JP"
+            or "jp_data" in str(request.qlib_provider_uri or "").lower()
+        )
 
         if async_mode:
-            request_dict = request.model_dump(exclude_unset=True) if is_jp else request.dict()
+            request_dict = (
+                request.model_dump(exclude_unset=True) if is_jp else request.dict()
+            )
             if is_jp:
                 request_dict["market"] = "JP"
             request_dict["backtest_id"] = backtest_id
 
             try:
-                from backend.services.engine.qlib_app.services.backtest_persistence import BacktestPersistence
+                from backend.services.engine.qlib_app.services.backtest_persistence import (
+                    BacktestPersistence,
+                )
                 from backend.services.engine.qlib_app.tasks import run_backtest_async
 
                 persistence = BacktestPersistence()
-                jp_task_id = str(uuid4()) if is_jp else None
-                if is_jp:
-                    # Persist before queueing so a fast worker cannot have its
-                    # completed/failed result overwritten by a pending record.
-                    await persistence.save_run(
-                        backtest_id=backtest_id, user_id=request.user_id,
-                        tenant_id=request.tenant_id, status="pending",
-                        created_at=utc_now(), config=request_dict, result=None,
-                        task_id=jp_task_id,
-                    )
+                task_id = str(uuid4())
+                # Persist before queueing: fast workers must not have terminal
+                # results overwritten by a pending record from the submitter.
+                await persistence.save_run(
+                    backtest_id=backtest_id,
+                    user_id=request.user_id,
+                    tenant_id=request.tenant_id,
+                    status="pending",
+                    created_at=utc_now(),
+                    config=request_dict,
+                    result=None,
+                    task_id=task_id,
+                )
                 try:
                     task = run_backtest_async.apply_async(
                         args=[request_dict],
-                        **({"task_id": jp_task_id} if is_jp else {}),
+                        task_id=task_id,
                     )
                 except Exception as exc:
-                    if is_jp:
-                        failed = QlibBacktestResult(
-                            backtest_id=backtest_id, user_id=request.user_id,
-                            tenant_id=request.tenant_id, market="JP", currency="JPY",
-                            status="failed", config=request_dict, created_at=utc_now(),
-                            completed_at=utc_now(), error_message=str(exc),
-                            task_id=jp_task_id,
-                        )
-                        await persistence.save_run(
-                            backtest_id, request.user_id, request.tenant_id, "failed",
-                            failed.created_at, request_dict, failed,
-                            completed_at=failed.completed_at,
-                            task_id=jp_task_id,
-                        )
-                    raise
-                if not is_jp:
-                    await persistence.save_run(
+                    await persistence.mark_task_failed(
                         backtest_id=backtest_id,
                         user_id=request.user_id,
                         tenant_id=request.tenant_id,
-                        status="pending",
-                        created_at=datetime.now(),
-                        config=request_dict,
-                        result=None,
-                        task_id=task.id,
+                        task_id=task_id,
+                        error_message=str(exc),
                     )
+                    raise
 
                 return QlibBacktestResult(
                     backtest_id=backtest_id,
@@ -140,7 +131,11 @@ async def run_backtest(
                     sharpe_ratio=0.0,
                     max_drawdown=0.0,
                     alpha=0.0,
-                    **({"created_at": utc_now(), "market": "JP", "currency": "JPY"} if is_jp else {}),
+                    **(
+                        {"created_at": utc_now(), "market": "JP", "currency": "JPY"}
+                        if is_jp
+                        else {}
+                    ),
                 )
             except Exception as celery_err:
                 task_logger.error(

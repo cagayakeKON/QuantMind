@@ -13,6 +13,7 @@ from backend.services.engine.qlib_app.schemas.backtest import QlibBacktestResult
 from backend.services.engine.data_platform.market_provider import adapt_backtest_result_payload
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.utils import normalize_user_id
+from backend.shared.utc_datetime import utc_now
 from backend.services.engine.qlib_app.utils.structured_logger import StructuredTaskLogger
 
 logger = logging.getLogger(__name__)
@@ -132,7 +133,11 @@ class BacktestPersistence:
         # OSS 版无云端冷备：本地文件即唯一副本，状态恒为 local_only。
         backup_status = "local_only" if has_local_payload else "none"
         config_json = json.dumps(config or {}, ensure_ascii=False)
-        summary_json = json.dumps(summary_payload, ensure_ascii=False) if summary_payload is not None else None
+        summary_json = (
+            json.dumps(summary_payload, ensure_ascii=False)
+            if summary_payload is not None
+            else None
+        )
         async with get_session() as session:
             await session.execute(
                 text("""
@@ -149,9 +154,7 @@ class BacktestPersistence:
                     ON CONFLICT(backtest_id) DO UPDATE SET
                       status = EXCLUDED.status,
                       completed_at = EXCLUDED.completed_at,
-                      task_id = CASE WHEN EXCLUDED.config_json->>'market' = 'JP'
-                          THEN COALESCE(EXCLUDED.task_id, qlib_backtest_runs.task_id)
-                          ELSE EXCLUDED.task_id END,
+                      task_id = COALESCE(EXCLUDED.task_id, qlib_backtest_runs.task_id),
                       tenant_id = EXCLUDED.tenant_id,
                       config_json = EXCLUDED.config_json,
                       result_json = EXCLUDED.result_json,
@@ -173,6 +176,70 @@ class BacktestPersistence:
                 },
             )
             await self._prune_user_history(session, user_id, tenant_id)
+
+    async def mark_task_failed(
+        self,
+        *,
+        backtest_id: str | None,
+        task_id: str | None,
+        user_id: str | None,
+        tenant_id: str | None,
+        error_message: str,
+        full_error: str | None = None,
+    ) -> bool:
+        """Record terminal worker failure without replacing another task/result."""
+        if not all((backtest_id, task_id, user_id, tenant_id)):
+            return False
+        completed_at = utc_now()
+        payload = json.dumps(
+            {
+                "backtest_id": backtest_id,
+                "task_id": task_id,
+                "user_id": normalize_user_id(user_id),
+                "tenant_id": tenant_id,
+                "status": "failed",
+                "completed_at": completed_at.isoformat().replace("+00:00", "Z"),
+                "error_message": error_message,
+                "full_error": full_error,
+            },
+            ensure_ascii=False,
+        )
+        async with get_session() as session:
+            result = await session.execute(
+                text("""
+                UPDATE qlib_backtest_runs
+                SET status = 'failed', completed_at = :completed_at,
+                    result_json = COALESCE(result_json, '{}'::jsonb)
+                        || jsonb_build_object('created_at', created_at, 'config', config_json)
+                        || CASE WHEN config_json->>'market' = 'JP'
+                            THEN '{"market":"JP","currency":"JPY"}'::jsonb
+                            ELSE '{}'::jsonb END
+                        || CAST(:result_json AS jsonb)
+                WHERE backtest_id = :backtest_id AND task_id = :task_id
+                    AND user_id = :user_id AND tenant_id = :tenant_id
+                    AND status IN ('pending', 'running')
+                RETURNING backtest_id
+            """),
+                {
+                    "backtest_id": backtest_id,
+                    "task_id": task_id,
+                    "user_id": normalize_user_id(user_id),
+                    "tenant_id": tenant_id,
+                    "completed_at": completed_at,
+                    "result_json": payload,
+                },
+            )
+            updated = result.scalar_one_or_none() is not None
+        if updated:
+            from backend.services.engine.qlib_app.cache_manager import get_cache_manager
+
+            try:
+                get_cache_manager().invalidate_user_history(f"{tenant_id}:{user_id}")
+            except Exception:
+                logger.warning(
+                    "Could not invalidate failed backtest history cache", exc_info=True
+                )
+        return updated
 
     async def get_result(
         self,

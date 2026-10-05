@@ -343,6 +343,35 @@ class CallbackTask(Task):
             error=str(exc),
             exc_info=exc_info,
         )
+        if self.name == "qlib_app.tasks.run_backtest_async":
+            request_dict = args[0] if args else kwargs.get("request_dict", {})
+            if not isinstance(request_dict, dict):
+                return
+            # Runs which fail before the service starts must still leave pending.
+            # This hook runs only after Celery has exhausted automatic retries.
+            import traceback
+            from backend.services.engine.qlib_app.services.backtest_persistence import (
+                BacktestPersistence,
+            )
+
+            try:
+                _run_async(
+                    BacktestPersistence().mark_task_failed(
+                        backtest_id=request_dict.get("backtest_id"),
+                        task_id=task_id,
+                        user_id=request_dict.get("user_id"),
+                        tenant_id=request_dict.get("tenant_id", "default"),
+                        error_message=str(exc),
+                        full_error=getattr(einfo, "traceback", None)
+                        or "".join(
+                            traceback.format_exception(
+                                type(exc), exc, exc.__traceback__
+                            )
+                        ),
+                    )
+                )
+            except Exception:
+                logger.exception("Could not persist terminal backtest task failure")
 
 
 def _to_jsonable(payload: Any) -> Any:
@@ -438,8 +467,8 @@ def run_backtest_async(self, request_dict: dict[str, Any]) -> dict[str, Any]:
 
     try:
         service = _get_qlib_service_instance()
-        if request.market != "JP" and "jp_data" not in str(request.qlib_provider_uri or "").lower():
-            service.initialize()
+        # The service initializes the request's provider inside its persisted
+        # lifecycle. Initializing the default CN provider here bypasses both.
 
         # 进度：10%
         self.update_state(state="PROGRESS", meta={"progress": 0.1, "status": "running"})
@@ -448,7 +477,7 @@ def run_backtest_async(self, request_dict: dict[str, Any]) -> dict[str, Any]:
                 "backtest_id": backtest_id,
                 "progress": 0.1,
                 "status": "running",
-                "message": "Qlib initialized",
+                "message": "Starting backtest",
             }
         )
 
@@ -458,6 +487,9 @@ def run_backtest_async(self, request_dict: dict[str, Any]) -> dict[str, Any]:
             result = _run_async(service.run_backtest(request))
 
         result_dict = _to_jsonable(result)
+        result_status = result_dict.get("status")
+        if result_status not in {"completed", "failed"}:
+            raise RuntimeError(f"Unexpected backtest result status: {result_status}")
 
         # 进度：100%
         self.update_state(state="SUCCESS", meta={"result": result_dict})
@@ -465,13 +497,19 @@ def run_backtest_async(self, request_dict: dict[str, Any]) -> dict[str, Any]:
             {
                 "backtest_id": backtest_id,
                 "progress": 1.0,
-                "status": "completed",
+                "status": result_status,
                 "result": result_dict,
+                "error_message": result_dict.get("error_message"),
+                "full_error": result_dict.get("full_error"),
             }
         )
 
         # 核心增强：如果是自定义策略回测成功，标记为“已验证可用”
-        if request.strategy_id and request.strategy_id.isdigit():
+        if (
+            result_status == "completed"
+            and request.strategy_id
+            and request.strategy_id.isdigit()
+        ):
             from backend.shared.strategy_storage import get_strategy_storage_service
 
             try:

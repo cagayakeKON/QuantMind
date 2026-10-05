@@ -208,7 +208,7 @@ async def test_retention_is_user_tenant_total_and_jp_task_binding_survives_updat
                 )
             ).all()
         )
-        assert rows["3"] == "task-3" and rows["4"] is None
+        assert rows["3"] == "task-3" and rows["4"] == "task-4"
 
 
 @requires_pg
