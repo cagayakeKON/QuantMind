@@ -23,7 +23,7 @@ export const SERVICE_PORTS = {
   REDIS: 6379,
 } as const;
 
-const ENV: Record<string, any> = typeof import.meta !== 'undefined' ? (import.meta as any).env || {} : {};
+const ENV: Record<string, any> = typeof import.meta !== 'undefined' ? import.meta.env || {} : {};
 
 // 动态服务器配置（桌面端用户设置）
 let dynamicServerUrl: string | null = null;
@@ -69,7 +69,9 @@ function persistServerUrl(url: string | null): void {
  * 检测是否为 Electron 桌面环境
  */
 export function isElectronEnv(): boolean {
-  return typeof window !== 'undefined' && typeof (window as any).electronAPI === 'object';
+  if (typeof window === 'undefined') return false;
+  const api = (window as any).electronAPI;
+  return api !== null && typeof api === 'object' && api.__quantmindWebCompat !== true;
 }
 
 /**
