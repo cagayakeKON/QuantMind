@@ -696,15 +696,30 @@ class QlibDataBuilder:
                 factors = (
                     "1.0 AS factor, 1.0 AS volume_factor"
                     if self._price_basis == "raw"
-                    else "price_factor AS factor, volume_factor"
+                    else "k.price_factor AS factor, k.volume_factor"
+                )
+                unadj_glob = str(
+                    self._hub.data_dir
+                    / "1_kline_data/daily_unadjusted/dt=*/data.parquet"
                 )
                 df = con.execute(
                     f"""
-                    SELECT symbol, CAST(time AS DATE) d,
-                           open, high, low, close, volume, amount,
-                           {factors}, upper_limit_touched, lower_limit_touched
-                    FROM read_parquet('{kline_glob}', hive_partitioning=1)
-                    ORDER BY symbol, d
+                    WITH raw_quotes AS (
+                        SELECT symbol, CAST(time AS DATE) AS d, price_factor,
+                               last_value(close * price_factor IGNORE NULLS) OVER (
+                                   PARTITION BY symbol ORDER BY time
+                                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                               ) AS previous_adjusted_close
+                        FROM read_parquet('{unadj_glob}', hive_partitioning=1)
+                    )
+                    SELECT k.symbol, CAST(k.time AS DATE) d,
+                           k.open, k.high, k.low, k.close, k.volume, k.amount,
+                           {factors},
+                           u.previous_adjusted_close / u.price_factor AS limit_base
+                    FROM read_parquet('{kline_glob}', hive_partitioning=1) k
+                    LEFT JOIN raw_quotes u
+                      ON u.symbol = k.symbol AND u.d = CAST(k.time AS DATE)
+                    ORDER BY k.symbol, d
                     """
                 ).fetchdf()
             else:
@@ -773,11 +788,36 @@ class QlibDataBuilder:
                     for field in ("open", "high", "low", "close", "volume", "amount")
                 }
                 if is_jp:
-                    # Native Qlib Exchange limit expressions; missing/zero volume
-                    # remains non-tradable, without a previous-quote fill fallback.
+                    from decimal import Decimal
+                    from backend.services.simulation.jp.rules import daily_limit_width
+
+                    # UL/LL only report an intraday touch. Publish price bounds
+                    # known before this session so Qlib can compare its selected
+                    # execution quote, without consulting this session's high/low.
+                    # Reference prices include ex-right adjustments since the
+                    # last valid close (including actions during suspension).
+                    # The factor ratio cancels all future adjustment factors;
+                    # multiply bounds by the same factor as the selected quote.
+                    bases = group["limit_base"].values
+                    valid_bases = np.isfinite(bases) & (bases > 0)
+                    widths = np.array(
+                        [
+                            float(daily_limit_width(Decimal(str(base))))
+                            if valid
+                            else 0.0
+                            for base, valid in zip(bases, valid_bases, strict=True)
+                        ]
+                    )
+                    cols["jp_limit_up"] = (
+                        np.where(valid_bases, bases + widths, float("inf"))
+                        * group["factor"].values
+                    )
+                    cols["jp_limit_down"] = (
+                        np.where(valid_bases, np.maximum(0, bases - widths), 0.0)
+                        * group["factor"].values
+                    )
                     unavailable = group["volume"].isna() | (group["volume"] <= 0)
-                    cols["jp_limit_buy"] = (group["upper_limit_touched"] | unavailable).astype(float).values
-                    cols["jp_limit_sell"] = (group["lower_limit_touched"] | unavailable).astype(float).values
+                    cols["jp_unavailable"] = unavailable.astype(float).values
                     # amount is raw JPY, volume is split-adjusted. Rights do not
                     # alter volume, so price and volume factors must be separate.
                     with np.errstate(invalid="ignore", divide="ignore"):

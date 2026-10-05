@@ -541,6 +541,21 @@ async def create_session(
             tenant_id=auth.tenant_id,
             user_id=auth.user_id,
         )
+        if selected_market == "JP":
+            import json
+
+            metadata = json.loads(
+                await asyncio.to_thread(
+                    (resolved_model_dir / "metadata.json").read_text,
+                    encoding="utf-8",
+                )
+            )
+            metadata = metadata if isinstance(metadata, dict) else {}
+            context = metadata.get("context")
+            context = context if isinstance(context, dict) else {}
+            declared_market = context.get("market") or metadata.get("market")
+            if str(declared_market or "").strip().upper() != "JP":
+                raise HTTPException(400, "日本市场回放必须选择日本市场模型")
 
     market_data = get_local_market_data(selected_market)
     # 目录枚举虽已降到毫秒级，仍是同步磁盘 IO，放线程里跑，不占用事件循环
@@ -855,6 +870,21 @@ async def step_session(
         account_data = (
             await ReplayAccountManager(session_id=session_id, market=market).get() or {}
         )
+        if market == "JP":
+            from backend.services.simulation.jp.corporate_actions import (
+                adjust_replay_splits,
+            )
+
+            # A cache eviction after /propose restores the previous closing
+            # snapshot. Validate against today's share basis, just as execute
+            # does, rather than rejecting the restored split-adjusted proposal.
+            bars = await asyncio.to_thread(
+                get_local_market_data(market).load_date,
+                row.next_date,
+                list((account_data.get("positions") or {}).keys()),
+            )
+            account_data = adjust_replay_splits(account_data, bars, row.next_date)
+            ReplayAccountManager(session_id=session_id, market=market).write(account_data)
         accepted, validation_rejected = validate_confirmed(
             confirmed=confirmed_in,
             proposals=proposals,

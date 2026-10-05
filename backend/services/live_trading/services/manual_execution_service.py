@@ -1058,7 +1058,9 @@ class ManualExecutionService:
             async with get_session(read_only=True) as db:
                 try:
                     await require_standard_account(
-                        db, tenant_id or "default", uid,
+                        db,
+                        tenant_id or "default",
+                        uid,
                         cached=read_existing_jp_account(
                             manager.redis, tenant_id or "default", uid
                         ),
@@ -1069,10 +1071,45 @@ class ManualExecutionService:
         if not account:
             return None
         positions = dict(account.get("positions") or {})
-        cash = _to_float(
-            account.get("available_cash") or account.get("cash"), 0.0
-        )
-        return {
+        execution_date = None
+        if market == "JP":
+            from backend.services.simulation.services.corporate_action_quantjp_sync import (
+                project_account_positions,
+            )
+            from backend.shared.stock_utils import StockCodeUtil
+            from backend.shared.simulation_position_keys import (
+                split_position_key,
+                build_position_key,
+            )
+
+            execution_date = await self._jp_simulation_execution_date()
+            async with get_session(read_only=True) as db:
+                projected = await project_account_positions(
+                    db,
+                    tenant_id=tenant_id or "default",
+                    user_id=uid,
+                    as_of=execution_date,
+                )
+            if projected is not None:
+                retained = {}
+                metadata = {}
+                for key, position in positions.items():
+                    symbol, side = split_position_key(key)
+                    if StockCodeUtil.is_jp_symbol(symbol):
+                        metadata[
+                            build_position_key(StockCodeUtil.to_prefix(symbol), side)
+                        ] = position
+                    else:
+                        retained[key] = position
+                retained.update(
+                    {
+                        key: {**metadata.get(key, {}), **value}
+                        for key, value in projected.items()
+                    }
+                )
+                positions = retained
+        cash = _to_float(account.get("available_cash") or account.get("cash"), 0.0)
+        result = {
             "account_id": f"sim-{tenant_id}-{uid}",
             "snapshot_at": account.get("timestamp"),
             "total_asset": _to_float(account.get("total_asset"), 0.0),
@@ -1083,6 +1120,83 @@ class ManualExecutionService:
             "positions": positions,
             "source": "simulation_account",
         }
+        if execution_date is not None:
+            from backend.services.simulation.services.projection_service import (
+                SimulationProjectionService,
+            )
+
+            _, _, market_value = (
+                SimulationProjectionService.summarize_position_market_value(positions)
+            )
+            result.update(
+                market_value=market_value,
+                total_asset=round(
+                    _to_float(account.get("cash"), 0)
+                    + _to_float(account.get("short_proceeds"), 0)
+                    + market_value,
+                    2,
+                ),
+                execution_trade_date=execution_date.isoformat(),
+            )
+        return result
+
+    @staticmethod
+    async def _jp_simulation_execution_date():
+        from backend.services.simulation.services.local_market_data import (
+            get_local_market_data,
+        )
+
+        reader = get_local_market_data("JP")
+        as_of = await asyncio.to_thread(
+            reader.latest_trade_date, datetime.now(ZoneInfo("Asia/Tokyo")).date()
+        )
+        if as_of is None:
+            raise HTTPException(
+                status_code=400,
+                detail="JP simulation requires published daily market data",
+            )
+        return as_of
+
+    async def _prepare_jp_simulation_execution(
+        self, db, *, tenant_id, user_id, execution_plan=None
+    ):
+        """Apply ordinary maintenance after authorization and before planning."""
+        from backend.services.simulation.services.corporate_action_quantjp_sync import (
+            prepare_account_actions,
+        )
+
+        as_of = await self._jp_simulation_execution_date()
+        confirmed_date = (execution_plan or {}).get("execution_trade_date")
+        if confirmed_date and confirmed_date != as_of.isoformat():
+            raise HTTPException(
+                status_code=409, detail="预览行情日期已变化，请重新计算调仓预案后再提交"
+            )
+        uid = str(user_id) if str(user_id).isdigit() else "0"
+        await prepare_account_actions(
+            db, tenant_id=tenant_id or "default", user_id=uid, as_of=as_of
+        )
+        snapshot = await self._load_simulation_account_snapshot(
+            tenant_id=tenant_id, user_id=user_id, market="JP"
+        )
+        if execution_plan and snapshot:
+            positions = _normalize_positions(snapshot.get("positions"))
+            from backend.shared.stock_utils import StockCodeUtil
+
+            for order in execution_plan.get("sell_orders") or []:
+                symbol = StockCodeUtil.to_suffix(order.get("symbol") or "")
+                positions = {
+                    StockCodeUtil.to_suffix(key): value
+                    for key, value in positions.items()
+                }
+                available = _to_int(
+                    (positions.get(symbol) or {}).get("available_volume"), 0
+                )
+                if _to_int(order.get("quantity"), 0) != available:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="预览持仓数量已变化，请重新计算调仓预案后再提交",
+                    )
+        return snapshot
 
     async def _load_user_default_model_record(
         self, *, tenant_id: str, user_id: str
@@ -1873,6 +1987,11 @@ class ManualExecutionService:
                 "strategy_params": strategy_params,
                 **({"market": "JP"} if prepared.market == "JP" else {}),
                 "note": note,
+                **(
+                    {"execution_trade_date": account_snapshot["execution_trade_date"]}
+                    if prepared.market == "JP" and mode == "SIMULATION"
+                    else {}
+                ),
             },
             "sell_orders": plan["sell_orders"],
             "buy_orders": plan["buy_orders"],
@@ -2092,6 +2211,15 @@ class ManualExecutionService:
                 "buy_orders": preview.get("buy_orders") or [],
                 "skipped_items": preview.get("skipped_items") or [],
                 "summary": preview_summary,
+                **(
+                    {
+                        "execution_trade_date": preview["strategy_context"][
+                            "execution_trade_date"
+                        ]
+                    }
+                    if prepared.market == "JP" and prepared.trading_mode == "SIMULATION"
+                    else {}
+                ),
             },
         }
 
@@ -2303,6 +2431,8 @@ class ManualExecutionService:
             trade_date=prepared.prediction_trade_date,
             **({"market": "JP"} if prepared.market == "JP" else {}),
         )
+        if prepared.market == "JP" and prepared.trading_mode == "SIMULATION":
+            execution_plan["execution_trade_date"] = latest_snapshot["execution_trade_date"]
         created_at = datetime.now(timezone.utc)
         plan_summary = execution_plan.get("summary") or {}
         request_payload = {
@@ -2590,11 +2720,32 @@ class ManualExecutionService:
                     return
             else:
                 # 模拟模式：使用模拟账户，无需实盘组合
-                sim_snapshot = await self._load_simulation_account_snapshot(
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    **({"market": "JP"} if prepared.market == "JP" else {}),
-                )
+                if prepared.market == "JP":
+                    try:
+                        sim_snapshot = await self._prepare_jp_simulation_execution(
+                            db,
+                            tenant_id=tenant_id,
+                            user_id=user_id,
+                            execution_plan=request_json.get("execution_plan"),
+                        )
+                    except (HTTPException, ValueError) as error:
+                        await manual_execution_persistence.update_task(
+                            task_id=task_id,
+                            status="failed",
+                            stage="validating",
+                            error_stage="portfolio_lookup",
+                            error_message=str(
+                                error.detail
+                                if isinstance(error, HTTPException)
+                                else error
+                            ),
+                        )
+                        return
+                else:
+                    sim_snapshot = await self._load_simulation_account_snapshot(
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                    )
                 if not sim_snapshot:
                     error_msg = "未检测到模拟账户，请先启动模拟盘完成账户初始化"
                     manual_execution_log_stream.append_log(

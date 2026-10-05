@@ -17,9 +17,9 @@ from backend.services.engine.qlib_data_builder import QlibDataBuilder
 from backend.shared.stock_utils import StockCodeUtil
 
 
-JP_PROVIDER_CONTRACT_VERSION = 3
-JP_PROVIDER_CACHE_DIR = "qlib_v3"
-JP_RAW_PROVIDER_CACHE_DIR = "qlib_raw_v3"
+JP_PROVIDER_CONTRACT_VERSION = 4
+JP_PROVIDER_CACHE_DIR = "qlib_v4"
+JP_RAW_PROVIDER_CACHE_DIR = "qlib_raw_v4"
 
 
 def _validate_provider(path: Path, symbols: set[str]) -> None:
@@ -43,8 +43,9 @@ def _validate_provider(path: Path, symbols: set[str]) -> None:
             "volume",
             "amount",
             "factor",
-            "jp_limit_buy",
-            "jp_limit_sell",
+            "jp_limit_up",
+            "jp_limit_down",
+            "jp_unavailable",
         ):
             binary = path / "features" / symbol / f"{field}.day.bin"
             if not binary.is_file() or binary.stat().st_size < 8:

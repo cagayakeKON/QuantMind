@@ -106,9 +106,11 @@ def match_order(
         return MatchResult(success=False, reason="SUSPENDED")
 
     # ── 涨跌停 ──
-    if side == "buy" and bar.close >= bar.limit_up:
+    is_jp = infer_market(bar.symbol) is Market.JP
+    limit_price = _pick_price(bar, cfg.price_mode) if is_jp else bar.close
+    if side == "buy" and limit_price >= bar.limit_up:
         return MatchResult(success=False, reason="LIMIT_UP")
-    if side == "sell" and bar.close <= bar.limit_down:
+    if side == "sell" and limit_price <= bar.limit_down:
         return MatchResult(success=False, reason="LIMIT_DOWN")
 
     # ── T+1 可卖量 ──
@@ -164,6 +166,13 @@ def match_order(
         fill_price = bar.limit_up
     if bar.limit_down > 0 and fill_price < bar.limit_down:
         fill_price = bar.limit_down
+    if is_jp:
+        # Published daily prices bound this simulation's executable prices.
+        # Keep other markets' existing slippage behavior unchanged.
+        if bar.high > 0:
+            fill_price = min(fill_price, bar.high)
+        if bar.low > 0:
+            fill_price = max(fill_price, bar.low)
 
     # ── 费用 ──
     commission, stamp_duty, transfer_fee, total_fee = compute_fees(

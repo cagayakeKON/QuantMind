@@ -263,8 +263,13 @@ class ReplaySignalLoader:
             return []
 
         # T+1 偏移：trade_date 生效的信号来自上一交易日（数据日）的分数
+        market_data = (
+            get_local_market_data("JP")
+            if params.get("market") == "JP"
+            else get_local_market_data()
+        )
         sessions = await asyncio.to_thread(
-            get_local_market_data(params.get("market"))._sessions
+            market_data._sessions
         )
         td_int = int(trade_date.strftime("%Y%m%d"))
         before = [d for d in sessions if d < td_int]

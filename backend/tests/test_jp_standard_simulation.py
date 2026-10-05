@@ -98,6 +98,9 @@ async def test_replay_create_uses_only_owner_jp_default(
         market="JP", start_date=date(2026, 9, 28), end_date=date(2026, 9, 29)
     )
     if default_market == "JP":
+        (tmp_path / "metadata.json").write_text(
+            json.dumps({"context": {"market": "JP"}}), encoding="utf-8"
+        )
         response = await replay_router.create_session(request, auth, db)
         assert response.model_id == rows[0].model_id == "owner-default"
         assert rows[0].strategy_params["_model_dir"] == str(tmp_path)
@@ -262,6 +265,8 @@ def test_common_matcher_uses_jp_unit_tick_limits_and_normal_fee_config(market_da
     assert fill.fill_price == 200.1
     assert fill.total_fee == 0
     bar.close = bar.limit_up
+    assert match_order("buy", 20, bar, cfg).success  # The open is still tradable.
+    bar.open = bar.limit_up
     assert match_order("buy", 20, bar, cfg).reason == "LIMIT_UP"
     cn = _match_config_from_params({})
     assert cn.commission_min == 5 and cn.stamp_duty_rate > 0
@@ -384,8 +389,9 @@ def test_jp_confirmation_uses_ordinary_proposal_unit():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("market", ["JP", "CN", "US", "HK", None])
 async def test_jp_replay_signals_use_original_previous_session_and_all_prediction_splits(
-    tmp_path, monkeypatch, market_data
+    tmp_path, monkeypatch, market_data, market
 ):  # noqa: F811
     from backend.services.simulation.replay import signal_generator
 
@@ -412,7 +418,7 @@ async def test_jp_replay_signals_use_original_previous_session_and_all_predictio
         ]
     ).to_parquet(tmp_path / "pred.parquet")
     row = SimpleNamespace(
-        strategy_params={"market": "JP", "_model_dir": str(tmp_path)}, model_id="custom"
+        strategy_params={"market": market, "_model_dir": str(tmp_path)}, model_id="custom"
     )
     db = SimpleNamespace(
         execute=AsyncMock(
@@ -421,9 +427,13 @@ async def test_jp_replay_signals_use_original_previous_session_and_all_predictio
             )
         )
     )
-    monkeypatch.setattr(
-        signal_generator, "get_local_market_data", lambda market: market_data
-    )
+    requested_markets = []
+
+    def get_data(*args):
+        requested_markets.append(args)
+        return market_data
+
+    monkeypatch.setattr(signal_generator, "get_local_market_data", get_data)
     signals = await signal_generator.ReplaySignalLoader().load_signals_for_date(
         db, uuid.uuid4(), date(2026, 9, 29)
     )
@@ -431,6 +441,7 @@ async def test_jp_replay_signals_use_original_previous_session_and_all_predictio
         ("216A0.JP", 0.8),
         ("72030.JP", 0.3),
     ]
+    assert requested_markets == [("JP",) if market == "JP" else ()]
 
 
 @pytest.mark.asyncio

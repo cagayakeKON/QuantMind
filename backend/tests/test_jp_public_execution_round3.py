@@ -76,7 +76,8 @@ async def test_registered_guard_preserves_ordinary_other_market_execution(
 
 
 @pytest.mark.asyncio
-async def test_history_sort_accepts_mixed_utc_and_naive_without_mutating_results():
+@pytest.mark.parametrize("market", [None, "JP"])
+async def test_jp_history_query_preserves_original_unfiltered_date_rule(market):
     from backend.services.engine.qlib_app.services.backtest_service_query import (
         QlibBacktestServiceQueryMixin,
     )
@@ -99,8 +100,15 @@ async def test_history_sort_accepts_mixed_utc_and_naive_without_mutating_results
     service = SimpleNamespace(
         _cache=None, _runs={}, _persistence=SimpleNamespace(list_history=history)
     )
-    got = await QlibBacktestServiceQueryMixin.list_history(service, "7", "test")
-    assert [r.backtest_id for r in got] == ["1", "0", "2"]
+    if market is None:
+        # The original mixed aware/naive sort is outside Japan adaptation scope.
+        with pytest.raises(TypeError):
+            await QlibBacktestServiceQueryMixin.list_history(service, "7", "test")
+    else:
+        got = await QlibBacktestServiceQueryMixin.list_history(
+            service, "7", "test", market=market
+        )
+        assert got is results
     assert [r.created_at for r in results] == originals
 
 

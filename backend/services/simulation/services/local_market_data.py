@@ -145,6 +145,7 @@ class DailyBar:
     lot_size: int | None = None
     price_tick: float = 0.0
     tick_category: str = ""
+    split_factor: float = 1.0
 
 
 def _round_cent(value: Decimal, rounding: str) -> float:
@@ -258,6 +259,10 @@ def _to_bar_frame(raw: pd.DataFrame, dt_int: int) -> pd.DataFrame | None:
         out[col] = raw[source]
     if "adj_factor" in lower:
         out["adj_factor"] = raw[lower["adj_factor"]]
+    if "price_factor" in lower:
+        out["price_factor"] = raw[lower["price_factor"]]
+    if "ex_rights_type" in lower:
+        out["ex_rights_type"] = raw[lower["ex_rights_type"]]
     return pd.DataFrame(out)
 
 
@@ -455,6 +460,10 @@ class LocalMarketData:
             pre_close_map = dict(
                 zip(prev["symbol"], prev["close"].astype(float), strict=True)
             )
+        if self.market is Market.JP:
+            pre_close_map = self._jp_reference_prices(
+                today, df[df["dt"] == prev_dt_int], prev_dt_int
+            )
 
         st_symbols = self._st_symbol_set() if self.market is Market.CN else frozenset()
         jp_metadata = {}
@@ -496,7 +505,6 @@ class LocalMarketData:
                 )
                 from backend.services.simulation.jp.rules import RuleDataMissing
 
-                pre_close *= _as_float(getattr(row, "adj_factor", 1.0)) or 1.0
                 metadata = dict(jp_metadata.get(symbol, {}))
                 if trade_date < date(2018, 10, 1):
                     # J-Quants master does not source historical board lots.
@@ -538,8 +546,61 @@ class LocalMarketData:
                 tick_category=str(
                     jp_metadata.get(symbol, {}).get("scale_category") or ""
                 ),
+                # Rights issues change the price adjustment, but do not grant
+                # split shares. Use the same distinction as the publication.
+                split_factor=(
+                    (_as_float(getattr(row, "adj_factor", 1.0)) or 1.0)
+                    if self.market is Market.JP
+                    and str(getattr(row, "ex_rights_type", "")) != "3"
+                    else 1.0
+                ),
             )
         return bars
+
+    def _jp_reference_prices(self, today, previous, previous_dt):
+        """Resolve only missing JP reference closes, keeping two-day fast reads."""
+        from backend.services.engine.data_platform.jp_reference_price import (
+            raw_reference_price,
+        )
+
+        current = {str(row["symbol"]): row for row in today.to_dict("records")}
+        pending = set(current)
+        adjustments = {
+            symbol: _as_float(row.get("adj_factor", 1.0)) or 1.0
+            for symbol, row in current.items()
+        }
+        references = {}
+
+        def resolve(frame):
+            for row in frame.to_dict("records"):
+                symbol = str(row["symbol"])
+                if symbol not in pending:
+                    continue
+                if _as_float(row.get("close")) > 0:
+                    references[symbol] = raw_reference_price(
+                        row, current[symbol], adjustment_product=adjustments[symbol]
+                    )
+                    pending.remove(symbol)
+                else:
+                    adjustments[symbol] *= _as_float(row.get("adj_factor", 1.0)) or 1.0
+
+        resolve(previous)
+        if not pending or previous_dt is None:
+            return references
+        root = self._probe_kline_root()
+        for day in reversed([day for day in self._sessions() if day < previous_dt]):
+            if not pending:
+                break
+            frame = (
+                self._read_partition(root, day, symbols=pending)
+                if root is not None and self._direct_read_ok
+                else None
+            )
+            if frame is None:
+                frame = self._scan_via_view((day,))
+            if not frame.empty:
+                resolve(frame[frame["symbol"].isin(pending)])
+        return references
 
     def _scan(self, dt_ints: tuple[int, ...]) -> pd.DataFrame:
         """一次取回目标日与前一交易日的全市场日线。
@@ -600,7 +661,9 @@ class LocalMarketData:
                 frames.append(part)
         return frames
 
-    def _read_partition(self, root: Path, dt_int: int) -> pd.DataFrame | None:
+    def _read_partition(
+        self, root: Path, dt_int: int, *, symbols: set[str] | None = None
+    ) -> pd.DataFrame | None:
         """读单个 dt= 分区，并把列投影成视图口径。
 
         返回 None —— 分区不适合直读（缺关键列/解析失败），调用方回退视图；
@@ -625,7 +688,11 @@ class LocalMarketData:
         frames: list[pd.DataFrame] = []
         for path in files:
             try:
-                raw = pd.read_parquet(path)
+                raw = (
+                    pd.read_parquet(path, filters=[("symbol", "in", sorted(symbols))])
+                    if symbols is not None
+                    else pd.read_parquet(path)
+                )
             except Exception as exc:
                 logger.error("本地行情分区读取失败 %s: %s", path, exc)
                 return None

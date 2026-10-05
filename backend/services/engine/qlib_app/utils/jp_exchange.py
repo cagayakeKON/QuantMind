@@ -20,6 +20,22 @@ class JpExchange(CnExchange):
     """
 
     def __init__(self, *, trading_units_path=None, **kwargs):
+        # Public research configurations cross JSON and YAML, whose sequences
+        # are lists. Restore Qlib's documented tuple arguments at this boundary.
+        for field in ("limit_threshold", "volume_threshold"):
+            if isinstance(kwargs.get(field), list):
+                kwargs[field] = tuple(kwargs[field])
+        # Factor templates declare standard Qlib fees. CnExchange's existing
+        # fill callback consumes commission/min_commission instead.
+        open_cost = kwargs.pop("open_cost", None)
+        close_cost = kwargs.pop("close_cost", None)
+        min_cost = kwargs.pop("min_cost", None)
+        if open_cost is not None or close_cost is not None:
+            kwargs.setdefault(
+                "commission", open_cost if open_cost is not None else close_cost
+            )
+        if min_cost is not None:
+            kwargs.setdefault("min_commission", min_cost)
         kwargs.setdefault("trade_unit", None)
         self.trading_units = (
             read_trading_units(Path(trading_units_path).read_bytes())

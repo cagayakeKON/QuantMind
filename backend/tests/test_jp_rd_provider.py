@@ -79,9 +79,9 @@ def test_raw_cash_view_is_separate_from_unchanged_research_provider(snapshot, tm
     import_jquants_snapshot(snapshot, root)
     adjusted = prepare_jp_rd_provider(root)
     raw = prepare_jp_rd_provider(root, price_basis="raw")
-    assert adjusted.name == "qlib_v3" and raw.name == "qlib_raw_v3"
+    assert adjusted.name == "qlib_v4" and raw.name == "qlib_raw_v4"
     identity = json.loads((raw / "research_source.json").read_text())
-    assert identity["price_basis"] == "raw" and identity["contract_version"] == 3
+    assert identity["price_basis"] == "raw" and identity["contract_version"] == 4
     assert "price_basis" not in json.loads(
         (adjusted / "research_source.json").read_text()
     )
@@ -147,7 +147,7 @@ def test_research_provider_cannot_redirect_outside_cache(snapshot, tmp_path):
     cache.mkdir(parents=True)
     outside = tmp_path / "outside-provider"
     outside.mkdir()
-    (cache / "qlib_v3").symlink_to(outside, target_is_directory=True)
+    (cache / "qlib_v4").symlink_to(outside, target_is_directory=True)
     with pytest.raises(ValueError, match="escapes its cache"):
         prepare_jp_rd_provider(root)
     assert list(outside.iterdir()) == []

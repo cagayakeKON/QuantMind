@@ -17,6 +17,7 @@ import remarkGfm from 'remark-gfm';
 import { adminService } from '../services/adminService';
 import { ModelDirectoryInfo, ModelScanResult } from '../types';
 import { setCurrentTab } from '../../../store/slices/aiStrategySlice';
+import { MARKET_CONFIGS } from '../../../config/marketConfig';
 
 const { Panel } = Collapse;
 const { Text, Link } = Typography;
@@ -26,6 +27,7 @@ const MODEL_MARKET_OPTIONS = [
     { value: 'a_share', label: 'A股', color: 'red' },
     { value: 'hong_kong', label: '港股', color: 'blue' },
     { value: 'us_stock', label: '美股', color: 'green' },
+    { value: MARKET_CONFIGS.JP.adapterId, label: '日股', color: 'gold' },
     { value: 'crypto', label: '加密', color: 'purple' },
 ];
 
@@ -34,6 +36,8 @@ function extractModelMarket(model: ModelDirectoryInfo): string {
     const wf = model.workflow_config || {};
     const qlib = model.qlib_config || {};
     const raw = String(meta.market || wf.market || qlib.market || '').toLowerCase();
+    const jpMarket = String(meta.market || meta.context?.market || wf.market || qlib.market || '').toLowerCase().trim();
+    if (['jp', MARKET_CONFIGS.JP.adapterId, '日股'].includes(jpMarket)) return MARKET_CONFIGS.JP.adapterId;
     if (raw.includes('hk') || raw.includes('hong_kong') || raw.includes('港股')) return 'hong_kong';
     if (raw.includes('us') || raw.includes('美股')) return 'us_stock';
     if (raw.includes('crypto') || raw.includes('加密')) return 'crypto';

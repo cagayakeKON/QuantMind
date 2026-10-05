@@ -426,6 +426,13 @@ class ReplayDayRunner:
             if wanted
             else {}
         )
+        if getattr(accounts, "market", "CN") == "JP":
+            from backend.services.simulation.jp.corporate_actions import (
+                adjust_replay_splits,
+            )
+
+            account_data = adjust_replay_splits(account_data, bars, trade_date)
+            accounts.write(account_data)
         return account_data, signals, bars
 
     def _is_code_session(self, strategy_params: dict[str, Any] | None) -> bool:
@@ -711,14 +718,29 @@ class ReplayDayRunner:
         if not signals:
             return []
 
+        def limit_price(bar):
+            if StockCodeUtil.is_jp_symbol(bar.symbol):
+                from backend.services.simulation.services.ashare_matcher import (
+                    _pick_price,
+                )
+
+                return _pick_price(
+                    bar, str(strategy_params.get("price_mode", self._cfg.price_mode))
+                )
+            return bar.close
+
         quotes = {
             sym: Quote(
                 symbol=sym,
-                current_price=bar.open or bar.close,
-                is_limit_up=(bar.close >= bar.limit_up)
+                current_price=(
+                    limit_price(bar)
+                    if StockCodeUtil.is_jp_symbol(sym)
+                    else bar.open or bar.close
+                ),
+                is_limit_up=(limit_price(bar) >= bar.limit_up)
                 if math.isfinite(bar.limit_up)
                 else False,
-                is_limit_down=(bar.close <= bar.limit_down)
+                is_limit_down=(limit_price(bar) <= bar.limit_down)
                 if bar.limit_down > 0
                 else False,
                 is_suspended=bar.suspended,

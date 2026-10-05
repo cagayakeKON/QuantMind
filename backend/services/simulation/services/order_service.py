@@ -288,13 +288,22 @@ class SimOrderService:
                             "CN": "Asia/Shanghai",
                             "HK": "Asia/Hong_Kong",
                             "US": "America/New_York",
+                            "JP": "Asia/Tokyo",
                         }.get(market, "Asia/Shanghai")
                         close_hour = 16 if market in {"HK", "US"} else 15
+                        close_minute = 0
+                        if market == "JP":
+                            from backend.services.simulation.jp.rules import (
+                                session_close,
+                            )
+
+                            close = session_close(trading_session_date)
+                            close_hour, close_minute = close.hour, close.minute
                         local_deadline = datetime.combine(
                             trading_session_date,
                             datetime.min.time(),
                             tzinfo=ZoneInfo(timezone_name),
-                        ).replace(hour=close_hour)
+                        ).replace(hour=close_hour, minute=close_minute)
                         projection.expires_at = local_deadline.astimezone(
                             timezone.utc
                         ).replace(tzinfo=None)

@@ -5,6 +5,9 @@ import hashlib
 import json
 
 from backend.services.engine.data_platform.jp_publication import publication_path
+from backend.services.engine.data_platform.jp_qlib_limits import (
+    execution_limit_expressions,
+)
 from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
 from backend.services.engine.rd_agent.data_pipeline.jp_provider import (
     prepare_jp_rd_provider,
@@ -105,7 +108,7 @@ def configure_market_exchange(request, exchange):
             # Factor-only strategy proposals have no instrument/date context.
             # The official order callback applies the published dated unit.
             "trade_unit": None,
-            "limit_threshold": ("$jp_limit_buy", "$jp_limit_sell"),
+            "limit_threshold": execution_limit_expressions(request.deal_price),
             "volume_threshold": ("cum", "$volume * $volume_factor / $factor"),
             "backtest_id": exchange["kwargs"]["backtest_id"],
             "trading_units_path": str(units_path) if units_path else None,

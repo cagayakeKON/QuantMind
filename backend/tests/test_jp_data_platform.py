@@ -258,7 +258,7 @@ def test_jp_raw_import_is_available_to_standard_simulator(snapshot, tmp_path):
     raw = market_data.get_bar("JP72030", date(2026, 9, 29))
     assert raw.close == 50
     assert raw.volume == 1000
-    assert raw.pre_close == 50  # The shared quote keeps the split price basis.
+    assert raw.pre_close == pytest.approx(50)  # Split-adjusted reference price.
     assert raw.lot_size == 100
 
 

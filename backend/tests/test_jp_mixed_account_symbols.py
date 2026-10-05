@@ -130,6 +130,20 @@ async def test_actual_cycle_with_shared_foreign_positions_can_fill_jp(
     }
     signal = SignalScore("72030.JP", 1, DAY, "review", tenant, "123")
     db = database()
+
+    class EmptyScalarRows:
+        def all(self):
+            return []
+
+        def __iter__(self):
+            return iter(())
+
+    db.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            scalars=EmptyScalarRows, scalar_one_or_none=lambda: None
+        )
+    )
+    db.get = AsyncMock(return_value=None)
     db.commit = AsyncMock()
 
     @asynccontextmanager

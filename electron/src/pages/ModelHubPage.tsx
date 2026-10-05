@@ -211,7 +211,7 @@ export const ModelHubPage: React.FC = () => {
               <span>筛选:</span>
             </div>
 
-            {/* 市场过滤（与 OSS 6 市场一致） */}
+            {/* 市场过滤 */}
             <Select
               size="small"
               value={selectedMarket}
@@ -222,6 +222,7 @@ export const ModelHubPage: React.FC = () => {
                 { value: 'CN', label: 'A股市场' },
                 { value: 'US', label: '美股市场' },
                 { value: 'HK', label: '港股市场' },
+                { value: 'JP', label: '日股市场' },
                 { value: 'CRYPTO', label: '加密市场' },
                 { value: 'FUTURES', label: '期货市场' },
                 { value: 'CUSTOM', label: '自定义市场' },

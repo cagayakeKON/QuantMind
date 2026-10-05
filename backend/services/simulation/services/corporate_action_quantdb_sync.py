@@ -16,13 +16,14 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from backend.services.simulation.models.corporate_action import (
     SimulationCorporateAction,
@@ -131,14 +132,26 @@ async def sync_corporate_actions_from_quantdb(
     *,
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     forward_days: int = DEFAULT_FORWARD_DAYS,
+    market: str | None = None,
 ) -> int:
     """同步 dividend_factors → simulation_corporate_actions, 返回新插入条数。
 
     幂等: 按 (symbol, action_type, ex_date) 去重(不限 source, 防止与手工 CSV 重复入账)。
     """
-    events = await asyncio.to_thread(
+    events = [] if market == "JP" else await asyncio.to_thread(
         _collect_window_events, lookback_days=lookback_days, forward_days=forward_days
     )
+    from backend.services.engine.data_platform.market_provider import LOCAL_MARKET_PROVIDERS
+
+    for registered_market, provider in LOCAL_MARKET_PROVIDERS.items():
+        if market is None or registered_market != market:
+            continue
+        if provider.corporate_action_event_loader:
+            module, loader = provider.corporate_action_event_loader.rsplit(".", 1)
+            events.extend(await asyncio.to_thread(
+                getattr(importlib.import_module(module), loader),
+                lookback_days=lookback_days, forward_days=forward_days,
+            ))
     if not events:
         logger.info("公司行为同步: 窗口内无事件")
         return 0
@@ -146,6 +159,8 @@ async def sync_corporate_actions_from_quantdb(
     inserted = 0
     db_manager = get_db_manager()
     async with db_manager.get_master_session() as session:
+        if market == "JP":
+            await session.execute(text("SELECT pg_advisory_xact_lock(hashtext('quantmind:jp:corporate_actions'))"))
         # 一次取出窗口内已有记录做去重
         existing = set()
         symbols = sorted({e["symbol"] for e in events})
@@ -170,11 +185,11 @@ async def sync_corporate_actions_from_quantdb(
                     symbol=e["symbol"],
                     action_type=e["action_type"],
                     ex_date=e["ex_date"],
-                    effective_date=None,
+                    effective_date=e.get("effective_date"),
                     cash_dividend_per_share=e["cash_dividend_per_share"],
                     share_ratio=e["share_ratio"],
                     rights_price=e["rights_price"],
-                    source="quantdb",
+                    source=e.get("source", "quantdb"),
                     note=e["note"],
                     status="pending",
                 )

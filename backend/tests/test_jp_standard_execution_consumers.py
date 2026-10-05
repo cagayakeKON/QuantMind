@@ -31,6 +31,7 @@ from backend.services.trade.sandbox.context import SandboxContext
 from backend.services.trade.services import trading_precheck_service as readiness
 from backend.shared.database_manager_v2 import DatabaseConfig
 from backend.shared.simulation_account_keys import account_key
+from backend.shared.trade_redis_keys import build_trade_account_key
 from backend.tests.test_jp_data_platform import snapshot as snapshot_fixture
 
 snapshot = snapshot_fixture
@@ -188,6 +189,14 @@ async def pg_consumer(monkeypatch):
     engine = None
     redis = manual.get_redis()
     key = account_key(tenant, uid)
+    from backend.services.simulation.models import Base
+    from backend.services.simulation.models.account import SimulationAccount
+    from backend.services.simulation.models.position_lot import SimulationPositionLot
+    from backend.services.simulation.models.corporate_action import (
+        SimulationCorporateAction,
+    )
+    from backend.services.simulation.models.cash_ledger import SimulationCashLedger
+
     try:
         async with admin.begin() as conn:
             await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
@@ -200,9 +209,25 @@ async def pg_consumer(monkeypatch):
                 "CREATE TABLE qm_user_models (model_id TEXT, tenant_id TEXT, user_id TEXT, metadata_json JSONB, status TEXT, is_default BOOLEAN, activated_at TIMESTAMPTZ, updated_at TIMESTAMPTZ)",
                 "CREATE TABLE qm_model_inference_runs (run_id TEXT, tenant_id TEXT, user_id TEXT, model_id TEXT, status TEXT, prediction_trade_date DATE, data_trade_date DATE, created_at TIMESTAMPTZ, fallback_used BOOLEAN, model_source TEXT)",
                 "CREATE TABLE engine_signal_scores (run_id TEXT, tenant_id TEXT, user_id TEXT, symbol TEXT, fusion_score FLOAT, light_score FLOAT, tft_score FLOAT, score_rank INT, signal_side TEXT, expected_price FLOAT, quality TEXT, created_at TIMESTAMPTZ)",
-                "CREATE TABLE simulation_accounts (tenant_id TEXT, user_id TEXT, market_state JSONB)",
             ):
                 await conn.execute(text(ddl))
+            # Public preview now reads the ordinary lot/ledger projection. Build
+            # its actual standard schema rather than bypassing that read path.
+            tables = [
+                model.__table__
+                for model in (
+                    SimulationAccount,
+                    SimulationPositionLot,
+                    SimulationCorporateAction,
+                    SimulationCashLedger,
+                )
+            ]
+            await conn.run_sync(
+                lambda sync: Base.metadata.create_all(sync, tables=tables)
+            )
+            await conn.execute(
+                text("ALTER TABLE simulation_accounts ADD COLUMN market_state JSONB")
+            )
             params = {
                 "tenant": tenant,
                 "uid": uid,
@@ -253,7 +278,9 @@ async def pg_consumer(monkeypatch):
             sessions=sessions, tenant=tenant, uid=uid, redis=redis, key=key
         )
     finally:
-        redis.client.delete(key, account_key(tenant, uid, "JP"))
+        redis.client.delete(
+            key, account_key(tenant, uid, "JP"), build_trade_account_key(tenant, uid)
+        )
         keys = list(redis.client.scan_iter(match=f"simulation:*:{tenant}:*"))
         if keys:
             redis.client.delete(*keys)

@@ -135,8 +135,9 @@ def test_old_market_providers_do_not_acquire_bundle_or_watch_policy(market):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("initialize_empty", [False, True])
 async def test_public_catalog_and_job_report_requested_and_actual_bundle(
-    snapshot, tmp_path, monkeypatch
+    snapshot, tmp_path, monkeypatch, initialize_empty
 ):
     from fastapi import FastAPI
     from backend.scripts import quantjp_daily_sync
@@ -155,7 +156,8 @@ async def test_public_catalog_and_job_report_requested_and_actual_bundle(
         )
     )
     api.dependency_overrides[require_admin] = lambda: {"user_id": 7, "role": "admin"}
-    import_jquants_snapshot(snapshot, target)
+    if not initialize_empty:
+        import_jquants_snapshot(snapshot, target)
     threads = []
 
     class CapturedThread:
@@ -171,7 +173,7 @@ async def test_public_catalog_and_job_report_requested_and_actual_bundle(
         "run",
         lambda **kw: actual(
             **kw,
-            seed=snapshot,
+            seed=None if initialize_empty else snapshot,
             cache=tmp_path / "cache/source.duckdb",
             destination=target,
             end=date(2026, 10, 1),
@@ -209,6 +211,11 @@ async def test_public_catalog_and_job_report_requested_and_actual_bundle(
         assert {r["dataset"] for r in result["results"] if r["dependency"]} == set(
             result["dependency_datasets"]
         )
+        if initialize_empty:
+            from backend.services.engine.data_platform.quantjp_hub import QuantJPDataHub
+
+            prices = QuantJPDataHub(target).fetch_daily_kline("JP72030", adjust="none")
+            assert len(prices) == 1 and prices.iloc[0]["close"] == 50
 
 
 def prepare_watch(provider, monkeypatch):

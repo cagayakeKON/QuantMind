@@ -1,7 +1,8 @@
 """Own a JP source cache, download directly from J-Quants, publish atomically.
 
-Seed from the existing read-only DuckDB snapshot once; never update that source.
-Subsequent scheduled runs refresh a trailing date window in our separate cache.
+An empty deployment downloads its selected date window directly from J-Quants.
+An existing read-only snapshot can optionally seed the cache without being changed.
+Subsequent scheduled runs refresh a trailing window and retain published history.
 """
 
 from __future__ import annotations
@@ -156,9 +157,12 @@ def _restore_publication(conn, target: Path):
 
     hub = QuantJPDataHub(publication_path(target, raw=True))
     if not hub.available:
-        raise ValueError(
-            "Import the historical JP snapshot, or provide --seed, before automatic sync"
-        )
+        if any(
+            (target / name).exists()
+            for name in ("raw-current.json", "current.json", "manifest.json")
+        ):
+            raise ValueError("Existing JP publication has no raw price partitions")
+        return False  # A new deployment can download its initial window directly.
     mappings = {
         "daily_prices": (
             "1_kline_data/daily_unadjusted",
@@ -195,6 +199,7 @@ def _restore_publication(conn, target: Path):
     except Exception:
         conn.execute("ROLLBACK")
         raise
+    return True
 
 
 def _check_cache_owner(path: Path):
@@ -336,7 +341,12 @@ def _run(
             "SELECT min(Date), max(Date) FROM research.daily_prices"
         ).fetchone()
         anchor = price_bounds[0]
-        if anchor is None or anchor not in sessions:
+        if anchor is None:
+            initial_sessions = [day for day in sessions if first <= day <= last]
+            if not initial_sessions:
+                raise ValueError("JP sync window contains no published trading session")
+            anchor = initial_sessions[0]
+        elif anchor not in sessions:
             raise ValueError("JP calendar does not cover the cached history origin")
         complete = _complete_cash_sessions(conn)
         required = {day for day in sessions if anchor <= day <= last}

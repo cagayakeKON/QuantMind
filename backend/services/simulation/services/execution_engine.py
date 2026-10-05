@@ -598,6 +598,20 @@ return tostring(granted)
         account_snapshot = await self.manager.get_account(
             order.user_id, tenant_id=order.tenant_id, market=market_str
         )
+        if market_str == "JP":
+            from backend.services.simulation.services.legacy_jp_state import require_standard_account
+            from backend.services.simulation.services.corporate_action_quantjp_sync import prepare_account_actions
+
+            await require_standard_account(self.db, order.tenant_id, order.user_id, cached=account_snapshot)
+            await prepare_account_actions(
+                self.db, tenant_id=order.tenant_id, user_id=order.user_id,
+                as_of=bar.trade_date,
+            )
+            # Preparation may repair committed caches without a new action.
+            # Matching and the ledger must both use that repaired snapshot.
+            account_snapshot = await self.manager.get_account(
+                order.user_id, tenant_id=order.tenant_id, market=market_str
+            )
         side = str(order.side.value).lower()
         available_volume = None
         if side == "sell" and isinstance(account_snapshot, dict):
@@ -689,7 +703,11 @@ return tostring(granted)
             transfer_fee=mr.transfer_fee,
             market=market_str,
             account_snapshot=account_snapshot,
-            price_source=f"local_{cfg.price_mode}",
+            price_source=(
+                f"local_{cfg.price_mode};bar_date={bar.trade_date.isoformat()}"
+                if market_str == "JP"
+                else f"local_{cfg.price_mode}"
+            ),
             requested_quantity=requested_quantity,
         )
 
@@ -1001,12 +1019,32 @@ return tostring(granted)
     async def apply_filled(self, order: SimOrder, result: ExecutionResult) -> SimTrade:
         if result.market == "JP":
             from backend.services.simulation.services.legacy_jp_state import (
+                read_existing_jp_account,
                 require_standard_account,
             )
 
             await require_standard_account(
-                self.db, order.tenant_id, order.user_id, cached=result.account_snapshot
+                self.db,
+                order.tenant_id,
+                order.user_id,
+                cached=read_existing_jp_account(
+                    self.manager.redis, order.tenant_id, order.user_id
+                )
+                or result.account_snapshot,
             )
+            if order.status == OrderStatus.FILLED:
+                from sqlalchemy import select
+
+                recorded = (
+                    await self.db.execute(
+                        select(SimTrade)
+                        .where(SimTrade.order_id == order.order_id)
+                        .order_by(SimTrade.id.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if recorded is not None:
+                    return recorded
         trade_value = result.quantity * result.price
         transfer_fee = float(getattr(result, "transfer_fee", 0.0) or 0.0)
         total_fee = result.commission + result.stamp_duty + transfer_fee
@@ -1191,6 +1229,31 @@ return tostring(granted)
 
         await self.db.refresh(order)
         await self.db.refresh(trade)
+        if result.market == "JP":
+            from datetime import date
+
+            from backend.services.simulation.services.corporate_action_quantjp_sync import (
+                reconcile_committed_account_cache,
+            )
+
+            try:
+                source, separator, bar_date = str(result.price_source or "").partition(
+                    ";bar_date="
+                )
+                if not separator or not source.startswith("local_"):
+                    raise ValueError(
+                        "JP filled cache requires its daily bar provenance"
+                    )
+                await reconcile_committed_account_cache(
+                    self.db,
+                    tenant_id=order.tenant_id,
+                    user_id=order.user_id,
+                    as_of=date.fromisoformat(bar_date),
+                )
+            except Exception:
+                # Finance is already committed. Keep the filled result; JP
+                # preparation reconciles derived caches from the original lots.
+                logger.exception("JP filled account cache publication failed")
         await self._sync_trade_account(order.tenant_id, order.user_id)
         # 交易时即失效 Redis，下次 GET 立即回源 DB 并回填缓存，实现秒级可见
         try:

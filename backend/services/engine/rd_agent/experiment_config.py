@@ -6,6 +6,7 @@ configuration. The caller supplies the same context used by Qlib's qrun renderer
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from jinja2 import StrictUndefined, Template
@@ -58,6 +59,20 @@ def compile_factor_template(
         min_cost=backtest.min_commission,
     )
     exchange.update(backtest.extra.get("exchange_kwargs", {}))
+    # Qlib's public get_exchange accepts a registered Exchange config. Bind its
+    # market parameters explicitly; get_exchange ignores outer kwargs when a
+    # custom exchange is provided. Existing adapters do not declare this field.
+    if isinstance(exchange.get("exchange"), dict):
+        custom = deepcopy(exchange["exchange"])
+        custom["kwargs"] = {
+            "freq": "day",
+            "start_time": analysis["start_time"],
+            "end_time": analysis["end_time"],
+            "codes": data.market,
+            **{key: value for key, value in exchange.items() if key != "exchange"},
+            **custom.get("kwargs", {}),
+        }
+        exchange["exchange"] = custom
     for record in config["task"]["record"]:
         if record["class"] == "SigAnaRecord":
             record.setdefault("kwargs", {})["ann_scaler"] = backtest.annualization_days

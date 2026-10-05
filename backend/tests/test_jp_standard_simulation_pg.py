@@ -126,6 +126,7 @@ async def storage():
     from backend.services.simulation.models.account import SimulationAccount
     from backend.services.simulation.models.account_daily import SimulationAccountDaily
     from backend.services.simulation.models.cash_ledger import SimulationCashLedger
+    from backend.services.simulation.models.corporate_action import SimulationCorporateAction
     from backend.services.simulation.models.fill import SimulationFill
     from backend.services.simulation.models.fund_snapshot import SimulationFundSnapshot
     from backend.services.simulation.models.order import SimOrder
@@ -159,6 +160,7 @@ async def storage():
                 SimulationAccount,
                 SimulationAccountDaily,
                 SimulationCashLedger,
+                SimulationCorporateAction,
                 SimulationFill,
                 SimulationFundSnapshot,
                 SimulationOrderV2,
@@ -184,6 +186,9 @@ async def storage():
             )
     finally:
         # Only this UUID tenant was ever written by this test.
+        from backend.shared.trade_redis_keys import build_trade_account_key
+
+        client.delete(build_trade_account_key(prefix, 123))
         keys = list(client.scan_iter(match=f"simulation:*:{prefix}:*"))
         if keys:
             client.delete(*keys)
@@ -322,6 +327,9 @@ async def test_actual_code_replay_bare_jp_risk_rule_sells_canonical_position(
         )["success"]
         state = await accounts.get()
         state["positions"]["72030.JP"]["first_buy_date"] = "2026-09-20"
+        # This risk-order fixture seeds cost/quantity on today's post-split
+        # basis. The historical first-buy date only exercises the age rule.
+        state["positions"]["72030.JP"]["split_adjusted_date"] = "2026-09-29"
         accounts.write(state)
         response = await router.step_session(
             identity,

@@ -15,6 +15,7 @@ const { Title, Text } = Typography;
     { value: 'CN', label: 'A股' },
     { value: 'HK', label: '港股' },
     { value: 'US', label: '美股' },
+    { value: 'JP', label: '日股' },
     { value: 'CRYPTO', label: '区块链' },
     { value: 'FUTURES', label: '期货' },
     { value: 'CUSTOM', label: '自定义市场' },
@@ -32,6 +33,7 @@ const MARKET_SOURCE_FALLBACK: Record<string, { value: string; label: string }[]>
     { value: 'south_factors', label: '南向资金结构' },
   ],
   US: [{ value: 'l1_factors', label: 'L1 因子（默认）' }],
+  JP: [{ value: 'l1_factors', label: 'L1 因子（默认）' }],
   CRYPTO: [{ value: 'l1_factors', label: 'L1 因子（默认）' }],
   FUTURES: [{ value: 'l1_factors', label: 'L1 因子（默认）' }],
   CUSTOM: [{ value: 'l1_factors', label: 'L1 因子（默认）' }],
@@ -229,7 +231,9 @@ export const AdminTrainingDatasets: React.FC = () => {
         required: mapping.required,
         sort_order: mapping.order_no || 0,
       });
-      setDraft(await adminService.getQuantDBFactorCatalog(source, draft.version_id));
+      setDraft(await (market === 'JP'
+        ? adminService.getQuantDBFactorCatalog(source, draft.version_id, market)
+        : adminService.getQuantDBFactorCatalog(source, draft.version_id)));
     } catch (error: any) {
       message.error(error?.response?.data?.detail || '保存映射失败');
     }
@@ -251,7 +255,9 @@ export const AdminTrainingDatasets: React.FC = () => {
       const created = await adminService.cloneQuantDBFactorCatalog(
         published.version_id, `${published.version_name} 副本`,
       );
-      setDraft(await adminService.getQuantDBFactorCatalog(source, created.version_id));
+      setDraft(await (market === 'JP'
+        ? adminService.getQuantDBFactorCatalog(source, created.version_id, market)
+        : adminService.getQuantDBFactorCatalog(source, created.version_id)));
       message.success('已复制为草稿，可安全编辑');
     } catch (error: any) { message.error(error?.response?.data?.detail || '复制发布版本失败'); }
   };

@@ -10,7 +10,7 @@
  *   2. K 线上用竖线标出 run 的基准日（inference_date），看得出这个排名是基于哪天数据算的。
  *
  * 代码格式（仓库分层口径）：排名行给的是前缀式 SH600519；/market/kline 要后缀式
- * 600519.SH，分数接口要裸数字 600519，两次转换都走 portfolioUtils 的统一工具。
+ * 600519.SH；分数接口沿用原裸代码，日股保留 JP 前缀，两次转换都走统一工具。
  */
 import { useEffect, useMemo, useState } from 'react';
 import { Empty, Modal, Spin } from 'antd';
@@ -18,7 +18,9 @@ import { KlineChart, type IndicatorConfig } from '../../stock-terminal/component
 import type { KlineBar } from '../../stock-terminal/types';
 import { stockTerminalService } from '../../stock-terminal/services/stockTerminalService';
 import { modelTrainingService } from '../../../services/modelTrainingService';
-import { toSuffixCode } from '../../../utils/portfolioUtils';
+import { normalizeStockCode, toSuffixCode } from '../../../utils/portfolioUtils';
+import { registeredStockMarket } from '../../../utils/marketPresentation';
+import { MARKET_CONFIGS } from '../../../config/marketConfig';
 
 /** 与个股终端一致：主图开 MA、副图只留成交量 */
 const KLINE_CONFIG: IndicatorConfig = { ma: true, subplots: ['vol'] };
@@ -46,6 +48,12 @@ export function StockMiniTerminalModal({ open, onClose, symbol, name, modelId, a
 
   const suffixSymbol = useMemo(() => toSuffixCode(symbol), [symbol]);
   const bareCode = useMemo(() => suffixSymbol.split('.')[0], [suffixSymbol]);
+  const terminalConfig = useMemo(() => {
+    const market = registeredStockMarket(symbol);
+    return market ? MARKET_CONFIGS[market].stockTerminal : undefined;
+  }, [symbol]);
+  const scoreSymbol = useMemo(() => terminalConfig?.market === 'JP'
+    ? normalizeStockCode(symbol) : bareCode, [symbol, bareCode, terminalConfig]);
 
   useEffect(() => {
     if (!open || !symbol) return;
@@ -64,8 +72,11 @@ export function StockMiniTerminalModal({ open, onClose, symbol, name, modelId, a
     // 否则 Promise.all 一旦被分数拒绝，K 线明明取到了也会显示成「暂无数据」。
     void (async () => {
       const [klineRes, scoreRes] = await Promise.allSettled([
-        stockTerminalService.getDailyKline(suffixSymbol, KLINE_BARS, 'qfq', iso(startD), iso(endD)),
-        modelTrainingService.getStockInferenceHistory(bareCode, SCORE_DAYS, modelId || undefined),
+        terminalConfig
+          ? stockTerminalService.getDailyKline(suffixSymbol, KLINE_BARS, 'qfq', iso(startD), iso(endD),
+            terminalConfig.market, terminalConfig.requestTimeoutMs)
+          : stockTerminalService.getDailyKline(suffixSymbol, KLINE_BARS, 'qfq', iso(startD), iso(endD)),
+        modelTrainingService.getStockInferenceHistory(scoreSymbol, SCORE_DAYS, modelId || undefined),
       ]);
       if (cancelled) return;
       if (klineRes.status === 'fulfilled') {
@@ -88,7 +99,7 @@ export function StockMiniTerminalModal({ open, onClose, symbol, name, modelId, a
     return () => {
       cancelled = true;
     };
-  }, [open, symbol, suffixSymbol, bareCode, modelId]);
+  }, [open, symbol, suffixSymbol, scoreSymbol, terminalConfig, modelId]);
 
   const zoomStart = bars.length > ZOOM_BARS ? ((bars.length - ZOOM_BARS) / bars.length) * 100 : 0;
 

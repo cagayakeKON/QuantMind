@@ -233,6 +233,15 @@ class SimulationEngine:
                         db, tenant, uid,
                         cached=read_existing_jp_account(self.redis, tenant, uid),
                     )
+                    from backend.services.simulation.services.corporate_action_quantjp_sync import prepare_account_actions
+                    from zoneinfo import ZoneInfo
+
+                    as_of = await asyncio.to_thread(
+                        get_local_market_data("JP").latest_trade_date,
+                        datetime.now(ZoneInfo("Asia/Tokyo")).date(),
+                    )
+                    if as_of:
+                        await prepare_account_actions(db, tenant_id=tenant, user_id=uid, as_of=as_of)
                 logger.info(
                     "SimulationEngine: market=%s (from %d signals)",
                     market.value,

@@ -11,6 +11,9 @@ from backend.services.engine.data_platform.quantjp_hub import (
     QuantJPDataHub,
     _resolve_quantjp_data_dir,
 )
+from backend.services.engine.data_platform.jp_qlib_limits import (
+    execution_limit_expressions,
+)
 from backend.services.engine.rd_agent.data_pipeline.jp_provider import (
     JP_PROVIDER_CACHE_DIR,
     JP_PROVIDER_CONTRACT_VERSION,
@@ -61,12 +64,41 @@ class JapanAdapter(MarketAdapter):
         # Qlib research portfolios are theoretical, not historical cash fills.
         # Region US supplies Qlib's generic stock defaults; the JP calendar and
         # benchmark come from this publication. Standard daily backtests use Qlib.
+        from backend.services.engine.data_platform.jp_trading_units import (
+            read_published_trading_units,
+        )
+
+        # Use the same integrity-checked dated units as ordinary JP backtests.
+        read_published_trading_units(self.publication)
+        manifest = json.loads((self.publication / "manifest.json").read_text("utf-8"))
+        units = manifest.get("trading_units")
+        units_path = str(self.publication / units["path"]) if units else None
         return BacktestConfig(
             region="us",
             limit_threshold=1,
             commission_rate=0.001,
             min_commission=0,
-            extra={"exchange_kwargs": {"trade_unit": 1}},
+            extra={
+                "exchange_kwargs": {
+                    "trade_unit": None,
+                    "exchange": {
+                        "class": "JpExchange",
+                        "module_path": "backend.services.engine.qlib_app.utils.jp_exchange",
+                        "kwargs": {
+                            "stamp_duty": 0,
+                            "transfer_fee": 0,
+                            "min_transfer_fee": 0,
+                            "impact_cost_coefficient": 0,
+                            "trading_units_path": units_path,
+                        },
+                    },
+                    # The existing factor templates evaluate close-price
+                    # portfolios; retain that convention and JP price bounds.
+                    "deal_price": "close",
+                    "limit_threshold": list(execution_limit_expressions("close")),
+                    "volume_threshold": ["cum", "$volume * $volume_factor / $factor"],
+                }
+            },
         )
 
     def get_factor_set(self) -> dict[str, str]:

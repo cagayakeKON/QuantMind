@@ -35,8 +35,9 @@ def default_models_database():
 
 
 @pytest.mark.skipif(os.getenv("QM_JP_TEST_PG") != "1", reason="PG audit is opt-in")
+@pytest.mark.parametrize("default_market", ["CN", "JP"])
 def test_default_model_scan_uses_only_the_standard_sql_default_in_every_market(
-    monkeypatch, default_models_database
+    monkeypatch, default_models_database, default_market
 ):
     from backend.services.engine.inference.gap_backfill import list_default_models
 
@@ -49,9 +50,15 @@ def test_default_model_scan_uses_only_the_standard_sql_default_in_every_market(
                 "is_default BOOLEAN, status TEXT)"
             )
         )
+        conn.execute(
+            sqlalchemy.text(
+                "CREATE UNIQUE INDEX default_per_user ON qm_user_models "
+                "(tenant_id, user_id) WHERE is_default=TRUE"
+            )
+        )
         records = [
-            ("CN", True, False, "ready", "cn", "7", "/cn"),
-            ("JP", True, False, "ready", "jp", "7", "/jp"),
+            ("CN", default_market == "CN", False, "ready", "cn", "7", "/cn"),
+            ("JP", default_market == "JP", False, "ready", "jp", "7", "/jp"),
             ("JP", False, True, "ready", "jp_stale_metadata", "7", "/jp"),
             ("JP", False, False, "ready", "jp_not_default", "7", "/jp"),
             ("US", False, True, "ready", "us_metadata", "7", "/us"),
@@ -81,7 +88,7 @@ def test_default_model_scan_uses_only_the_standard_sql_default_in_every_market(
             )
     monkeypatch.setattr(sqlalchemy, "create_engine", lambda *args, **kwargs: engine)
     rows = list_default_models(tenant_id="review", user_id="7")
-    assert {row["model_id"] for row in rows} == {"cn", "jp"}
+    assert {row["model_id"] for row in rows} == {default_market.lower()}
 
 
 @pytest.mark.asyncio

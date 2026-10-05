@@ -209,13 +209,33 @@ class SandboxSignalConsumer:
             return
 
         # 获取账户状态
+        jp_bar = None
         if jp_symbol:
-            from backend.services.simulation.services.legacy_jp_state import read_existing_jp_account, require_standard_account
+            from zoneinfo import ZoneInfo
 
-            async with get_session(read_only=True) as db:
-                await require_standard_account(
-                    db, tenant_id, user_id_int,
-                    cached=read_existing_jp_account(redis_client, tenant_id, user_id_int),
+            from backend.services.simulation.services.corporate_action_quantjp_sync import (
+                prepare_account_actions,
+            )
+            from backend.services.simulation.services.local_market_data import (
+                get_local_market_data,
+            )
+
+            reader = get_local_market_data("JP")
+            trade_date = await asyncio.to_thread(
+                reader.latest_trade_date, datetime.now(ZoneInfo("Asia/Tokyo")).date()
+            )
+            if trade_date is not None:
+                jp_bar = await asyncio.to_thread(reader.get_bar, symbol, trade_date)
+            if jp_bar is None:
+                logger.warning("[SandboxSignalConsumer] 无法获取 %s 的日线，跳过下单", symbol)
+                return
+            # Raw prices and holdings must use the same split basis before sizing.
+            async with get_session() as db:
+                await prepare_account_actions(
+                    db,
+                    tenant_id=tenant_id,
+                    user_id=user_id_int,
+                    as_of=jp_bar.trade_date,
                 )
         account = await self._account_manager.get_account(user_id_int, tenant_id=tenant_id)
         if not account:
@@ -234,7 +254,11 @@ class SandboxSignalConsumer:
 
         # 获取当前价格（Redis 实时优先，HTTP 次之；取不到直接跳过，
         # 禁止用持仓成本价回退成交，避免虚假价格污染账户）
-        current_price = await self._get_current_price(symbol)
+        current_price = (
+            float(jp_bar.close)
+            if jp_bar is not None
+            else await self._get_current_price(symbol)
+        )
         if current_price <= 0:
             logger.warning("[SandboxSignalConsumer] 无法获取 %s 的价格，跳过下单", symbol)
             return
@@ -243,9 +267,13 @@ class SandboxSignalConsumer:
         target_value = total_asset * target_percent
         lot_size = 100
         if jp_symbol:
-            from backend.services.live_trading.services.manual_execution_service import _resolve_board_lot_size
+            from backend.services.simulation.services.market_rules import (
+                japan_trading_unit,
+            )
 
-            lot_size = await asyncio.to_thread(_resolve_board_lot_size, symbol)
+            lot_size = japan_trading_unit(
+                jp_bar.trade_date, {"lot_size": jp_bar.lot_size}
+            )
         target_volume = int(target_value / current_price / lot_size) * lot_size
 
         # 计算需要交易的量

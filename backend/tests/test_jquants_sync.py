@@ -160,6 +160,124 @@ def test_sync_restores_published_history_into_new_cache(snapshot, tmp_path):
     assert len(restored) == 4
 
 
+def test_empty_deployment_downloads_selected_window_and_retains_it_on_next_sync(
+    tmp_path,
+):
+    calls = []
+
+    def rows(endpoint, params=None):
+        calls.append((endpoint, params))
+        return request_payload(endpoint, params)
+
+    cache, target = tmp_path / "cache/source.duckdb", tmp_path / "published"
+    client = SimpleNamespace(rows=rows)
+    result = run(
+        cache=cache, destination=target, days=2, end=date(2026, 9, 29), client=client
+    )
+    assert result["downloaded_sessions"] == 2
+    assert result["coverage_start"] == "2026-09-28"
+    assert result["coverage_end"] == "2026-09-29"
+    assert result["catchup_sessions"] == 0
+    assert "/equities/valuation" not in {endpoint for endpoint, _ in calls}
+    hub = QuantJPDataHub(target)
+    assert len(hub.fetch_daily_kline("JP72030", adjust="none")) == 2
+    old_version = result["publication"]["version"]
+    old_prices = next(
+        (target / "versions" / old_version / "1_kline_data/daily_unadjusted").glob(
+            "dt=*/*.parquet"
+        )
+    )
+    old_digest = hashlib.sha256(old_prices.read_bytes()).digest()
+    research_pointer = (target / "current.json").read_bytes()
+    calls.clear()
+    result = run(
+        cache=cache, destination=target, days=1, end=date(2026, 10, 1), client=client
+    )
+    assert result["downloaded_sessions"] == 2  # Fill 9/30, then refresh 10/1.
+    assert result["catchup_sessions"] == 1
+    assert result["coverage_start"] == "2026-09-28"
+    from backend.services.engine.data_platform.jp_publication import publication_path
+
+    raw = QuantJPDataHub(publication_path(target, raw=True))
+    assert len(raw.fetch_daily_kline("JP72030", adjust="none")) == 4
+    assert (target / "current.json").read_bytes() == research_pointer
+    assert hashlib.sha256(old_prices.read_bytes()).digest() == old_digest
+
+
+def test_empty_deployment_rejects_incomplete_day_and_retries_without_seed(tmp_path):
+    cache, target = tmp_path / "cache/source.duckdb", tmp_path / "published"
+
+    def incomplete(endpoint, params=None):
+        if endpoint == "/indices/bars/daily/topix":
+            return []
+        return request_payload(endpoint, params)
+
+    with pytest.raises(ValueError, match="not published"):
+        run(
+            cache=cache,
+            destination=target,
+            days=1,
+            end=date(2026, 9, 28),
+            client=SimpleNamespace(rows=incomplete),
+        )
+    assert not (target / "current.json").exists()
+    assert not (target / "raw-current.json").exists()
+    with duckdb.connect(str(cache), read_only=True) as conn:
+        for table in ("daily_prices", "master", "topix"):
+            assert (
+                conn.execute(f"SELECT count(*) FROM research.{table}").fetchone()[0]
+                == 0
+            )
+    report = run(
+        cache=cache,
+        destination=target,
+        days=1,
+        end=date(2026, 9, 28),
+        client=SimpleNamespace(rows=request_payload),
+    )
+    assert report["downloaded_sessions"] == 1
+    assert len(QuantJPDataHub(target).fetch_daily_kline("JP72030", adjust="none")) == 1
+
+
+def test_empty_deployment_with_no_open_session_does_not_publish(tmp_path):
+    target = tmp_path / "published"
+    with pytest.raises(ValueError, match="no published trading session"):
+        run(
+            cache=tmp_path / "cache/source.duckdb",
+            destination=target,
+            days=1,
+            end=date(2026, 9, 27),
+            client=SimpleNamespace(rows=request_payload),
+        )
+    assert not (target / "current.json").exists()
+
+
+@pytest.mark.parametrize("missing_manifest", [False, True])
+def test_empty_cache_cannot_replace_a_broken_existing_publication(
+    tmp_path, missing_manifest
+):
+    target = tmp_path / "published"
+    target.mkdir()
+    pointer = target / "raw-current.json"
+    pointer.write_text('{"version":"missing","path":"versions/missing"}')
+    if not missing_manifest:
+        version = target / "versions/missing"
+        version.mkdir(parents=True)
+        (version / "manifest.json").write_text("{}")
+    original = pointer.read_bytes()
+    with pytest.raises(ValueError, match="publication"):
+        run(
+            cache=tmp_path / "cache/source.duckdb",
+            destination=target,
+            days=1,
+            end=date(2026, 9, 28),
+            client=SimpleNamespace(
+                rows=lambda *a: pytest.fail("Must preserve pointer")
+            ),
+        )
+    assert pointer.read_bytes() == original
+
+
 def test_paginated_v2_client_and_no_credential_in_failure(monkeypatch):
     monkeypatch.setattr(
         "backend.services.engine.data_platform.jquants_client.time.sleep",

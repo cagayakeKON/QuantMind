@@ -34,6 +34,7 @@ import Editor from '@monaco-editor/react';
 import type { ColumnsType } from 'antd/es/table';
 import { adminService } from '../services/adminService';
 import { StrategyTemplateAdmin, StrategyTemplateUpsertRequest, StrategyTemplateParam } from '../types';
+import { MARKET_CONFIGS } from '../../../config/marketConfig';
 
 const { Text } = Typography;
 
@@ -53,6 +54,7 @@ const MARKET_OPTIONS = [
     { label: 'A股', value: 'a_share', color: 'red' },
     { label: '港股', value: 'hong_kong', color: 'blue' },
     { label: '美股', value: 'us_stock', color: 'green' },
+    { label: '日股', value: MARKET_CONFIGS.JP.adapterId, color: 'gold' },
     { label: '加密', value: 'crypto', color: 'purple' },
 ];
 

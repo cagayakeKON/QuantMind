@@ -21,6 +21,7 @@ symbol → 市场推断规则（infer_market）：
 from __future__ import annotations
 
 import os
+import math
 import re
 from datetime import date
 from decimal import Decimal
@@ -178,7 +179,16 @@ def japan_bar_rules(day: date, previous_close: float, close: float, metadata: di
 
 def japan_price_rules(day: date, previous_close: float, close: float, metadata: dict):
     """Price metadata can be cached even when historical board lots are unknown."""
-    from backend.services.simulation.jp.rules import daily_limit_width, tick_size
+    from backend.services.simulation.jp.rules import (
+        RuleDataMissing,
+        daily_limit_width,
+        tick_size,
+    )
+
+    if not math.isfinite(previous_close):
+        raise RuleDataMissing("JP previous close is not finite")
+    if not math.isfinite(close):
+        raise RuleDataMissing("JP quote is not finite")
 
     category = metadata.get("scale_category")
     if category is None or str(category) == "nan":

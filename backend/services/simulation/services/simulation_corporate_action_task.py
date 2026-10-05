@@ -46,8 +46,24 @@ async def run_simulation_corporate_action_task(
 ) -> None:
     """每交易日 08:30 后同步 QuantDB 公司行为并应用到模拟盘账户（幂等）。"""
     last_date = ""
+    last_jp_date = ""
     while True:
         try:
+            # JP has its own calendar and opens an hour ahead of Shanghai.
+            # Use the published daily factors through the same action service.
+            try:
+                jp_now = datetime.now(ZoneInfo("Asia/Tokyo"))
+                jp_today = jp_now.strftime("%Y%m%d")
+                if jp_today != last_jp_date and (jp_now.hour, jp_now.minute) >= (8, 30):
+                    from backend.services.simulation.services.market_schedule import open_registered_schedule_context
+
+                    schedule = open_registered_schedule_context("JP")
+                    if schedule.is_trading_day(jp_now.date()):
+                        await sync_corporate_actions_from_quantdb(market="JP")
+                        await SimulationCorporateActionService.apply_due_actions(market="JP")
+                    last_jp_date = jp_today
+            except Exception as error:
+                logger.warning("JP corporate-action task failed: %s", error)
             # 上海墙钟：容器时区不确定时 naive now() 会让 08:30 误触发。
             now = datetime.now(_SH_TZ)
             today = now.strftime("%Y%m%d")
