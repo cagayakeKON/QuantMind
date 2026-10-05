@@ -759,6 +759,7 @@ class RemoteSSHOrchestrator(TrainingOrchestrator):
         # 需保留相对 backend/ 的路径供 PYTHONPATH=backend_min 下 import backend.xxx
         # 依赖闭包（递归追踪）：stock_utils + stock_pool(builtins->constants) + runtime_secrets
         req_entries = [
+            "shared/model_metadata.py",
             "shared/stock_utils.py",
             "shared/runtime_secrets.py",
             "shared/training/schemas.py",

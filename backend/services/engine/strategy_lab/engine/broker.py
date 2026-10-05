@@ -88,9 +88,13 @@ class SimpleBroker:
     # ------------------------------------------------------------------
     def _close(self, symbol: str, today: pd.Timestamp) -> float | None:
         try:
-            s = self._provider.history(
-                symbol=symbol, n=1, field="close", today=today
-            )
+            if getattr(self._provider, "adjusted_trading_unit", None):
+                frame = self._provider.current_bar(symbol, today)
+                s = frame["close"] if not frame.empty else None
+            else:
+                s = self._provider.history(
+                    symbol=symbol, n=1, field="close", today=today
+                )
         except Exception as e:
             logger.debug("history fetch failed %s @ %s: %s", symbol, today, e)
             return None
@@ -119,16 +123,45 @@ class SimpleBroker:
     # ------------------------------------------------------------------
     # Order resolution
     # ------------------------------------------------------------------
-    def _trading_unit(self, symbol: str, today: pd.Timestamp) -> int:
+    def _trading_unit(self, symbol: str, today: pd.Timestamp) -> float:
+        adjusted = getattr(self._provider, "adjusted_trading_unit", None)
+        if adjusted:
+            return adjusted(symbol, today)
         resolver = getattr(self._provider, "trading_unit", None)
         return resolver(symbol, today) if resolver else self._lot_size
 
+    def _round_amount(self, amount, symbol, today):
+        resolver = getattr(self._provider, "round_amount_by_trade_unit", None)
+        if resolver:
+            return resolver(amount, symbol, today)
+        lot_size = self._trading_unit(symbol, today)
+        return (int(amount) // lot_size) * lot_size
+
+    def _order_price_and_unit(self, symbol, today):
+        if getattr(self._provider, "adjusted_trading_unit", None):
+            price = self._close(symbol, today)
+            return price, None if price is None else self._trading_unit(symbol, today)
+        # Retain the original resolver/quote call order for existing providers.
+        unit = self._trading_unit(symbol, today)
+        return self._close(symbol, today), unit
+
     def _qty_for_weight(
-        self, weight: float, price: float, equity: float, lot_size: int = LOT_SIZE
-    ) -> int:
+        self,
+        weight: float,
+        price: float,
+        equity: float,
+        lot_size: float = LOT_SIZE,
+        *,
+        symbol=None,
+        today=None,
+    ) -> float:
         if price <= 0 or weight <= 0:
             return 0
         target_value = equity * weight
+        if symbol is not None and getattr(
+            self._provider, "round_amount_by_trade_unit", None
+        ):
+            return self._round_amount(target_value / price, symbol, today)
         raw_qty = int(target_value // price)
         return (raw_qty // lot_size) * lot_size
 
@@ -147,16 +180,37 @@ class SimpleBroker:
         gross = slipped * qty
         commission = max(gross * self._ctx.commission, 0.0)
         cost = gross + commission
-        if cost > self._cash + 1e-6:
+        adjusted = getattr(self._provider, "round_amount_by_trade_unit", None)
+        cash_epsilon = 8 * math.ulp(self._cash) if adjusted else 1e-6
+        if cost > self._cash + cash_epsilon:
             # Cap qty downward to lot multiple that fits
-            max_qty = int(self._cash // (slipped * (1 + self._ctx.commission)))
-            lot_size = self._trading_unit(symbol, today)
-            qty = (max_qty // lot_size) * lot_size
+            if getattr(self._provider, "round_amount_by_trade_unit", None):
+                max_qty = self._cash / (slipped * (1 + self._ctx.commission))
+                qty = self._round_amount(max_qty, symbol, today)
+            else:
+                max_qty = int(self._cash // (slipped * (1 + self._ctx.commission)))
+                lot_size = self._trading_unit(symbol, today)
+                qty = (max_qty // lot_size) * lot_size
             if qty <= 0:
                 return
             gross = slipped * qty
             commission = max(gross * self._ctx.commission, 0.0)
             cost = gross + commission
+            if (
+                getattr(self._provider, "round_amount_by_trade_unit", None)
+                and cost > self._cash + cash_epsilon
+            ):
+                # Qlib's factor-rounding tolerance may round a cash-boundary
+                # order up. Keep this cash broker within its available balance.
+                qty -= self._trading_unit(symbol, today)
+                if qty <= 0:
+                    return
+                gross = slipped * qty
+                commission = max(gross * self._ctx.commission, 0.0)
+                cost = gross + commission
+        if adjusted and self._cash < cost <= self._cash + cash_epsilon:
+            # Absorb only float64 arithmetic rounding, never a real cash deficit.
+            cost = self._cash
         self._cash -= cost
         h = self._holdings.setdefault(symbol, _Holding(symbol=symbol))
         h.lots.append(_Lot(qty=qty, cost=cost, bought_on=today))
@@ -271,17 +325,25 @@ class SimpleBroker:
                                 )
                 # Then buy missing targets
                 for sym in o.targets:
-                    lot_size = self._trading_unit(sym, today)
-                    price = self._close(sym, today)
+                    price, lot_size = self._order_price_and_unit(sym, today)
                     if price is None:
                         continue
                     cur = self._holdings.get(sym)
                     cur_value = cur.market_value() if cur else 0.0
                     target_value = equity * weight
                     delta = target_value - cur_value
-                    if delta > price * lot_size:
-                        raw_qty = int(delta // price)
-                        qty = (raw_qty // lot_size) * lot_size
+                    adjusted = getattr(
+                        self._provider, "round_amount_by_trade_unit", None
+                    )
+                    if delta > price * lot_size or (
+                        adjusted
+                        and delta >= price * lot_size - 8 * math.ulp(price * lot_size)
+                    ):
+                        if adjusted:
+                            qty = self._round_amount(delta / price, sym, today)
+                        else:
+                            raw_qty = int(delta // price)
+                            qty = (raw_qty // lot_size) * lot_size
                         if qty > 0:
                             resolved.append(
                                 ("buy", sym, qty, price, o.reason or "rebalance", dict(o.detail))
@@ -292,24 +354,37 @@ class SimpleBroker:
                 if price is None:
                     continue
                 target_qty = self._qty_for_weight(
-                    o.weight or 0.0, price, equity, self._trading_unit(o.symbol, today)
+                    o.weight or 0.0,
+                    price,
+                    equity,
+                    self._trading_unit(o.symbol, today),
+                    symbol=o.symbol,
+                    today=today,
                 )
                 cur_qty = self._holdings[o.symbol].total_qty if o.symbol in self._holdings else 0
                 delta = target_qty - cur_qty
+                if getattr(
+                    self._provider, "round_amount_by_trade_unit", None
+                ) and not math.isclose(delta, -cur_qty):
+                    delta = math.copysign(
+                        self._round_amount(abs(delta), o.symbol, today), delta
+                    )
                 if delta > 0:
                     resolved.append(("buy", o.symbol, delta, price, o.reason, dict(o.detail)))
                 elif delta < 0:
                     resolved.append(("sell", o.symbol, -delta, price, o.reason, dict(o.detail)))
                 continue
             if o.side == "buy":
-                lot_size = self._trading_unit(o.symbol, today)
-                price = self._close(o.symbol, today)
+                price, lot_size = self._order_price_and_unit(o.symbol, today)
                 if price is None:
                     continue
                 if o.qty is not None:
-                    qty = (int(o.qty) // lot_size) * lot_size
+                    qty = self._round_amount(o.qty, o.symbol, today)
                 else:
-                    qty = self._qty_for_weight(o.weight or 0.0, price, equity, lot_size)
+                    qty = self._qty_for_weight(
+                        o.weight or 0.0, price, equity, lot_size,
+                        symbol=o.symbol, today=today,
+                    )
                 if qty > 0:
                     resolved.append(("buy", o.symbol, qty, price, o.reason, dict(o.detail)))
                 continue
@@ -323,11 +398,14 @@ class SimpleBroker:
                 if o.all:
                     qty = h.sellable_qty(today, self._t_plus_1)
                 elif o.qty is not None:
-                    qty = min(int(o.qty), h.sellable_qty(today, self._t_plus_1))
+                    if getattr(self._provider, "round_amount_by_trade_unit", None):
+                        qty = min(o.qty, h.sellable_qty(today, self._t_plus_1))
+                        if not math.isclose(qty, h.total_qty):
+                            qty = self._round_amount(qty, o.symbol, today)
+                    else:
+                        qty = min(int(o.qty), h.sellable_qty(today, self._t_plus_1))
                 elif o.weight is not None:
-                    qty = int(h.total_qty * o.weight)
-                    lot_size = self._trading_unit(o.symbol, today)
-                    qty = (qty // lot_size) * lot_size
+                    qty = self._round_amount(h.total_qty * o.weight, o.symbol, today)
                     qty = min(qty, h.sellable_qty(today, self._t_plus_1))
                 else:
                     qty = 0

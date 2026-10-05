@@ -68,7 +68,14 @@ export const InferenceCenterPage: React.FC = () => {
   const currentMarket = useAppSelector(selectCurrentMarket);
   const marketConfig = getMarketConfig(currentMarket);
   const activeMarket = useRef(currentMarket);
+  const marketRevision = useRef(0);
+  const crossedJPBoundary = activeMarket.current !== currentMarket && (activeMarket.current === 'JP' || currentMarket === 'JP');
+  if (crossedJPBoundary) {
+    marketRevision.current += 1;
+  }
   activeMarket.current = currentMarket;
+  const scopeRevision = marketRevision.current;
+  const captureMarketScope = useCallback(() => () => scopeRevision !== marketRevision.current, [scopeRevision]);
 
   // 顶层 Tab：'cross-section'（市场截面推理）| 'individual'（个股推理中心）
   // 从别的页面带 state.tab 跳进来时要真正生效（原来三元两支都写 'cross-section'，该 Tab 永远进不去）
@@ -133,6 +140,23 @@ export const InferenceCenterPage: React.FC = () => {
       setInputCode(remembered?.inputCode ?? (currentMarket === 'JP' ? '' : 'SH600519'));
       setPrediction(null);
       setKline([]);
+      setSingleStockLoading(false);
+      setRegisteredModels([]);
+      setSelectedModelId('');
+      setInferencePrecheck(null);
+      setInferenceHistory([]);
+      setLatestInferenceRun(null);
+      setLastInferenceRun(null);
+      setInferencePrecheckLoading(false);
+      setInferenceHistoryLoading(false);
+      setLatestInferenceRunLoading(false);
+      setInferenceTargetDate('');
+      setInferenceTargetLoading(false);
+      setInferenceRunning(false);
+      setInferPoolRef(null);
+      setInferPoolName('');
+      setInferPoolId(null);
+      setInferPoolPickerOpen(false);
       setShowCodeSuggestions(false);
       setCodeSuggestions([]);
     }
@@ -193,6 +217,10 @@ export const InferenceCenterPage: React.FC = () => {
   // 截面推理：按当前市场加载注册模型（用户模型 + 系统模型）
   // ─────────────────────────────────────────────────────────────
   const loadRegisteredModels = useCallback(async () => {
+    const revision = marketRevision.current;
+    const stale = () => revision !== marketRevision.current ||
+      ((currentMarket === 'JP' || activeMarket.current === 'JP') && activeMarket.current !== currentMarket);
+    if (stale()) return;
     setModelsLoading(true);
     try {
       const marketUpper = currentMarket.toUpperCase();
@@ -200,7 +228,7 @@ export const InferenceCenterPage: React.FC = () => {
         modelTrainingService.listUserModels(false, marketUpper).catch(() => ({ items: [], total: 0 })),
         modelTrainingService.listSystemModels(marketUpper).catch(() => []),
       ]);
-      if ((currentMarket === 'JP' || activeMarket.current === 'JP') && activeMarket.current !== currentMarket) return;
+      if (stale()) return;
       const activeUser = (uRes.items || []).filter((m) => m.status !== 'archived');
       const activeSys = (sList || []).map(systemModelToUserModel);
       const combined = [...activeUser, ...activeSys];
@@ -218,7 +246,7 @@ export const InferenceCenterPage: React.FC = () => {
     } catch (err) {
       console.error('加载注册模型失败:', err);
     } finally {
-      setModelsLoading(false);
+      if (!stale()) setModelsLoading(false);
     }
   }, [selectedModelId, currentMarket]);
 
@@ -238,9 +266,12 @@ export const InferenceCenterPage: React.FC = () => {
 
   // 截面推理：Precheck（基准日跟随后端的数据回退，避免输入框与实际数据日不一致）
   const loadPrecheck = useCallback(async (modelId: string, checkDate?: string) => {
+    const stale = captureMarketScope();
+    if (stale()) return null;
     setInferencePrecheckLoading(true);
     try {
       const resp = await modelTrainingService.precheckInference(modelId, checkDate);
+      if (stale()) return null;
       setInferencePrecheck(resp);
       // 后端在请求日无数据时会自动回退到最新可用数据日（data_trade_date），
       // 输入框必须同步，否则“行情基准日”显示的日期与实际推理用的数据日脱节。
@@ -252,15 +283,17 @@ export const InferenceCenterPage: React.FC = () => {
       }
       return resp;
     } catch {
-      setInferencePrecheck(null);
+      if (!stale()) setInferencePrecheck(null);
       return null;
     } finally {
-      setInferencePrecheckLoading(false);
+      if (!stale()) setInferencePrecheckLoading(false);
     }
-  }, []);
+  }, [captureMarketScope]);
 
   // 截面推理：目标日期
   const loadInferenceTargetDate = useCallback(async () => {
+    const stale = captureMarketScope();
+    if (stale()) return;
     if (!inferenceDate) {
       setInferenceTargetDate('—');
       return;
@@ -269,20 +302,24 @@ export const InferenceCenterPage: React.FC = () => {
     try {
       const base = inferenceDate.format('YYYY-MM-DD');
       const resolved = await modelTrainingService.resolveInferenceDateByCalendar(marketConfig.calendar, base);
+      if (stale()) return;
       const predicted = await modelTrainingService.calcTargetDateByCalendar(marketConfig.calendar, resolved.date, horizonDays);
+      if (stale()) return;
       setInferenceTargetDate(predicted || '—');
     } catch {
-      setInferenceTargetDate('—');
+      if (!stale()) setInferenceTargetDate('—');
     } finally {
-      setInferenceTargetLoading(false);
+      if (!stale()) setInferenceTargetLoading(false);
     }
-  }, [inferenceDate, horizonDays, marketConfig.calendar]);
+  }, [inferenceDate, horizonDays, marketConfig.calendar, captureMarketScope]);
 
   // 截面推理：历史与状态
   const loadInferenceHistory = useCallback(async (
     modelId: string,
     options?: { runId?: string; status?: string; inferenceDate?: string; page?: number; pageSize?: number }
   ) => {
+    const stale = captureMarketScope();
+    if (stale()) return;
     setInferenceHistoryLoading(true);
     try {
       const resp = await modelTrainingService.listInferenceHistory(modelId, {
@@ -292,29 +329,33 @@ export const InferenceCenterPage: React.FC = () => {
         page: options?.page ?? 1,
         pageSize: options?.pageSize ?? 20,
       });
+      if (stale()) return;
       setInferenceHistory(resp.items);
       if (lastInferenceRun === null) {
         const firstCompleted = resp.items.find((r) => r.status === 'completed') ?? null;
         setLastInferenceRun(firstCompleted);
       }
     } catch {
-      setInferenceHistory([]);
+      if (!stale()) setInferenceHistory([]);
     } finally {
-      setInferenceHistoryLoading(false);
+      if (!stale()) setInferenceHistoryLoading(false);
     }
-  }, [lastInferenceRun]);
+  }, [lastInferenceRun, captureMarketScope]);
 
   const loadLatestInferenceRun = useCallback(async (modelId: string) => {
+    const stale = captureMarketScope();
+    if (stale()) return;
     setLatestInferenceRunLoading(true);
     try {
       const latest = await modelTrainingService.getLatestInferenceRun(modelId);
+      if (stale()) return;
       setLatestInferenceRun(latest);
     } catch {
-      setLatestInferenceRun(null);
+      if (!stale()) setLatestInferenceRun(null);
     } finally {
-      setLatestInferenceRunLoading(false);
+      if (!stale()) setLatestInferenceRunLoading(false);
     }
-  }, []);
+  }, [captureMarketScope]);
 
   const refreshCrossSectionPanel = useCallback(async (modelId: string) => {
     const currentDate = inferenceDate ? inferenceDate.format('YYYY-MM-DD') : undefined;
@@ -325,6 +366,7 @@ export const InferenceCenterPage: React.FC = () => {
   }, [inferenceDate, loadLatestInferenceRun, loadPrecheck]);
 
   useEffect(() => {
+    if (crossedJPBoundary) return;
     if (selectedModel && topTab === 'cross-section' && crossSectionMode === 'single') {
       void refreshCrossSectionPanel(selectedModel.model_id);
     }
@@ -337,6 +379,7 @@ export const InferenceCenterPage: React.FC = () => {
   }, [topTab, loadInferenceTargetDate]);
 
   useEffect(() => {
+    if (crossedJPBoundary) return;
     if (selectedModel && topTab === 'cross-section' && crossSectionMode === 'single') {
       void loadInferenceHistory(selectedModel.model_id, {
         runId: historyRunIdFilter || undefined,
@@ -353,54 +396,68 @@ export const InferenceCenterPage: React.FC = () => {
   }, [selectedModel?.model_id]);
 
   const handleRunCrossSectionInference = async () => {
+    const stale = captureMarketScope();
+    if (stale()) return;
     if (!selectedModel || !inferenceDate) return;
     setInferenceRunning(true);
     setLastInferenceRun(null);
     try {
       const requestedDateStr = inferenceDate.format('YYYY-MM-DD');
       const resolvedDate = await modelTrainingService.resolveInferenceDateByCalendar(marketConfig.calendar, requestedDateStr);
+      if (stale()) return;
       const inferenceDateStr = resolvedDate.date;
       if (resolvedDate.adjusted && inferenceDateStr) {
         setInferenceDate(dayjs(inferenceDateStr));
         message.info(`所选日期 ${requestedDateStr} 非交易日，已自动回退到最近交易日 ${inferenceDateStr}`);
       }
       const precheck = await loadPrecheck(selectedModel.model_id, inferenceDateStr);
+      if (stale()) return;
       if (!precheck?.passed) {
         message.error('前置检查未通过，请先处理阻断项');
         return;
       }
       const runInfo = await modelTrainingService.runModelInference(selectedModel.model_id, inferenceDateStr, inferPoolRef ?? undefined);
+      if (stale()) return;
       setLastInferenceRun(runInfo);
       message.success(`截面推理已完成: 产物已入库（样本数: ${runInfo.signals_count}${inferPoolName ? `，股票池: ${inferPoolName}` : ''}）`);
       void refreshCrossSectionPanel(selectedModel.model_id);
       void loadInferenceHistory(selectedModel.model_id);
     } catch (err: any) {
+      if (stale()) return;
       message.error(`推理失败: ${err?.message ?? '未知错误'}`);
     } finally {
-      setInferenceRunning(false);
+      if (!stale()) setInferenceRunning(false);
     }
   };
 
   const handleSetDefaultModel = async () => {
+    const stale = captureMarketScope();
+    if (stale()) return;
     if (!selectedModel) return;
     const canonicalId = selectedModel.model_id.startsWith('sys-') ? selectedModel.model_id.slice(4) : selectedModel.model_id;
     try {
       await modelTrainingService.setDefaultModel(canonicalId);
+      if (stale()) return;
       message.success(`已设为默认模型：${selectedModel.model_id}`);
       await loadRegisteredModels();
     } catch (err: any) {
+      if (stale()) return;
       message.error(`设置失败: ${err?.message ?? '未知'}`);
     }
   };
 
   const handleDeleteHistory = async (runId: string) => {
+    const stale = captureMarketScope();
+    if (stale()) return;
     if (!selectedModel) return;
     try {
       await modelTrainingService.deleteInferenceHistory(runId);
+      if (stale()) return;
       message.success('历史记录已删除');
       void loadInferenceHistory(selectedModel.model_id);
       void loadLatestInferenceRun(selectedModel.model_id);
     } catch (err: any) {
+      if (stale()) return;
       message.error(`删除失败: ${err?.message ?? '未知错误'}`);
     }
   };
@@ -465,6 +522,10 @@ export const InferenceCenterPage: React.FC = () => {
     targetModelId?: string,
     targetHorizon?: number
   ) => {
+    const revision = marketRevision.current;
+    const stale = () => revision !== marketRevision.current ||
+      ((currentMarket === 'JP' || activeMarket.current === 'JP') && activeMarket.current !== currentMarket);
+    if (stale()) return;
     const sym = (targetSymbol || symbol || (currentMarket === 'JP' ? '' : 'SH600519')).trim();
     // 主模型：显式指定 > 首个勾选模型；勾选的模型集合整体传给后端同时推理
     const mId = targetModelId || singleStockModelId || consensusModelIds[0] || '';
@@ -483,7 +544,7 @@ export const InferenceCenterPage: React.FC = () => {
       // 实际走势对照预测；数字口径（基准价/扇形）仍按基准日截断，无前视泄露
       const startStr = singleStockDate ? singleStockDate.subtract(100, 'day').format('YYYY-MM-DD') : undefined;
       const klineData = await inferenceCenterService.getStockKline(sym, 60, undefined, startStr);
-      if ((currentMarket === 'JP' || activeMarket.current === 'JP') && activeMarket.current !== currentMarket) return;
+      if (stale()) return;
       if (klineData && klineData.length > 0) {
         setKline(klineData);
       }
@@ -497,7 +558,7 @@ export const InferenceCenterPage: React.FC = () => {
         consensus_model_ids: consensusModelIds.length ? consensusModelIds : undefined,
         execute: Boolean(targetSymbol === undefined && targetModelId === undefined),
       });
-      if ((currentMarket === 'JP' || activeMarket.current === 'JP') && activeMarket.current !== currentMarket) return;
+      if (stale()) return;
 
       if (res && res.status === 'success') {
         setPrediction(res);
@@ -510,6 +571,7 @@ export const InferenceCenterPage: React.FC = () => {
         }
       }
     } catch (e: any) {
+      if (stale()) return;
       console.error('获取真实推理数据失败:', e);
       const apiMessage =
         e?.response?.data?.detail ||
@@ -517,7 +579,7 @@ export const InferenceCenterPage: React.FC = () => {
         e?.response?.data?.message;
       message.error(apiMessage || `推理接口异常: ${e?.message || '未知错误'}`);
     } finally {
-      setSingleStockLoading(false);
+      if (!stale()) setSingleStockLoading(false);
     }
   }, [symbol, singleStockModelId, horizon, singleStockDate, currentMarket, consensusModelIds]);
 

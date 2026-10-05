@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 from qlib.backtest.exchange import Exchange
+from qlib.backtest.decision import Order
 
 from backend.services.engine.data_platform.jp_trading_units import read_trading_units
 from backend.shared.stock_utils import StockCodeUtil
@@ -19,7 +20,7 @@ class JpExchange(CnExchange):
     economics. This daily-bar simulation has no separate settlement cash ledger.
     """
 
-    def __init__(self, *, trading_units_path=None, **kwargs):
+    def __init__(self, *, trading_units_path=None, sell_commission=None, **kwargs):
         # Public research configurations cross JSON and YAML, whose sequences
         # are lists. Restore Qlib's documented tuple arguments at this boundary.
         for field in ("limit_threshold", "volume_threshold"):
@@ -36,6 +37,8 @@ class JpExchange(CnExchange):
             )
         if min_cost is not None:
             kwargs.setdefault("min_commission", min_cost)
+        if sell_commission is None:
+            sell_commission = close_cost
         kwargs.setdefault("trade_unit", None)
         self.trading_units = (
             read_trading_units(Path(trading_units_path).read_bytes())
@@ -43,6 +46,19 @@ class JpExchange(CnExchange):
             else {}
         )
         super().__init__(**kwargs)
+        self.sell_commission = (
+            self.commission if sell_commission is None else sell_commission
+        )
+
+    def calculate_cost(self, stock_id, trade_val, direction, market_volume_val=0.0):
+        cost = super().calculate_cost(stock_id, trade_val, direction, market_volume_val)
+        if direction == Order.SELL and trade_val > 1e-5:
+            # Preserve the parent impact/minimum-cost callback, replacing only
+            # its symmetric commission with the explicit sell-side commission.
+            cost += max(trade_val * self.sell_commission, self.min_commission) - max(
+                trade_val * self.commission, self.min_commission
+            )
+        return cost
 
     def _lot(self, stock_id, start_time):
         day = pd.Timestamp(start_time).date()

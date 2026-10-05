@@ -26,6 +26,7 @@ from backend.services.trade_shared.redis_client import get_redis
 from backend.services.trade_shared.trade_config import settings
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.fundamental_aligner import fundamental_aligner
+from backend.shared.model_metadata import declared_model_market
 from backend.shared.strategy_storage import get_strategy_storage_service
 
 from backend.services.trade_shared.portfolio.models import Portfolio
@@ -1451,6 +1452,8 @@ class ManualExecutionService:
         if target_horizon_days <= 0:
             target_horizon_days = 5
         model_market = str(model_meta.get("market") or "CN").upper()
+        if declared_model_market(model_meta) == "JP":
+            model_market = "JP"
 
         latest_run = await self._load_latest_default_model_inference_run(
             tenant_id=tenant, user_id=uid, model_id=default_model_id

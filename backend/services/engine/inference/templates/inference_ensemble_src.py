@@ -46,6 +46,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from backend.shared.model_metadata import declared_model_market
+
 try:
     import lightgbm as lgb
 except ImportError:
@@ -407,9 +409,10 @@ def predict_with_model(model, meta: dict, day_df: pd.DataFrame) -> dict[str, flo
     if _leaky:
         day_df = day_df.drop(columns=_leaky, errors="ignore")
 
-    if str((meta.get("context") or {}).get("market") or "").upper() == "JP":
+    if declared_model_market(meta) == "JP":
         # Apply each member's training field mapping to the shared raw snapshot.
         sources = meta.get("factor_field_sources") or {}
+        mapped = {}
         for feature in feature_cols:
             source = sources.get(feature, feature)
             if source not in day_df.columns:
@@ -417,12 +420,13 @@ def predict_with_model(model, meta: dict, day_df: pd.DataFrame) -> dict[str, flo
                     "JP ensemble source is missing published model features: "
                     + str(source)
                 )
-            day_df[feature] = day_df[source]
+            mapped[feature] = day_df[source].copy()
+        day_df = day_df.assign(**mapped)
 
     # 缺失列补 0
     missing = [c for c in feature_cols if c not in day_df.columns]
     if missing:
-        if str((meta.get("context") or {}).get("market") or "").upper() == "JP":
+        if declared_model_market(meta) == "JP":
             raise ValueError(
                 "JP ensemble source is missing published model features: "
                 + ", ".join(missing)
@@ -431,13 +435,25 @@ def predict_with_model(model, meta: dict, day_df: pd.DataFrame) -> dict[str, flo
         for c in missing:
             day_df[c] = 0.0
 
-    X = day_df[feature_cols].copy()
-    for col, val in fill_values.items():
-        if col in X.columns:
-            X[col] = X[col].fillna(val)
-    X = X.fillna(0.0)
+    preprocessing = meta.get("preprocessing")
+    if (
+        declared_model_market(meta) == "JP"
+        and isinstance(preprocessing, dict)
+        and preprocessing.get("enabled")
+    ):
+        from backend.services.engine.inference.templates.inference_parquet import (
+            preprocess,
+        )
+
+        X, symbols = preprocess(day_df, meta)
+    else:
+        X = day_df[feature_cols].copy()
+        for col, val in fill_values.items():
+            if col in X.columns:
+                X[col] = X[col].fillna(val)
+        X = X.fillna(0.0)
+        symbols = day_df["symbol"].tolist()
     X_values = X.values.astype(np.float32)
-    symbols = day_df["symbol"].tolist()
 
     is_stacking = isinstance(model, _StackingEnsemble)
     if is_stacking:
@@ -754,7 +770,7 @@ def main():
         try:
             model, meta = load_source_model(m_dir)
             if market == "JP" and (
-                str((meta.get("context") or {}).get("market") or "").upper() != "JP"
+                declared_model_market(meta) != "JP"
                 or meta.get("data_source") != "quantdb_factors"
                 or meta.get("factor_source") != "l1_factors"
             ):

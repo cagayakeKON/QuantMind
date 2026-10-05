@@ -23,7 +23,7 @@ def test_jp_daily_sdk_retains_original_max_holding_risk_rule(model_data):
     def on_bar(ctx, bar):
         ctx.set_max_holding_days(bar.symbol, 1)
         if bar.date == pd.Timestamp("2026-09-28"):
-            ctx.buy(bar.symbol, qty=100)
+            ctx.buy(bar.symbol, weight=0.2)
 
     result = loop.run_backtest(
         ctx=Context(),
@@ -58,7 +58,7 @@ def test_jp_sdk_runs_original_broker_on_published_qlib_data(model_data, monkeypa
     def on_bar(ctx, bar):
         seen.append((bar.close, ctx.history(bar.symbol, n=1).iloc[-1]))
         if bar.date == pd.Timestamp("2026-09-28"):
-            ctx.buy(bar.symbol, qty=100)
+            ctx.buy(bar.symbol, weight=0.2)
         elif bar.date == pd.Timestamp("2026-09-30"):
             ctx.sell(bar.symbol, all=True)
 

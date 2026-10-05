@@ -465,10 +465,17 @@ async def get_simulation_account(
     )
 
     cached = read_existing_jp_account(redis, auth.tenant_id, uid)
-    try:
-        await require_standard_account(db, auth.tenant_id, uid, cached=cached)
-    except LegacyJPNativeState as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if cached is not None and market != "JP":
+        raise HTTPException(
+            status_code=409,
+            detail="An existing native-JPY account is retained read-only. "
+            "It cannot be interpreted as the standard base-currency account.",
+        )
+    if market == "JP":
+        try:
+            await require_standard_account(db, auth.tenant_id, uid, cached=cached)
+        except LegacyJPNativeState as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     account = await manager.get_account(uid, tenant_id=auth.tenant_id, market=market)
     if not account:
         # 不自动初始化，返回空账户标记，由前端引导用户去个人中心重置

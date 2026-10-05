@@ -52,6 +52,7 @@ from backend.services.engine.services.model_inference_persistence import (
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.inference_stats import compute_score_distribution
 from backend.shared.model_registry import model_registry_service
+from backend.shared.model_metadata import declared_model_market, model_context_market
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 from backend.shared.trading_calendar import calendar_service
 
@@ -232,6 +233,8 @@ def _load_production_models() -> list[dict[str, Any]]:
         market_tag = str(
             meta.get("market") or ctx.get("market") or tc.get("market") or "CN"
         ).upper()
+        if declared_model_market(meta) == "JP":
+            market_tag = "JP"
 
         # metrics：新格式在 meta.metrics，旧格式在 performance_metrics
         new_metrics = meta.get("metrics", {})
@@ -457,6 +460,12 @@ def _get_model_market(model_dir: Path) -> str:
     if meta_file.is_file():
         try:
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            if (
+                declared_model_market(meta) == "JP"
+                or model_context_market(meta) == "JP"
+            ):
+                declared = declared_model_market(meta)
+                return declared if declared in _MARKET_CALENDAR else "CN"
             context = meta.get("context")
             if isinstance(context, dict):
                 market = str(context.get("market", "")).upper()
@@ -3798,9 +3807,7 @@ async def _load_stock_pred_history(
     if not model or not storage_path:
         return [], None
 
-    if jp_symbol and (
-        str((model.get("metadata_json") or {}).get("market", "CN")).upper() != "JP"
-    ):
+    if jp_symbol and declared_model_market(model.get("metadata_json")) != "JP":
         return [], None
 
     code6 = StockCodeUtil.to_prefix(sym) if jp_symbol else re.sub(r"[^0-9]", "", sym)

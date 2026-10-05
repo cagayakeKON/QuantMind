@@ -1,6 +1,7 @@
 """Registered native market inputs behind the existing Strategy Lab provider API."""
 
 from datetime import date, timedelta
+import math
 import pandas as pd
 from backend.shared.stock_utils import StockCodeUtil
 from .data_provider import QlibProvider
@@ -48,6 +49,56 @@ class LocalLabProvider(QlibProvider):
 
         self.trading_rules = rules_for(market)
         self.trading_units = {}
+        self._qlib_calendar = None
+
+    def _load(self, symbol, start, end):
+        """Read the pinned Qlib store without replacing process-global providers.
+
+        Auxiliary Lab runs execute in API threads. Qlib's global ``D`` and
+        ``qlib.init`` therefore cannot be used here, even though the regular
+        Lab worker is a subprocess. Official file storage accepts an explicit
+        URI, preserving the same calendar indices and float32 fields per run.
+        """
+        from .qlib_file_storage import (
+            PinnedCalendarStorage,
+            PinnedFeatureStorage,
+        )
+
+        cache_key = f"{symbol}@{start}~{end}"
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+        provider_uri = {"day": self.data_path}
+        if self._qlib_calendar is None:
+            calendar = PinnedCalendarStorage(provider_uri, self.region)
+            # Keep auxiliary reads independent of Qlib's process-wide cache.
+            self._qlib_calendar = pd.DatetimeIndex(pd.to_datetime(calendar.data))
+        calendar = self._qlib_calendar
+        # Match QlibProvider's day-string boundaries, including aware inputs.
+        start, end = pd.Timestamp(start.strftime("%Y-%m-%d")), pd.Timestamp(
+            end.strftime("%Y-%m-%d")
+        )
+        first, last = calendar.searchsorted(start), calendar.searchsorted(end, "right")
+        fields = ("open", "high", "low", "close", "volume", "factor")
+        qsymbol = StockCodeUtil.to_qlib(symbol, market=self.market)
+        columns = {}
+        for field in fields:
+            values = PinnedFeatureStorage(
+                qsymbol, field, "day", provider_uri=provider_uri
+            )[first:last]
+            # D.features aligns the stored series, not the entire requested
+            # calendar. Padding outside every field's stored span would invent
+            # rows after delisting (or before listing) and break as-of history.
+            columns[field] = pd.Series(
+                values.to_numpy(), index=calendar[values.index.to_numpy(dtype=int)]
+            )
+        frame = pd.DataFrame(columns).rename_axis("datetime")
+        if frame.empty:
+            self._cache[cache_key] = pd.DataFrame()
+            return self._cache[cache_key]
+        frame.index.freq = None
+        frame["adj_close"] = frame["close"]
+        self._cache[cache_key] = frame
+        return frame
 
     def trading_unit(self, symbol, today):
         day = pd.Timestamp(today).date()
@@ -58,6 +109,49 @@ class LocalLabProvider(QlibProvider):
         if day >= date(2018, 10, 1):
             return self.trading_rules.lot_size
         raise ValueError(f"Historical JP trading unit is unavailable: {code}/{day}")
+
+    def _execution_factor(self, symbol, today):
+        series = super().history(symbol=symbol, n=1, field="factor", today=today)
+        if series.empty or series.index[-1].date() != pd.Timestamp(today).date():
+            raise ValueError(f"JP execution factor is unavailable: {symbol}/{today}")
+        factor = float(series.iloc[-1])
+        if not math.isfinite(factor) or factor <= 0:
+            raise ValueError(f"JP execution factor is invalid: {symbol}/{today}")
+        # Qlib stores prices and factors independently as float32. Reconcile
+        # their rounding against this publication's exact raw close so one raw
+        # lot costs exactly that lot's quoted value at the adjusted close.
+        prices = super().history(symbol=symbol, n=1, field="close", today=today)
+        raw = self._slice(symbol, pd.Timestamp(today), 1, adjust="raw")
+        if (
+            prices.empty
+            or prices.index[-1].date() != pd.Timestamp(today).date()
+            or raw.empty
+            or raw.index[-1].date() != pd.Timestamp(today).date()
+        ):
+            raise ValueError(
+                f"JP execution factor prices are unavailable: {symbol}/{today}"
+            )
+        raw_close = float(raw.close.iloc[-1])
+        if not math.isfinite(raw_close) or raw_close <= 0:
+            raise ValueError(f"JP raw execution price is invalid: {symbol}/{today}")
+        coherent_factor = float(prices.iloc[-1]) / raw_close
+        if not math.isfinite(coherent_factor) or not math.isclose(
+            coherent_factor, factor, rel_tol=2 * 2**-23, abs_tol=0.0
+        ):
+            raise ValueError(
+                f"JP execution factor disagrees with its prices: {symbol}/{today}"
+            )
+        return coherent_factor
+
+    def adjusted_trading_unit(self, symbol, today):
+        return self.trading_unit(symbol, today) / self._execution_factor(symbol, today)
+
+    def round_amount_by_trade_unit(self, amount, symbol, today):
+        """Round adjusted shares in raw lots, using the published Qlib $factor."""
+        unit = self.trading_unit(symbol, today)
+        factor = self._execution_factor(symbol, today)
+        # Qlib adds 0.1 raw share before flooring to avoid float32 factor drift.
+        return (amount * factor + 0.1) // unit * unit / factor
 
     def calendar(self, start, end):
         return [

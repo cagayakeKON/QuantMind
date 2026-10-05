@@ -396,8 +396,12 @@ async def test_internal_sync_reads_same_user_simulation_account(pg_consumer):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_metadata",
+    [{"market": "JP"}, {"context": {"market": "JP"}}],
+)
 async def test_jp_precheck_uses_local_daily_and_never_autoselects_default(
-    jp_daily, monkeypatch
+    jp_daily, monkeypatch, model_metadata
 ):
     class Result:
         def mappings(self):
@@ -414,7 +418,7 @@ async def test_jp_precheck_uses_local_daily_and_never_autoselects_default(
     from backend.shared.model_registry import model_registry_service
 
     default = AsyncMock(
-        return_value={"model_id": "jp", "metadata_json": {"market": "JP"}}
+        return_value={"model_id": "jp", "metadata_json": model_metadata}
     )
     monkeypatch.setattr(model_registry_service, "get_default_model", default)
     monkeypatch.setattr(

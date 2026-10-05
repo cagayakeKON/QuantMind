@@ -22,6 +22,9 @@ from sqlalchemy import text
 from backend.services.engine.data_platform.quantdb_hub import _resolve_data_dir
 from backend.shared.database_manager_v2 import get_session
 from backend.shared.inference_stats import compute_score_distribution
+from backend.shared.model_metadata import (
+    declared_model_market, inference_model_market, model_context_market,
+)
 from backend.shared.redis_sentinel_client import get_redis_sentinel_client
 from backend.shared.stock_utils import StockCodeUtil
 
@@ -1157,8 +1160,16 @@ async def get_available_models(tid: str, uid: str, market: str | None = None) ->
         # 优化：先查 qm_user_models（小表 38 行），再用 EXISTS 检查快照（大表 162K 行）
         # market 过滤与模型管理页一致：metadata_json.market 与 context.market 都认，
         # 老模型（两处皆无 market 字段）仅在 CN 市场显示
-        sql = text("""
+        market_filter = "" if market_upper == "JP" else """
+              AND COALESCE(
+                    NULLIF(UPPER(BTRIM(um.metadata_json->>'market')), ''),
+                    NULLIF(UPPER(BTRIM(um.metadata_json->'context'->>'market')), ''),
+                    'CN'
+                  ) = :market
+        """
+        sql = text(f"""
             SELECT um.model_id,
+                   um.metadata_json AS model_metadata,
                    COALESCE(um.metadata_json->>'display_name', um.metadata_json->>'model_name') AS display_name,
                     um.metadata_json->>'framework' AS framework,
                     um.metadata_json->>'model_type' AS model_type,
@@ -1174,16 +1185,14 @@ async def get_available_models(tid: str, uid: str, market: str | None = None) ->
             FROM qm_user_models um
             WHERE um.tenant_id = :tid AND um.user_id = :uid AND um.status != 'archived'
               AND BTRIM(COALESCE(um.model_id, '')) <> ''
-              AND COALESCE(
-                    NULLIF(UPPER(BTRIM(um.metadata_json->>'market')), ''),
-                    NULLIF(UPPER(BTRIM(um.metadata_json->'context'->>'market')), ''),
-                    'CN'
-                  ) = :market
+              {market_filter}
             ORDER BY has_inference DESC, um.updated_at DESC
         """)
         res = await session.execute(sql, params)
         models = []
         for r in res.mappings():
+            if market_upper == "JP" and declared_model_market(r["model_metadata"]) != "JP":
+                continue
             mid = r["model_id"]
             name = r["display_name"] or _humanize_model_name(mid)
             models.append(
@@ -1214,7 +1223,13 @@ async def get_available_models(tid: str, uid: str, market: str | None = None) ->
                 if mid in seen_mids:
                     continue
                 meta = json.loads(p.read_text(encoding="utf-8"))
-                m_market = str((meta.get("context") or {}).get("market") or meta.get("market") or "CN").upper()
+                if (
+                    declared_model_market(meta) == "JP"
+                    or model_context_market(meta) == "JP"
+                ):
+                    m_market = declared_model_market(meta)
+                else:
+                    m_market = str((meta.get("context") or {}).get("market") or meta.get("market") or "CN").upper()
                 if m_market == market_upper or not market:
                     seen_mids.add(mid)
                     name = meta.get("job_name") or meta.get("display_name") or _humanize_model_name(mid)
@@ -1824,6 +1839,9 @@ async def _infer_market_from_run(tid: str, uid: str, run_id: str) -> str | None:
             row2 = res2.first()
             if row2 and row2[0]:
                 meta = row2[0] if isinstance(row2[0], dict) else json.loads(row2[0])
+                if declared_model_market(meta) == "JP" or model_context_market(meta) == "JP":
+                    market = inference_model_market(meta, default="")
+                    return market if market in ("CN", "HK", "JP", "US", "CRYPTO") else None
                 context = meta.get("context")
                 if isinstance(context, dict):
                     market = str(context.get("market", "")).upper()
@@ -1898,9 +1916,7 @@ async def _model_market(
     if row[1]:
         try:
             meta = row[1] if isinstance(row[1], dict) else json.loads(row[1])
-            m = str((meta.get("context") or {}).get("market", "")).upper()
-            if not m and str(meta.get("market", "")).upper() == "JP":
-                m = "JP"
+            m = inference_model_market(meta, default="")
             if m in ("CN", "HK", "JP", "US", "CRYPTO"):
                 market = m
         except Exception:
@@ -1990,14 +2006,24 @@ async def _jp_snapshot_universe(tid, uid, model_id, run_id, limit, offset):
     if run_id:
         where += " AND snap.run_id=:rid"
         params["rid"] = run_id
-    where += """ AND EXISTS (
-        SELECT 1 FROM qm_user_models m
-        WHERE m.tenant_id=snap.tenant_id AND m.user_id=snap.user_id
-          AND m.model_id=snap.model_id
-          AND (UPPER(m.metadata_json::jsonb->'context'->>'market')='JP'
-               OR (COALESCE(m.metadata_json::jsonb->'context'->>'market','')=''
-                   AND UPPER(m.metadata_json::jsonb->>'market')='JP')))"""
     async with get_session(read_only=True) as session:
+        # Resolve only owned JP declarations with the shared parser. Casting
+        # arbitrary string contexts in SQL would let malformed unrelated
+        # metadata abort the page. Existing non-JP readers remain unchanged.
+        model_rows = (
+            await session.execute(
+                text(
+                    "SELECT model_id, metadata_json FROM qm_user_models "
+                    "WHERE tenant_id=:tid AND user_id=:uid"
+                ),
+                {"tid": tid, "uid": uid},
+            )
+        ).all()
+        params["jp_model_ids"] = [
+            str(mid) for mid, metadata in model_rows
+            if declared_model_market(metadata) == "JP"
+        ]
+        where += " AND snap.model_id = ANY(CAST(:jp_model_ids AS TEXT[]))"
         page = (
             await session.execute(
                 text(

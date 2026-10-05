@@ -614,6 +614,7 @@ return tostring(granted)
             )
         side = str(order.side.value).lower()
         available_volume = None
+        total_volume = None
         if side == "sell" and isinstance(account_snapshot, dict):
             positions = account_snapshot.get("positions") or {}
             pos = positions.get(order.symbol)
@@ -624,6 +625,7 @@ return tostring(granted)
                     StockCodeUtil.to_suffix(order.symbol)
                 ) or positions.get(StockCodeUtil.to_prefix(order.symbol))
             if isinstance(pos, dict):
+                total_volume = float(pos.get("volume", 0) or 0)
                 avail = pos.get("available_volume")
                 available_volume = (
                     float(pos.get("volume", 0) or 0) if avail is None else float(avail)
@@ -666,6 +668,7 @@ return tostring(granted)
             bar=bar,
             cfg=cfg,
             available_volume=available_volume,
+            total_volume=total_volume,
         )
         if not mr.success:
             return ExecutionResult(success=False, message=mr.reason)

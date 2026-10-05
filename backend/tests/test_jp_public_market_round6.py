@@ -110,6 +110,16 @@ async def research_pg(publications, monkeypatch):
                 "CREATE TABLE engine_signal_scores(tenant_id TEXT,user_id TEXT,run_id TEXT,symbol TEXT,quality JSONB)",
             ]:
                 await conn.execute(text(ddl))
+            await conn.execute(
+                text(
+                    "ALTER TABLE qm_user_models ADD COLUMN status TEXT DEFAULT 'ready', ADD COLUMN metrics_json JSONB, ADD COLUMN updated_at TIMESTAMPTZ DEFAULT NOW()"
+                )
+            )
+            await conn.execute(
+                text(
+                    "ALTER TABLE qm_model_inference_runs ADD COLUMN status TEXT DEFAULT 'completed'"
+                )
+            )
             model = publications.parent / "latest-model"
             model.mkdir()
             pd.DataFrame(
@@ -137,7 +147,7 @@ async def research_pg(publications, monkeypatch):
             ]:
                 await conn.execute(
                     text(
-                        "INSERT INTO qm_user_models VALUES(:tid,'7',:mid,:path,CAST(:meta AS JSONB))"
+                        "INSERT INTO qm_user_models(tenant_id,user_id,model_id,storage_path,metadata_json) VALUES(:tid,'7',:mid,:path,CAST(:meta AS JSONB))"
                     ),
                     {
                         "tid": tid,
@@ -165,7 +175,7 @@ async def research_pg(publications, monkeypatch):
                 }
                 await conn.execute(
                     text(
-                        "INSERT INTO qm_model_inference_runs VALUES(:tid,'7',:mid,:rid)"
+                        "INSERT INTO qm_model_inference_runs(tenant_id,user_id,model_id,run_id) VALUES(:tid,'7',:mid,:rid)"
                     ),
                     params,
                 )
@@ -220,9 +230,38 @@ async def research_pg(publications, monkeypatch):
 
 @pytest.mark.skipif(os.getenv("QM_JP_TEST_PG") != "1", reason="UUID PG audit opt-in")
 @pytest.mark.asyncio
-async def test_public_research_overview_and_saved_runs_keep_owned_sources(research_pg):
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"market": "JP"},
+        {"context": {"market": "JP"}},
+        {"context": json.dumps({"market": "JP"})},
+        {"market": "JP", "context": json.dumps({"market": "JP"})},
+        {"market": "JP", "context": {"market": "CN"}},
+    ],
+)
+async def test_public_research_overview_and_saved_runs_keep_owned_sources(
+    research_pg, metadata
+):
     from backend.services.api.routers import research
     from backend.services.api.user_app.middleware.auth import get_current_user
+
+    async with research_pg() as session:
+        await session.execute(
+            text(
+                "UPDATE qm_user_models SET metadata_json=CAST(:meta AS JSONB) WHERE tenant_id='test' AND user_id='7' AND model_id='jp'"
+            ),
+            {"meta": json.dumps(metadata)},
+        )
+        # An unrelated malformed old-market context must not break the JP
+        # filter or be admitted as a Japanese model.
+        await session.execute(
+            text(
+                "UPDATE qm_user_models SET metadata_json=CAST(:meta AS JSONB) WHERE tenant_id='test' AND model_id='cn'"
+            ),
+            {"meta": json.dumps({"market": "CN", "context": "not JSON"})},
+        )
+        await session.commit()
 
     app = FastAPI()
     app.include_router(research.router)
@@ -296,3 +335,73 @@ async def test_public_research_overview_and_saved_runs_keep_owned_sources(resear
             foreign.json()["data"]["items"] == []
             and foreign.json()["data"]["summary"]["total"] == 0
         )
+
+
+@pytest.mark.skipif(os.getenv("QM_JP_TEST_PG") != "1", reason="UUID PG audit opt-in")
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"market": "JP"},
+        {"context": {"market": "JP"}},
+        {"context": json.dumps({"market": "JP"})},
+        *[
+            {"market": market, "context": context}
+            for market in ["CN", "US", "HK"]
+            for context in [{"market": "JP"}, json.dumps({"market": "JP"})]
+        ],
+    ],
+)
+async def test_public_research_models_recognizes_jp_owned_and_disk_formats(
+    research_pg, metadata, tmp_path, monkeypatch
+):
+    import glob
+    from backend.services.api.routers import research
+    from backend.services.api.user_app.middleware.auth import get_current_user
+
+    async with research_pg() as session:
+        await session.execute(
+            text(
+                "UPDATE qm_user_models SET metadata_json=CAST(:meta AS JSONB) WHERE tenant_id='test' AND model_id='jp'"
+            ),
+            {"meta": json.dumps(metadata)},
+        )
+        await session.execute(
+            text(
+                "UPDATE qm_user_models SET metadata_json=CAST(:meta AS JSONB) WHERE tenant_id='test' AND model_id='cn'"
+            ),
+            {"meta": json.dumps({"market": "CN", "context": "not JSON"})},
+        )
+        await session.commit()
+    disk = tmp_path / "disk-jp"
+    disk.mkdir()
+    (disk / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    monkeypatch.setattr(glob, "glob", lambda pattern: [str(disk / "metadata.json")])
+    app = FastAPI()
+    app.include_router(research.router)
+    app.dependency_overrides[get_current_user] = lambda: {
+        "tenant_id": "test",
+        "user_id": "7",
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get("/api/v1/research/models", params={"market": "JP"})
+        assert response.status_code == 200, response.text
+        models = response.json()["data"]["models"]
+        is_jp = metadata.get("market", "JP") == "JP"
+        assert [m["modelId"] for m in models] == (["jp", "disk-jp"] if is_jp else [])
+        if is_jp:
+            assert models[0]["hasInference"] is True
+        response = await client.get("/api/v1/research/models", params={"market": "CN"})
+        assert response.status_code == 200, response.text
+        # Master's non-JP SQL treats an encoded context without a top-level
+        # declaration as CN. This adaptation deliberately preserves that rule.
+        expected = {"cn"}
+        if metadata.get("market") == "CN" or (
+            "market" not in metadata and isinstance(metadata.get("context"), str)
+        ):
+            expected.add("jp")
+        if metadata.get("market") == "CN":
+            expected.add("disk-jp")
+        assert {m["modelId"] for m in response.json()["data"]["models"]} == expected

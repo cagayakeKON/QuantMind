@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from backend.shared.model_metadata import declared_model_market, model_context
 
 # A 股标准费率（2026 年口径）
 _DEFAULT_COMMISSION_RATE = 0.00025  # 佣金，买卖各收
@@ -50,7 +51,8 @@ class CostModel:
         model = cls()
 
         ctx = (meta or {}).get("context")
-        if isinstance(ctx, dict) and str(ctx.get("market") or "").upper() == "JP":
+        if declared_model_market(meta) == "JP":
+            ctx = model_context(meta)
             # Match JP training context defaults and the ordinary JP fee rules.
             model = cls(
                 commission_rate=0.0, min_commission=0.0, stamp_duty=0.0,

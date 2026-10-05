@@ -53,11 +53,16 @@ async def test_ai_pool_never_reads_existing_cn_table_and_filters_real_jp_rows(
     result = await pools.query_pool("SELECT symbol WHERE true", "7", "JP")
     assert {row.symbol for row in result.items} == {"JP72030", "JP216A0"}
     assert result.summary["asOf"] == "2026-09-30"
-    threshold = min(row.metrics["close"] for row in result.items)
+    threshold = min(row.metrics["close"] for row in result.items) - 1
     filtered = await pools.query_pool(
         f"SELECT symbol WHERE close > {threshold}", "7", "JP"
     )
+    assert {row.symbol for row in filtered.items} == {"JP72030", "JP216A0"}
     assert all(row.metrics["close"] > threshold for row in filtered.items)
+    excluded = await pools.query_pool(
+        f"SELECT symbol WHERE close > {threshold + 1}", "7", "JP"
+    )
+    assert excluded.items == []
     sql = await pools.query_pool(
         "SQL: SELECT symbol FROM stock_daily_latest_jp WHERE close > 0", "7", "JP"
     )

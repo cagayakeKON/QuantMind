@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from .trading_cost import limit_threshold
+from backend.shared.model_metadata import declared_model_market, model_context
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +23,7 @@ FORWARD_RETURN_COL = "fwd_return"
 
 
 def _is_jp_model(meta: dict) -> bool:
-    ctx = meta.get("context")
-    return isinstance(ctx, dict) and str(ctx.get("market") or "").upper() == "JP"
+    return declared_model_market(meta) == "JP"
 
 
 def resolve_data_dir(data_dir: Path | str | None, meta: dict) -> Path:
@@ -304,7 +304,7 @@ def load_forward_labels(
                 )
                 frame[FORWARD_RETURN_COL] = forward_price_labels(
                     frame, sessions, horizon, signal_lag_days,
-                    deal_price=str(meta["context"].get("deal_price") or "open"),
+                    deal_price=str(model_context(meta).get("deal_price") or "open"),
                 )
                 frame["trade_date"] = pd.to_datetime(frame["trade_date"]).dt.strftime(
                     "%Y-%m-%d"

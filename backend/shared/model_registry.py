@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import text
+from backend.shared.model_metadata import (
+    declared_model_market,
+    model_context,
+    model_context_market,
+)
 
 from backend.shared.model_paths import (
     models_fallback_production_dir,
@@ -237,6 +242,13 @@ class ModelRegistryService:
         context = (
             metadata.get("context") if isinstance(metadata.get("context"), dict) else {}
         )
+        jp_metadata = {}
+        if (
+            declared_model_market(metadata) == "JP"
+            or model_context_market(metadata) == "JP"
+        ):
+            context = model_context(metadata)
+            jp_metadata = {"market": declared_model_market(metadata)}
         return {
             "model_id": canonical_model_id,
             "dir_name": raw,
@@ -247,6 +259,7 @@ class ModelRegistryService:
             "model_file": self._find_system_model_file(dir_path, metadata),
             "display_name": display_name,
             "metadata_json": {
+                **jp_metadata,
                 "display_name": display_name,
                 "model_type": metadata.get("model_type")
                 or metadata.get("framework")
@@ -522,6 +535,11 @@ class ModelRegistryService:
         if market:
             market_clause = " AND COALESCE(metadata_json->>'market', 'CN') = :market"
             params["market"] = str(market).upper().strip()
+            if params["market"] == "JP":
+                # There is one SQL default per owner. Interpret its JP metadata
+                # through the registry parser, including legacy JSON context.
+                market_clause = ""
+                params.pop("market")
         async with get_session(read_only=True) as session:
             row = (
                 (
@@ -543,7 +561,11 @@ class ModelRegistryService:
                 .mappings()
                 .first()
             )
-        return self._row_to_model(dict(row)) if row else None
+        model = self._row_to_model(dict(row)) if row else None
+        if str(market or "").upper().strip() == "JP" and model:
+            if declared_model_market(model.get("metadata_json")) != "JP":
+                return None
+        return model
 
     async def set_default_model(
         self, *, tenant_id: str, user_id: str, model_id: str
@@ -1256,6 +1278,13 @@ class ModelRegistryService:
         context = (
             metadata.get("context") if isinstance(metadata.get("context"), dict) else {}
         )
+        jp_metadata = {}
+        if (
+            declared_model_market(metadata) == "JP"
+            or model_context_market(metadata) == "JP"
+        ):
+            context = model_context(metadata)
+            jp_metadata = {"market": declared_model_market(metadata)}
         return {
             "model_id": canonical_model_id,
             "dir_name": raw,
@@ -1266,6 +1295,7 @@ class ModelRegistryService:
             "model_file": self._find_system_model_file(dir_path, metadata),
             "display_name": display_name,
             "metadata_json": {
+                **jp_metadata,
                 "display_name": display_name,
                 "model_type": metadata.get("model_type")
                 or metadata.get("framework")

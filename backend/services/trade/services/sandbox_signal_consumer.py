@@ -278,9 +278,16 @@ class SandboxSignalConsumer:
 
         # 计算需要交易的量
         delta = target_volume - current_volume
-        if abs(delta) < lot_size:
+        jp_full_close = jp_symbol and current_volume > 0 and target_volume == 0
+        if abs(delta) < lot_size and not jp_full_close:
             logger.debug(
                 "[SandboxSignalConsumer] %s 调仓量不足 100 股 (delta=%d)，跳过",
+                symbol, delta,
+            )
+            return
+        if jp_symbol and delta < 0 and not jp_full_close and abs(delta) % lot_size:
+            logger.debug(
+                "[SandboxSignalConsumer] %s 部分卖出数量不是交易单位整数倍 (delta=%d)，跳过",
                 symbol, delta,
             )
             return

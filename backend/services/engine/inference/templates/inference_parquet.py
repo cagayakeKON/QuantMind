@@ -36,6 +36,8 @@ import pickle
 import numpy as np
 import pandas as pd
 
+from backend.shared.model_metadata import inference_model_market
+
 try:
     import lightgbm as lgb
 except ImportError:
@@ -69,7 +71,7 @@ _DEFAULT_DATA_DIR = "/app/db/feature_snapshots"
 
 def _quantdb_reader(meta: dict, data_dir: Path):
     """Open the immutable raw QuantDB source for new direct-read models."""
-    market = str((meta.get("context") or {}).get("market") or "CN").upper()
+    market = inference_model_market(meta)
     if market == "JP":
         if meta.get("data_source") != "quantdb_factors" or meta.get("factor_source") != "l1_factors":
             raise ValueError("JP inference requires the published l1_factors source")
@@ -111,6 +113,8 @@ def parse_args():
     p.add_argument("--data-dir", type=str,
                    default=os.getenv("MODEL_TRAINING_DATA_DIR", _DEFAULT_DATA_DIR),
                    help="训练数据 parquet 目录")
+    p.add_argument("--market", choices=["JP"], default=None,
+                   help="日本市场公共执行器的显式市场声明")
     return p.parse_args()
 
 
@@ -684,6 +688,8 @@ def main():
 
     # 1. 元数据
     meta  = load_metadata(model_dir)
+    if args.market == "JP" and inference_model_market(meta) != "JP":
+        raise ValueError("JP inference requires a Japanese model declaration")
     logger.info("  run_id    : %s", meta.get("run_id", "unknown"))
     logger.info("  features  : %d", len(meta.get("feature_columns") or meta.get("features", [])))
 

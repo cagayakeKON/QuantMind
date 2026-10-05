@@ -89,6 +89,7 @@ async def test_actual_node_probe_deploys_jp_dependency_closure_and_reads_publica
     assert "feature_1" in profile["columns"]
     assert profile["trading_dates"] == ["2026-09-28", "2026-09-29", "2026-09-30"]
     deployed = node.work / "backend_min/backend"
+    assert (deployed / "shared/model_metadata.py").is_file()
     for rel in (
         "services/engine/data_platform/quantjp_hub.py",
         "services/engine/data_platform/jp_labels.py",

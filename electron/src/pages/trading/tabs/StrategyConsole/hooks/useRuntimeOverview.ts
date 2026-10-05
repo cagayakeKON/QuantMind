@@ -76,6 +76,10 @@ export function useRuntimeOverview(
     const fetchingRef = useRef({ status: false, model: false, orders: false });
     const precheckIsJP = market === 'JP';
     const precheckScopeRef = useRef({ isJP: precheckIsJP, fetching: false });
+    const modelScopeRef = useRef({ isJP: precheckIsJP, fetching: false });
+    if (modelScopeRef.current.isJP !== precheckIsJP) {
+        modelScopeRef.current = { isJP: precheckIsJP, fetching: false };
+    }
     const readyRef = useRef<SectionReady>({ status: false, precheck: false, model: false });
     const strategiesFetchingRef = useRef(false);
     statusRef.current = status;
@@ -92,7 +96,10 @@ export function useRuntimeOverview(
         if (precheckScopeRef.current.isJP === precheckIsJP) return;
         precheckScopeRef.current = { isJP: precheckIsJP, fetching: false };
         setPrecheck(null);
-        readyRef.current = { ...readyRef.current, precheck: false };
+        setDefaultModel(null);
+        setLatestRun(null);
+        modelIdRef.current = '';
+        readyRef.current = { ...readyRef.current, precheck: false, model: false };
         setReady(readyRef.current);
     }, [precheckIsJP]);
 
@@ -133,26 +140,32 @@ export function useRuntimeOverview(
     }, [tradingMode, precheckIsJP]);
 
     const loadModelChain = useCallback(async () => {
-        if (fetchingRef.current.model) return;
-        fetchingRef.current.model = true;
+        const scope = modelScopeRef.current;
+        if (scope.fetching) return;
+        scope.fetching = true;
         try {
             const { modelTrainingService } = await import('../../../../../services/modelTrainingService');
+            if (modelScopeRef.current !== scope) return;
+            const requestMarket = marketRef.current;
             let model: UserModelRecord | null = null;
             try {
-                model = await modelTrainingService.getDefaultModel(marketRef.current);
+                model = await modelTrainingService.getDefaultModel(requestMarket);
             } catch (e: unknown) {
-                if ((e as { response?: { status?: number } })?.response?.status !== 404) {
+                if (modelScopeRef.current === scope && (e as { response?: { status?: number } })?.response?.status !== 404) {
                     console.warn('[TopologyConsole] defaultModel failed', e);
                 }
             }
+            if (modelScopeRef.current !== scope) return;
             setDefaultModel(model || null);
             const modelId = model?.model_id || '';
             modelIdRef.current = modelId;
             if (modelId) {
                 try {
                     const run = await modelTrainingService.getLatestInferenceRun(modelId);
+                    if (modelScopeRef.current !== scope) return;
                     setLatestRun(run || null);
                 } catch (e) {
+                    if (modelScopeRef.current !== scope) return;
                     console.warn('[TopologyConsole] latestRun failed', e);
                     setLatestRun(null);
                 }
@@ -160,8 +173,10 @@ export function useRuntimeOverview(
                 setLatestRun(null);
             }
         } finally {
-            fetchingRef.current.model = false;
-            markReady('model');
+            if (modelScopeRef.current === scope) {
+                scope.fetching = false;
+                markReady('model');
+            }
         }
     }, []);
 

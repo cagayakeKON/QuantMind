@@ -41,11 +41,11 @@ def setup_files(snapshot, tmp_path, storage, monkeypatch, metadata, symbol):
         {"symbol": [symbol], "trade_date": ["2026-09-28"], "pred": [1.0]}
     ).to_parquet(model / "pred.parquet")
     monkeypatch.setattr(model_paths, "models_production_dir", lambda: models)
-    monkeypatch.setattr(router, "get_local_market_data", lambda market: data)
+    monkeypatch.setattr(router, "get_local_market_data", lambda market="CN": data)
     monkeypatch.setattr(
         router,
         "ReplayAccountManager",
-        lambda session_id, market: ReplayAccountManager(
+        lambda session_id, market="CN": ReplayAccountManager(
             session_id, storage.redis, market=market
         ),
     )
@@ -88,13 +88,26 @@ async def test_explicit_foreign_model_rejected_before_session_or_account_write(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("metadata", [{"context": {"market": "JP"}}, {"market": "JP"}])
+@pytest.mark.parametrize("metadata", [
+    {"context": {"market": "JP"}}, {"market": "JP"},
+    {"context": json.dumps({"market": "JP"})},
+])
+@pytest.mark.parametrize("use_default", [False, True])
 async def test_explicit_jp_model_creates_and_executes_real_signal_replay(
-    snapshot, tmp_path, storage, monkeypatch, metadata
+    snapshot, tmp_path, storage, monkeypatch, metadata, use_default
 ):
     auth, request = setup_files(
         snapshot, tmp_path, storage, monkeypatch, metadata, "JP72030"
     )
+    if use_default:
+        from unittest.mock import AsyncMock
+        from backend.shared.model_registry import model_registry_service
+
+        request.model_id = None
+        monkeypatch.setattr(
+            model_registry_service, "get_default_model",
+            AsyncMock(return_value={"model_id": "selected_model", "metadata_json": metadata}),
+        )
     response = await router.create_session(request, auth, storage.db)
     accounts = ReplayAccountManager(response.session_id, storage.redis, market="JP")
     try:

@@ -45,6 +45,7 @@ from typing import Any, Optional
 import exchange_calendars as xcals
 from sqlalchemy import create_engine, text
 
+from backend.shared.model_metadata import declared_model_market, inference_model_market
 from backend.shared.model_paths import (
     models_fallback_production_dir,
     models_production_dir,
@@ -117,11 +118,11 @@ def _resolve_market_factor_data_dir(meta: dict) -> str:
             market_data_dir, normalize_market,
         )
         market = normalize_market(
-            str((meta.get("context") or {}).get("market") or "CN")
+            inference_model_market(meta)
         )
         return str(market_data_dir(market))
     except Exception:  # noqa: BLE001
-        if str((meta.get("context") or {}).get("market") or "").upper() == "JP":
+        if declared_model_market(meta) == "JP":
             raise
         return _resolve_quantdb_data_dir()
 
@@ -524,7 +525,7 @@ class InferenceScriptRunner:
 
     @staticmethod
     def _resolve_primary_active_data_source(primary_meta: dict[str, object]) -> str:
-        if str((primary_meta.get("context") or {}).get("market") or "").upper() == "JP":
+        if declared_model_market(primary_meta) == "JP":
             return _resolve_market_factor_data_dir(primary_meta)
         data_source = str(primary_meta.get("data_source") or "").lower()
         if data_source == "parquet":
@@ -549,7 +550,7 @@ class InferenceScriptRunner:
             data_dir = Path(
                 publication_data_dir or _resolve_market_factor_data_dir(meta)
             )
-            market = str((meta.get("context") or {}).get("market") or "CN").upper()
+            market = inference_model_market(meta).upper()
             reader = (
                 QuantDBFactorReader(data_dir, market="JP")
                 if market == "JP" else QuantDBFactorReader(data_dir)
@@ -965,7 +966,7 @@ class InferenceScriptRunner:
         """
         script_path = self.primary_model_dir / self.primary_script_name
         primary_meta = self._read_primary_metadata()
-        model_market = str((primary_meta.get("context") or {}).get("market") or "A").upper()
+        model_market = inference_model_market(primary_meta, default="A")
         publication_data_dir = None
         if model_market == "JP":
             from backend.services.engine.data_platform.market_provider import (
@@ -1611,7 +1612,7 @@ class InferenceScriptRunner:
         feature_version = self._resolve_feature_version(model_name)
         # 推理日期默认等于预测日期（兼容旧调用）
         inference_date = data_trade_date or prediction_trade_date
-        model_market = str((self._read_primary_metadata().get("context") or {}).get("market") or "CN").upper()
+        model_market = inference_model_market(self._read_primary_metadata())
         if model_market == "JP" and not publication_data_dir:
             raise ValueError("JP inference persistence requires its pinned publication")
 
@@ -1816,9 +1817,7 @@ class InferenceScriptRunner:
         qm_research_candidate_snapshot。PostgreSQL 对并发 DELETE+INSERT 大量行会
         发生锁竞争甚至卡死，因此把整个写库串行化。推理子进程仍并发执行，仅写库串行。
         """
-        model_market = str(
-            (self._read_primary_metadata().get("context") or {}).get("market") or "CN"
-        ).upper()
+        model_market = inference_model_market(self._read_primary_metadata())
         if model_market == "JP" and not publication_data_dir:
             raise ValueError("JP inference persistence requires its pinned publication")
         prediction_day = date.fromisoformat(prediction_trade_date)
@@ -1951,7 +1950,7 @@ class InferenceScriptRunner:
         # 历史补全与当日推理同源、一次加载；禁止对 ~5000 股逐个打远程行情 Redis
         # （此前单日写库因此卡在 5–7 分钟）。
         _ = raw_symbols  # 保留签名兼容；价格已不再依赖 Redis 前缀键
-        model_market = str((self._read_primary_metadata().get("context") or {}).get("market") or "CN").upper()
+        model_market = inference_model_market(self._read_primary_metadata())
         price_map = (
             _load_close_price_map(
                 inference_date, market="JP", publication_data_dir=publication_data_dir

@@ -101,4 +101,27 @@ describe('useTradeRecords', () => {
         await act(async () => { resolveLate(frame('late', 'US_AAPL')); });
         await waitFor(() => expect(hook.result.current.records[0]?.id).toBe('late'));
     });
+
+    it.each([['CN', 'JP'], ['JP', 'CN']])('切换 %s → %s 后离线重试继续请求当前范围', async (from, to) => {
+        vi.useFakeTimers();
+        const offline = { records: [], isOffline: true, isFallbackToOrders: false };
+        vi.mocked(tradingService.getRecentTrades).mockResolvedValue(offline);
+        const hook = renderHookWithProviders(({ market }) => useTradeRecords({
+            market, tradingMode: 'simulation', autoRefresh: false,
+        }), { initialProps: { market: from } });
+        try {
+            await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+            hook.rerender({ market: to });
+            await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+            expect(tradingService.getRecentTrades).toHaveBeenLastCalledWith(10, 'simulation', to);
+            const beforeRetry = vi.mocked(tradingService.getRecentTrades).mock.calls.length;
+            await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+            expect(vi.mocked(tradingService.getRecentTrades).mock.calls.length).toBeGreaterThan(beforeRetry);
+            expect(tradingService.getRecentTrades).toHaveBeenLastCalledWith(10, 'simulation', to);
+        } finally {
+            hook.unmount();
+            vi.clearAllTimers();
+            vi.useRealTimers();
+        }
+    });
 });

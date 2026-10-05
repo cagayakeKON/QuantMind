@@ -20,6 +20,9 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from backend.shared.inference_coverage import find_inference_gap_dates
+from backend.shared.model_metadata import (
+    declared_model_market, inference_model_market, model_context_market,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +35,8 @@ def _model_market(metadata, storage_path="", market="CN"):
     selected = str(
         context.get("market") or meta.get("market") or market or "CN"
     ).upper()
+    if declared_model_market(meta) == "JP" or model_context_market(meta) == "JP":
+        selected = inference_model_market(meta, default=selected)
     # A missing/stale registry metadata must not enable copied predictions for
     # a model whose actual artifact declares Japanese execution inputs.
     if storage_path:
@@ -39,14 +44,7 @@ def _model_market(metadata, storage_path="", market="CN"):
         if artifact.is_file():
             try:
                 disk = json.loads(artifact.read_text(encoding="utf-8"))
-                if (
-                    str(
-                        (disk.get("context") or {}).get("market")
-                        or disk.get("market")
-                        or ""
-                    ).upper()
-                    == "JP"
-                ):
+                if declared_model_market(disk) == "JP":
                     return "JP"
             except (OSError, ValueError, AttributeError):
                 if selected == "JP":

@@ -98,7 +98,7 @@ export const useTradeRecords = (options: UseTradeRecordsOptions = {}): UseTradeR
         }, delay);
         backoffMsRef.current = Math.min(Math.floor(delay * 1.8), 30000);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [clearRetryTimer]);
+    }, [clearRetryTimer, scopeKey]);
 
     // 获取交易记录
     const fetchData = useCallback(async (params?: { silent?: boolean }) => {

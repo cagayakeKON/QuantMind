@@ -17,6 +17,7 @@ import uuid
 from datetime import date
 from pathlib import Path
 from typing import Any
+from backend.shared.model_metadata import declared_model_market
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -529,7 +530,7 @@ async def create_session(
         metadata = (default_model or {}).get("metadata_json") or {}
         if (
             not isinstance(metadata, dict)
-            or str(metadata.get("market", "CN")).upper() != "JP"
+            or declared_model_market(metadata) != "JP"
             or not (default_model or {}).get("model_id")
         ):
             raise HTTPException(400, "请先选择日本市场模型或设置日本市场默认模型")
@@ -551,13 +552,15 @@ async def create_session(
                 )
             )
             metadata = metadata if isinstance(metadata, dict) else {}
-            context = metadata.get("context")
-            context = context if isinstance(context, dict) else {}
-            declared_market = context.get("market") or metadata.get("market")
-            if str(declared_market or "").strip().upper() != "JP":
+            if declared_model_market(metadata) != "JP":
                 raise HTTPException(400, "日本市场回放必须选择日本市场模型")
 
-    market_data = get_local_market_data(selected_market)
+    # JP is the only added replay market; preserve master CN defaults otherwise.
+    market_data = (
+        get_local_market_data("JP")
+        if selected_market == "JP"
+        else get_local_market_data()
+    )
     # 目录枚举虽已降到毫秒级，仍是同步磁盘 IO，放线程里跑，不占用事件循环
     sessions = await asyncio.to_thread(market_data._sessions)
     if not sessions:
@@ -636,7 +639,11 @@ async def create_session(
     await db.flush()
 
     # 初始化回放账户
-    accounts = ReplayAccountManager(session_id=row.session_id, market=selected_market)
+    accounts = (
+        ReplayAccountManager(session_id=row.session_id, market="JP")
+        if selected_market == "JP"
+        else ReplayAccountManager(session_id=row.session_id)
+    )
     await accounts.init(initial_cash=req.initial_cash)
 
     await db.commit()
@@ -769,11 +776,15 @@ async def propose_day(
         )
 
     market = normalize_market((row.strategy_params or {}).get("market")).value
-    accounts = ReplayAccountManager(session_id=session_id, market=market)
-    runner = ReplayDayRunner(
-        market_data=get_local_market_data(market),
-        match_config=_match_config_from_params(row.strategy_params or {}),
-    )
+    if market == "JP":
+        accounts = ReplayAccountManager(session_id=session_id, market="JP")
+        runner = ReplayDayRunner(
+            market_data=get_local_market_data("JP"),
+            match_config=_match_config_from_params(row.strategy_params or {}),
+        )
+    else:
+        accounts = ReplayAccountManager(session_id=session_id)
+        runner = ReplayDayRunner()
     try:
         out = await runner.propose_day(
             db=db,
@@ -867,9 +878,12 @@ async def step_session(
                 for c in confirmed_in
             ]
         proposals = (row.pending_orders or {}).get("proposals") or []
-        account_data = (
-            await ReplayAccountManager(session_id=session_id, market=market).get() or {}
+        accounts = (
+            ReplayAccountManager(session_id=session_id, market="JP")
+            if market == "JP"
+            else ReplayAccountManager(session_id=session_id)
         )
+        account_data = await accounts.get() or {}
         if market == "JP":
             from backend.services.simulation.jp.corporate_actions import (
                 adjust_replay_splits,
@@ -897,8 +911,12 @@ async def step_session(
     await db.commit()
 
     try:
-        accounts = ReplayAccountManager(session_id=session_id, market=market)
-        runner = ReplayDayRunner(market_data=get_local_market_data(market))
+        if market == "JP":
+            accounts = ReplayAccountManager(session_id=session_id, market="JP")
+            runner = ReplayDayRunner(market_data=get_local_market_data("JP"))
+        else:
+            accounts = ReplayAccountManager(session_id=session_id)
+            runner = ReplayDayRunner()
         cfg = _match_config_from_params(row.strategy_params or {})
         if manual:
             result = await runner.execute_day(
@@ -945,7 +963,9 @@ async def step_session(
         result.rejected = validation_rejected + result.rejected
 
     # 更新游标
-    market_data = get_local_market_data(market)
+    market_data = (
+        get_local_market_data("JP") if market == "JP" else get_local_market_data()
+    )
     sessions = await asyncio.to_thread(market_data._sessions)
     row.cursor_date = row.next_date
     row.sessions_done += 1

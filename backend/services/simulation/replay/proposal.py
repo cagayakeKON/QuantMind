@@ -138,7 +138,7 @@ def validate_confirmed(
     规则（见 docs/replay/REPLAY_R3_R5_PLAN.md）：
     - 必须在提案内，方向一致
     - 数量只能调小，不能调大
-    - 买入向下取整到整手；卖出允许零头（清仓）
+    - 买入向下取整到整手；JP 卖出零头仅允许真实全部清仓
     - 卖出不超可卖量；买入累计不超可用现金（按提案顺序）
     - 止损笔强制执行，用户剔除也加回
     """
@@ -172,7 +172,7 @@ def validate_confirmed(
                 }
             )
             continue
-        # 买入必须整手；卖出允许零头以便清仓
+        # 买入必须整手；JP 卖出在下方按总持仓判断清仓例外。
         unit = (
             int(p.get("trading_unit") or lot_size)
             if StockCodeUtil.is_jp_symbol(sym)
@@ -218,6 +218,14 @@ def validate_confirmed(
                     }
                 )
                 continue
+            if StockCodeUtil.is_jp_symbol(sym):
+                unit = int(p.get("trading_unit") or lot_size)
+                total = float(pos.get("volume", 0))
+                if unit > 0 and qty % unit and qty != total:
+                    rejected.append(
+                        {"symbol": sym, "side": side, "reason": "SELL_NOT_WHOLE_LOT"}
+                    )
+                    continue
             cash_left += qty * px
         else:
             need = qty * px

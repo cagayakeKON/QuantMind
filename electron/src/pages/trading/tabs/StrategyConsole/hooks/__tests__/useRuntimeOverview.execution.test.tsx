@@ -190,4 +190,57 @@ describe('shared runtime overview market requests', () => {
     expect(result.current.precheck).toEqual(precheck);
     expect(result.current.ready.precheck).toBe(true);
   });
+
+  it.each([['CN', 'JP'], ['JP', 'CN']])('releases only the %s model lock when crossing to %s', async (from, to) => {
+    const oldRequest = deferred<any>();
+    const currentRequest = deferred<any>();
+    mocks.model.mockImplementationOnce(() => oldRequest.promise).mockImplementationOnce(() => currentRequest.promise);
+    const { result, rerender } = renderHook(({ market }) => useRuntimeOverview('tenant', '7', 'simulation', market, true), {initialProps:{market:from}});
+    await waitFor(() => expect(mocks.model).toHaveBeenCalledTimes(1));
+    rerender({market:to});
+    await waitFor(() => expect(mocks.model).toHaveBeenCalledTimes(2));
+    await act(async () => { oldRequest.resolve({model_id:'stale-model'}); });
+    expect(result.current.defaultModel).toBeNull();
+    expect(result.current.latestRun).toBeNull();
+    expect(result.current.ready.model).toBe(false);
+    await act(async () => { result.current.refresh(); });
+    expect(mocks.model).toHaveBeenCalledTimes(2);
+    await act(async () => { currentRequest.resolve({model_id:'current-model'}); });
+    await waitFor(() => expect(result.current.defaultModel?.model_id).toBe('current-model'));
+    expect(result.current.latestRun?.run_id).toBe('original-latest');
+    expect(mocks.run).toHaveBeenCalledWith('current-model');
+    expect(mocks.run).not.toHaveBeenCalledWith('stale-model');
+  });
+
+  it.each(['US','HK'])('preserves the shared pending model request and lock on CN to %s', async market => {
+    const pending=deferred<any>();
+    mocks.model.mockImplementationOnce(()=>pending.promise);
+    const {result,rerender}=renderHook(({market})=>useRuntimeOverview('tenant','7','simulation',market,true),{initialProps:{market:'CN'}});
+    await waitFor(()=>expect(mocks.model).toHaveBeenCalledTimes(1));
+    rerender({market});
+    await act(async()=>{result.current.refresh();pending.resolve({model_id:'original-cn-model'});});
+    await waitFor(()=>expect(result.current.ready.model).toBe(true));
+    expect(mocks.model).toHaveBeenCalledTimes(1);
+    expect(result.current.defaultModel?.model_id).toBe('original-cn-model');
+  });
+
+  it('does not accept an old inference run or release the active JP chain lock', async()=>{
+    const oldRun=deferred<any>();
+    const jpRun=deferred<any>();
+    mocks.model.mockResolvedValueOnce({model_id:'cn-model'}).mockResolvedValueOnce({model_id:'jp-model'});
+    mocks.run.mockImplementationOnce(()=>oldRun.promise).mockImplementationOnce(()=>jpRun.promise);
+    const {result,rerender}=renderHook(({market})=>useRuntimeOverview('tenant','7','simulation',market,true),{initialProps:{market:'CN'}});
+    await waitFor(()=>expect(mocks.run).toHaveBeenCalledWith('cn-model'));
+    rerender({market:'JP'});
+    await waitFor(()=>expect(mocks.run).toHaveBeenCalledWith('jp-model'));
+    await act(async()=>{oldRun.resolve({run_id:'stale-cn-run'});});
+    expect(result.current.defaultModel?.model_id).toBe('jp-model');
+    expect(result.current.latestRun).toBeNull();
+    expect(result.current.ready.model).toBe(false);
+    await act(async()=>{result.current.refresh();});
+    expect(mocks.model).toHaveBeenCalledTimes(2);
+    await act(async()=>{jpRun.resolve({run_id:'current-jp-run'});});
+    await waitFor(()=>expect(result.current.ready.model).toBe(true));
+    expect(result.current.latestRun?.run_id).toBe('current-jp-run');
+  });
 });

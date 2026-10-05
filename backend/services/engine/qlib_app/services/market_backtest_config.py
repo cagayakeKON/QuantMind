@@ -100,6 +100,9 @@ def configure_market_exchange(request, exchange):
             "end_time": request.end_date,
             "deal_price": request.deal_price,
             "commission": commission,
+            "sell_commission": (
+                request.sell_cost if request.sell_cost is not None else commission
+            ),
             "min_commission": request.min_commission,
             "stamp_duty": 0.0,
             "transfer_fee": 0.0,

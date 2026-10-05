@@ -9,7 +9,9 @@ from backend.shared.stock_utils import StockCodeUtil
 
 
 def read_model_snapshot(metadata, symbol, asof, feature_columns, *, provenance=None):
-    if str((metadata.get("context") or {}).get("market") or "").upper() != "JP":
+    from backend.shared.model_metadata import declared_model_market
+
+    if declared_model_market(metadata) != "JP":
         raise ValueError("Individual JP attribution requires a JP model")
     source = prediction_source(provenance)
     if not source:

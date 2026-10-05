@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
+from backend.shared.model_metadata import model_context
 
 from .config import PRODUCTION_MODELS_DIR
 from .data_loader import (
@@ -412,7 +413,7 @@ class BacktestService:
 
         evaluated = [r["date"] for r in results]
         label_price = (
-            str(meta["context"].get("deal_price") or "open") if is_jp else "close"
+            str(model_context(meta).get("deal_price") or "open") if is_jp else "close"
         )
         output = {
             "status": "success",

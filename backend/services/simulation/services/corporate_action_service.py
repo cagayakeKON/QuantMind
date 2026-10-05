@@ -171,7 +171,11 @@ class SimulationCorporateActionService:
                 if (getattr(claim, "rowcount", 0) or 0) == 0:
                     continue
                 try:
-                    fresh = await session.get(SimulationCorporateAction, action_id)
+                    fresh = await session.get(
+                        SimulationCorporateAction,
+                        action_id,
+                        **({"populate_existing": True} if market == "JP" else {}),
+                    )
                     if fresh is None:
                         continue
                     cache_publications = {} if market == "JP" else None
@@ -185,6 +189,7 @@ class SimulationCorporateActionService:
                             else {}
                         ),
                     )
+                    completed = market != "JP" or fresh.status == "applied"
                     await session.commit()
                     if market == "JP":
                         for cached_account, positions in cache_publications.values():
@@ -195,7 +200,7 @@ class SimulationCorporateActionService:
                                 user_id=cached_account.user_id,
                                 require_publication=True,
                             )
-                    applied += 1
+                    applied += int(completed)
                 except Exception as exc:
                     try:
                         await session.rollback()
@@ -278,6 +283,8 @@ class SimulationCorporateActionService:
             .scalars()
             .all()
         )
+        legacy_accounts = set()
+        scoped_account_id = account_id
         if jp_split:
             from backend.services.simulation.services.corporate_action_quantjp_sync import (
                 load_price_basis_dates,
@@ -294,17 +301,44 @@ class SimulationCorporateActionService:
             )
             lots = [lot for lot in lots if basis_dates[lot.id] < ex_date]
             from backend.services.simulation.services.legacy_jp_state import (
+                LegacyJPNativeState,
                 read_existing_jp_account,
                 require_standard_account,
             )
 
-            for owner in {str(lot.account_id) for lot in lots}:
+            async def standard_owner(owner):
                 account = await session.get(SimulationAccount, owner)
                 if account:
-                    await require_standard_account(
-                        session, account.tenant_id, account.user_id,
-                        cached=read_existing_jp_account(redis_client, account.tenant_id, account.user_id),
-                    )
+                    try:
+                        await require_standard_account(
+                            session,
+                            account.tenant_id,
+                            account.user_id,
+                            cached=read_existing_jp_account(
+                                redis_client, account.tenant_id, account.user_id
+                            ),
+                        )
+                    except LegacyJPNativeState:
+                        # Only the all-account worker may defer a protected
+                        # owner. Account-scoped settlement must still refuse it.
+                        # This guard only reads state, before any lot mutation.
+                        if scoped_account_id is not None:
+                            raise
+                        legacy_accounts.add(owner)
+                        logger.warning(
+                            "JP split pending legacy read-only account: "
+                            "action=%s account=%s",
+                            action.id,
+                            owner,
+                        )
+                        return False
+                return True
+
+            for owner in dict.fromkeys(str(lot.account_id) for lot in lots):
+                await standard_owner(owner)
+            lots = [
+                lot for lot in lots if str(lot.account_id) not in legacy_accounts
+            ]
 
         if normalized_type == "dividend":
             by_account: dict[str, list[SimulationPositionLot]] = defaultdict(list)
@@ -405,6 +439,9 @@ class SimulationCorporateActionService:
                 ).scalars().all()
                 bonus_applied_accounts = {str(v) for v in _done_rows if v}
             except Exception:
+                if jp_split:
+                    # A failed receipt read is not proof that no split committed.
+                    raise
                 bonus_applied_accounts = set()
             reconcile_accounts = set()
             if jp_split and cache_publications is not None:
@@ -446,11 +483,15 @@ class SimulationCorporateActionService:
                     )
                 touched_accounts.add(str(lot.account_id))
             latest_price = (
-                await cls._load_latest_price(
-                    session, normalized_symbol, as_of=price_date
+                0.0
+                if jp_split and not touched_accounts
+                else (
+                    await cls._load_latest_price(
+                        session, normalized_symbol, as_of=price_date
+                    )
+                    if jp_split
+                    else await cls._load_latest_price(session, normalized_symbol)
                 )
-                if jp_split
-                else await cls._load_latest_price(session, normalized_symbol)
             )
             for account_id in touched_accounts:
                 await cls._refresh_account_projection(
@@ -497,17 +538,11 @@ class SimulationCorporateActionService:
                     )
                 )
             for owner in reconcile_accounts:
+                if owner in legacy_accounts or not await standard_owner(owner):
+                    continue
                 account = await session.get(SimulationAccount, owner)
                 if account is None:
                     continue
-                await require_standard_account(
-                    session,
-                    account.tenant_id,
-                    account.user_id,
-                    cached=read_existing_jp_account(
-                        redis_client, account.tenant_id, account.user_id
-                    ),
-                )
                 # A receipt proves the financial change committed, not that its
                 # derived Redis publication succeeded. Rebuild from PG without
                 # repeating the split or advancing the projection version.
@@ -519,10 +554,31 @@ class SimulationCorporateActionService:
                     cache_publications=cache_publications,
                     reconciled_symbol=normalized_symbol,
                 )
-            cls._merge_action_note(
-                action,
-                f"{normalized_type}_applied_accounts={len(touched_accounts)}",
-            )
+            summary = f"{normalized_type}_applied_accounts={len(touched_accounts)}"
+            if jp_split:
+                if legacy_accounts:
+                    summary += (
+                        f"; jp_legacy_read_only_pending={len(legacy_accounts)},"
+                        f"account={sorted(legacy_accounts)[0]}"
+                    )
+                # Keep the existing bounded audit column usable on every retry.
+                # Full owner details are logged; pending is the durable todo.
+                original = "; ".join(
+                    part
+                    for part in str(action.note or "").split("; ")
+                    if not part.startswith(
+                        (
+                            f"{normalized_type}_applied_accounts=",
+                            "jp_legacy_read_only_pending=",
+                        )
+                    )
+                )
+                room = 255 - len(summary) - 2
+                action.note = (
+                    f"{original[:room]}; {summary}" if original else summary
+                )
+            else:
+                cls._merge_action_note(action, summary)
         elif normalized_type == "rights_issue":
             by_account: dict[str, list[SimulationPositionLot]] = defaultdict(list)
             for lot in lots:
@@ -662,8 +718,8 @@ class SimulationCorporateActionService:
             )
 
         if complete_action:
-            action.status = "applied"
-            action.applied_at = applied_at
+            action.status = "pending" if legacy_accounts else "applied"
+            action.applied_at = None if legacy_accounts else applied_at
 
     @classmethod
     async def _refresh_account_projection(

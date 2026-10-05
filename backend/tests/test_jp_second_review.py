@@ -151,7 +151,10 @@ def test_sdk_worker_uses_standard_qlib_and_simple_broker_close_execution(lab_nat
 
     def on_bar(ctx, bar):
         if str(bar.date.date()) == "2026-09-28":
-            ctx.buy("JP72030", qty=100)
+            ctx.buy(
+                "JP72030",
+                qty=provider.adjusted_trading_unit("JP72030", bar.date),
+            )
 
     result = run_backtest(
         ctx=ctx, provider=provider, user_globals={"setup": setup, "on_bar": on_bar}
@@ -160,7 +163,10 @@ def test_sdk_worker_uses_standard_qlib_and_simple_broker_close_execution(lab_nat
     trade = result.trades[0]
     adjusted = provider.current_bar("JP72030", pd.Timestamp("2026-09-28"))
     assert trade.date == "2026-09-28" and trade.price == adjusted.close.iloc[-1]
-    assert trade.qty == 100
+    factor = provider.history(
+        "JP72030", n=1, field="factor", today=pd.Timestamp("2026-09-28")
+    ).iloc[-1]
+    assert trade.qty * factor == pytest.approx(100)
     assert (
         result.config["currency"] == "JPY"
         and result.config["execution_model"] == "simple"

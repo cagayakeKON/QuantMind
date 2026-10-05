@@ -230,7 +230,9 @@ def test_factor_evaluation_uses_real_templates_and_native_qlib_limit_rules(
         Path(rdagent.__file__).parent / "scenarios/qlib/experiment/factor_template"
     )
     day = pd.Timestamp("2026-09-29")
-    for template in templates.glob("*.yaml"):
+    template_files = sorted(templates.glob("*.yaml"))
+    assert template_files, "RD factor execution must exercise real templates"
+    for template in template_files:
         context = {**CONTEXT, "test_start": "2026-09-29", "test_end": "2026-09-29"}
         config = compile_factor_template(
             template.read_text(), context, data, costs, benchmark="jp_topix"

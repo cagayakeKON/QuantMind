@@ -236,8 +236,9 @@ def test_official_jp_limits_override_pctchange_alias_and_template_matrix(
 
 
 @pytest.mark.parametrize("price", ["open", "close"])
+@pytest.mark.parametrize("declaration", ["context", "top", "json_context"])
 def test_public_admin_api_runs_actual_model_loader_and_service(
-    evaluation_publication, monkeypatch, price
+    evaluation_publication, monkeypatch, price, declaration
 ):
     from backend.services.api.routers.admin import model_management_ops as ops
 
@@ -247,6 +248,11 @@ def test_public_admin_api_runs_actual_model_loader_and_service(
         "context": {**data.meta["context"], "deal_price": price},
         "preprocessing": {"enabled": True, "winsor": True},
     }
+    if declaration == "top":
+        meta["market"] = "JP"
+        meta["context"].pop("market")
+    elif declaration == "json_context":
+        meta["context"] = json.dumps(meta["context"])
     (data.model_dir / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
     monkeypatch.setattr(ops, "MODELS_ROOT", data.production.parent)
     monkeypatch.setattr(ops, "MODELS_PRODUCTION", data.production)
@@ -330,6 +336,28 @@ def test_service_pins_publication_through_current_update(
         service.run_backtest(
             data.model_dir.name, SESSIONS[:2], horizon=1, signal_lag_days=0
         )
+
+
+def test_top_level_jp_without_optional_context_runs_actual_evaluation(
+    evaluation_publication,
+):
+    data = evaluation_publication
+    meta = {**data.meta, "market": "JP"}
+    meta.pop("context")
+    (data.model_dir / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+    labels = data_loader.load_forward_labels(SESSIONS[:2], 1, data.publication, meta)
+    assert len(labels) > 0
+    result = BacktestService(data.production).run_backtest(
+        data.model_dir.name, SESSIONS[:2], horizon=1
+    )
+    assert result["status"] == "success", result
+    assert result["jp_data_version"] == data.publication.name
+    assert "fwd_return = open[" in result["label_definition"]
+    assert (
+        result["metrics"]["cost_model"] == CostModel.resolve({"market": "JP"}).as_dict()
+    )
+    assert result["metrics"]["cost_model"]["stamp_duty"] == 0
+    assert result["metrics"]["cost_model"]["min_commission"] == 0
 
 
 def test_jp_fee_defaults_context_then_override():

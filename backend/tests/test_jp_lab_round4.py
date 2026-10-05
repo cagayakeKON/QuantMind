@@ -83,7 +83,7 @@ def test_position_holding_days_counts_sessions_not_calendar_days(native):
     ctx.commission = ctx.slippage = 0
     broker = SimpleBroker(ctx, provider, 100000)
     ctx._attach(data_provider=provider, broker=broker, cash=100000)
-    broker.process_day(pd.Timestamp(DAYS[0]), [OrderIntent(symbol="JP72030", side="buy", qty=100)])
+    broker.process_day(pd.Timestamp(DAYS[0]), [OrderIntent(symbol="JP72030", side="buy", weight=0.2)])
     broker.process_day(pd.Timestamp(DAYS[2]), [])
     assert ctx.position("JP72030").holding_days == 1
 

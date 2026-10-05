@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from datetime import date
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -59,11 +60,21 @@ def test_legacy_pred_reader_retains_numeric_matching_and_ranking(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_jp_default_lookup_uses_existing_market_argument(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"market": "JP"},
+        {"context": {"market": "JP"}},
+        {"context": json.dumps({"market": "JP"})},
+    ],
+)
+async def test_jp_default_lookup_uses_existing_market_argument(
+    tmp_path, monkeypatch, metadata
+):
     record = {
         "model_id": "jp-default",
         "storage_path": str(tmp_path),
-        "metadata_json": {"market": "JP"},
+        "metadata_json": dict(metadata),
     }
     lookup = AsyncMock(return_value=record)
 
@@ -93,8 +104,16 @@ async def test_jp_default_lookup_uses_existing_market_argument(tmp_path, monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"market": "JP"},
+        {"context": {"market": "JP"}},
+        {"context": json.dumps({"market": "JP"})},
+    ],
+)
 async def test_shared_history_route_keeps_jp_identity_and_model_options(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, metadata
 ):
     pd.DataFrame(
         {
@@ -106,7 +125,7 @@ async def test_shared_history_route_keeps_jp_identity_and_model_options(
     record = {
         "model_id": "jp-default",
         "storage_path": str(tmp_path),
-        "metadata_json": {"market": "JP"},
+        "metadata_json": dict(metadata),
     }
     defaults = AsyncMock(return_value=record)
     options = AsyncMock(return_value=[record])

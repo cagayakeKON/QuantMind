@@ -19,8 +19,16 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("original_market", ["CN", "HK", "US"])
+@pytest.mark.parametrize(
+    "jp_metadata",
+    [
+        {"market": "JP"},
+        {"context": {"market": "JP"}},
+        {"context": json.dumps({"market": "JP"})},
+    ],
+)
 async def test_jp_default_switch_and_archive_use_original_protocol(
-    monkeypatch, tmp_path, original_market
+    monkeypatch, tmp_path, original_market, jp_metadata
 ):
     schema = "jp_defaults_test_" + uuid.uuid4().hex
     url = DatabaseConfig().get_master_url()
@@ -50,11 +58,12 @@ async def test_jp_default_switch_and_archive_use_original_protocol(
                 INSERT INTO qm_user_models (tenant_id, user_id, model_id, status, metadata_json, is_default)
                 VALUES ('tenant-test', 'owner', 'cn', 'ready', CAST(:original AS JSONB), TRUE),
                        ('tenant-test', 'owner', 'jp-one', 'ready', CAST(:stale AS JSONB), FALSE),
-                       ('tenant-test', 'owner', 'jp-two', 'ready', '{"market":"JP"}', FALSE)
+                       ('tenant-test', 'owner', 'jp-two', 'ready', CAST(:second AS JSONB), FALSE)
             """),
                 {
                     "original": json.dumps({"market": original_market}),
                     "stale": json.dumps({"market": "JP", "market_default": True}),
+                    "second": json.dumps(jp_metadata),
                 },
             )
         params = {"tenant_id": "tenant-test", "user_id": "owner"}
@@ -65,10 +74,19 @@ async def test_jp_default_switch_and_archive_use_original_protocol(
             selected = await service.set_default_model(**params, model_id=mid)
             assert selected["is_default"]
             assert (await service.get_default_model(**params))["model_id"] == mid
-            assert (
-                await service.get_default_model(**params, market=original_market)
-                is None
+            original_lookup = await service.get_default_model(
+                **params, market=original_market
             )
+            if (
+                original_market == "CN"
+                and mid == "jp-two"
+                and "market" not in jp_metadata
+            ):
+                # Master's CN SQL filter ignores context and treats a missing
+                # top-level market as CN. Only the new JP lookup is extended.
+                assert original_lookup["model_id"] == mid
+            else:
+                assert original_lookup is None
             assert (await service.get_default_model(**params, market="JP"))[
                 "model_id"
             ] == mid
@@ -135,6 +153,26 @@ async def test_jp_default_switch_and_archive_use_original_protocol(
         assert (await service.get_default_model(**params, market="JP"))[
             "is_default"
         ] is True
+        # A system artifact uses the same SQL default and owned materialization,
+        # including both legal JP market metadata formats.
+        production = tmp_path / "production"
+        system = production / "jp-system"
+        system.mkdir(parents=True)
+        (system / "metadata.json").write_text(json.dumps(jp_metadata), encoding="utf-8")
+        monkeypatch.setattr(service, "production_models_root", production)
+        materialized = await service.set_default_model(
+            **params, model_id="sys-jp-system"
+        )
+        assert materialized["is_default"] is True
+        resolved = await service.get_default_model(**params, market="JP")
+        assert resolved["model_id"] == "sys-jp-system"
+        assert registry.declared_model_market(resolved["metadata_json"]) == "JP"
+        async with get_session(read_only=True) as db:
+            assert (
+                await db.execute(
+                    text("SELECT model_id FROM qm_user_models WHERE is_default")
+                )
+            ).scalars().all() == ["sys-jp-system"]
     finally:
         if scoped:
             await scoped.dispose()

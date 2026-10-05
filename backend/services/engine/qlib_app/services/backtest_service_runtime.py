@@ -1591,6 +1591,16 @@ class QlibBacktestServiceRuntimeMixin(QlibBacktestServiceQueryMixin):
     def _infer_model_market(model: dict) -> str:
         """从模型元数据中推断市场（CN/HK/US/CRYPTO）。"""
         meta = model.get("metadata_json") or {}
+        from backend.shared.model_metadata import (
+            declared_model_market,
+            model_context_market,
+        )
+
+        if (
+            declared_model_market(meta) == "JP"
+            or model_context_market(meta) == "JP"
+        ):
+            return declared_model_market(meta)
         if isinstance(meta, str):
             try:
                 import json

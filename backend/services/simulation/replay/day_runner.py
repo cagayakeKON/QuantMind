@@ -808,6 +808,7 @@ class ReplayDayRunner:
 
         side = order.side.lower()
         available_volume = None
+        total_volume = None
         # 卖出前抓取移动加权成本与首次买入日 —— apply_fill 之后 Lua 可能删掉持仓
         avg_cost_before: float | None = None
         holding_days: int | None = None
@@ -815,6 +816,7 @@ class ReplayDayRunner:
             account_data = await accounts.get() or {}
             pos = (account_data.get("positions") or {}).get(order.symbol)
             if pos:
+                total_volume = float(pos.get("volume", 0))
                 avail = pos.get("available_volume")
                 available_volume = (
                     float(pos.get("volume", 0)) if avail is None else float(avail)
@@ -829,6 +831,7 @@ class ReplayDayRunner:
             bar=bar,
             cfg=cfg,
             available_volume=available_volume,
+            total_volume=total_volume,
         )
         if not mr.success:
             result.rejected.append(

@@ -15,6 +15,7 @@ from backend.services.live_trading.services.signal_readiness_service import (
     signal_readiness_service,
 )
 from backend.shared.model_paths import models_production_dir
+from backend.shared.model_metadata import declared_model_market
 from backend.shared.trade_redis_keys import (
     pick_first_matching_key,
     trade_agent_heartbeat_key_candidates,
@@ -455,7 +456,7 @@ async def run_trading_readiness_precheck(
                 metadata = default_model.get("metadata_json") or {}
                 if isinstance(metadata, str):
                     metadata = json.loads(metadata)
-                model_configured = str(metadata.get("market") or "CN").upper() == "JP"
+                model_configured = declared_model_market(metadata) == "JP"
             checks.append(
                 _build_check(
                     "default_model_configured",

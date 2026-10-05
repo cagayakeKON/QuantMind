@@ -91,6 +91,8 @@ def match_order(
     bar: DailyBar,
     cfg: MatchConfig,
     available_volume: float | None = None,
+    *,
+    total_volume: float | None = None,
 ) -> MatchResult:
     """对单笔订单执行 A 股撮合规则。
 
@@ -100,6 +102,7 @@ def match_order(
         bar: 当日行情（不复权）
         cfg: 撮合参数
         available_volume: T+1 可卖量（仅 sell 时需要）
+        total_volume: 总持仓量；JP 零头清仓必须显式提供，不能用可卖量推断
     """
     # ── 停牌 ──
     if bar.suspended:
@@ -138,7 +141,10 @@ def match_order(
         if fill_qty <= 0:
             return MatchResult(success=False, reason="BELOW_LOT_SIZE")
     else:
-        # 卖出允许清仓零头（不满一手也可以卖完）
+        # JP 仅真实全部清仓可卖零头；可卖量可能只是总持仓的一部分。
+        if is_jp and quantity % lot_size and quantity != total_volume:
+            return MatchResult(success=False, reason="SELL_NOT_WHOLE_LOT")
+        # 其余市场沿用既有零头卖出规则。
         fill_qty = quantity
 
     # ── 成交价 + 滑点 ──
